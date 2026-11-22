@@ -13,8 +13,8 @@
 // [Capture.QUICFromReaderAt]) to read bounded container metadata, packet
 // headers, flows, and handshake records from an [io.ReaderAt] without loading
 // large captures into memory.
-// These functions return a container snapshot ([Capture]) that retains no
-// reference to the input. Inspect [Capture.FileSize], [Capture.DeclaredExtent],
+// [New], [NewWithLength], [Open], and [NewFromReaderAt] return a [Capture]
+// that retains no reference to the input. Inspect [Capture.FileSize], [Capture.DeclaredExtent],
 // [Capture.InputTruncated], and [Capture.Anomalies] to check whether the
 // capture is truncated or contains structural anomalies.
 //
