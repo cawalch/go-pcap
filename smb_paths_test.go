@@ -226,3 +226,62 @@ func TestSMBCommandOffsets(t *testing.T) {
 		}
 	}
 }
+
+func TestSMBStreamSkipsSMB1NegotiateOversizedReadAndNonFileNTLM(t *testing.T) {
+	// 1. SMB1 multi-protocol NEGOTIATE followed by NetBIOS keep-alive, an oversized (>64 KiB)
+	//    SMB2 WRITE frame, and finally a CREATE request with a non-8-byte-aligned NameOffset (122).
+	smb1Neg := smbSessionFrame(append([]byte{0xff, 'S', 'M', 'B', 0x72}, make([]byte, 32)...))
+	keepAlive := []byte{0x85, 0x00, 0x00, 0x00}
+
+	oversizedWrite := make([]byte, MaxSMB2PacketBytes+128)
+	copy(oversizedWrite, smb2Magic)
+	binary.LittleEndian.PutUint16(oversizedWrite[4:], 64)
+	binary.LittleEndian.PutUint16(oversizedWrite[12:], 0x0009) // SMB2 WRITE
+	// Embed an NTLMSSP token inside the WRITE payload; it must NOT trigger HasNTLM.
+	copy(oversizedWrite[64+48:], buildSMB2SessionSetupNTLMChallenge()[4+64+8:])
+	// Also test a small SMB2 WRITE (< MaxSMB2PacketBytes) containing NTLMSSP bytes in file data.
+	smallWrite := make([]byte, 64+48+64)
+	copy(smallWrite, smb2Magic)
+	binary.LittleEndian.PutUint16(smallWrite[4:], 64)
+	binary.LittleEndian.PutUint16(smallWrite[12:], 0x0009) // SMB2 WRITE
+	copy(smallWrite[64+48:], buildSMB2SessionSetupNTLMChallenge()[4+64+8:])
+
+	createReq := smbNameRequest(SMB2CommandCreate, "nonaligned.txt")
+	// Shift NameOffset from 120 to 122 (2-byte aligned, not 8-byte aligned).
+	createUnaligned := append(append(bytes.Clone(createReq[:120]), 0, 0), createReq[120:]...)
+	binary.LittleEndian.PutUint16(createUnaligned[64+44:], 122)
+
+	var stream bytes.Buffer
+	stream.Write(smb1Neg)
+	stream.Write(keepAlive)
+	stream.Write(smbSessionFrame(oversizedWrite))
+	stream.Write(smbSessionFrame(smallWrite))
+	stream.Write(smbSessionFrame(createUnaligned))
+
+	rawStream := stream.Bytes()
+	var frames [][]byte
+	seq := uint32(1)
+	for off := 0; off < len(rawStream); off += 1400 {
+		end := min(off+1400, len(rawStream))
+		frames = append(frames, buildEthernetIPv4TCPFrame([4]byte{10, 0, 0, 5}, [4]byte{10, 0, 0, 1}, 51000, 445, seq, 1, TCPFlagPSH|TCPFlagACK, rawStream[off:end]))
+		seq += uint32(end - off)
+	}
+	raw := buildClassicPCAP(binary.LittleEndian, false, LinkTypeEthernet, 65535, frames)
+	c, err := New(raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	recs, err := c.SMB(raw)
+	if err != nil {
+		t.Fatalf("Capture.SMB() error = %v", err)
+	}
+	if len(recs) != 2 {
+		t.Fatalf("Capture.SMB() len = %d, want 2 (%+v)", len(recs), recs)
+	}
+	if recs[0].Message.Command != 0x0009 || recs[0].Message.HasNTLM {
+		t.Fatalf("small WRITE rec = %+v, want HasNTLM=false", recs[0].Message)
+	}
+	if recs[1].Message.Command != SMB2CommandCreate || recs[1].Message.FileName != "nonaligned.txt" {
+		t.Fatalf("CREATE rec = %+v, want FileName=nonaligned.txt", recs[1].Message)
+	}
+}

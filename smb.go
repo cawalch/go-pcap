@@ -182,9 +182,6 @@ func parseSMBCommand(buf []byte) (SMB2Message, []byte, error) {
 				return SMB2Message{}, rest, fmt.Errorf("%w: invalid CREATE request", ErrInvalidSMB)
 			}
 			if binary.LittleEndian.Uint16(body[46:48]) != 0 {
-				if binary.LittleEndian.Uint16(body[44:46])%8 != 0 {
-					return SMB2Message{}, rest, fmt.Errorf("%w: unaligned CREATE name", ErrInvalidSMB)
-				}
 				var err error
 				msg.FileName, err = smbRequestName(buf, body[44:48], 120)
 				if err != nil {
@@ -201,10 +198,12 @@ func parseSMBCommand(buf []byte) (SMB2Message, []byte, error) {
 		}
 	}
 
-	if ntlmIdx := bytes.Index(body, ntlmsspSig); ntlmIdx >= 0 {
-		if ntlm, err := ParseNTLMSSP(body[ntlmIdx:]); err == nil {
-			msg.NTLM = ntlm
-			msg.HasNTLM = true
+	if command == SMB2CommandNegotiate || command == SMB2CommandSessionSetup {
+		if ntlmIdx := bytes.Index(body, ntlmsspSig); ntlmIdx >= 0 {
+			if ntlm, err := ParseNTLMSSP(body[ntlmIdx:]); err == nil {
+				msg.NTLM = ntlm
+				msg.HasNTLM = true
+			}
 		}
 	}
 
@@ -373,11 +372,37 @@ func extractSMB2FromStream(
 	records *[]SMB2Record,
 ) error {
 	for len(stream) >= 4 {
-		frame, rest, err := splitSMBFrame(stream)
-		if err != nil || (!bytes.HasPrefix(frame, smb2Magic) && !bytes.HasPrefix(frame, smb3TransformMagic)) {
-			break
+		var frame []byte
+		switch stream[0] {
+		case 0x85:
+			// NetBIOS Session Keep-Alive (4-byte header, zero payload).
+			if stream[1] != 0 || stream[2] != 0 || stream[3] != 0 {
+				return nil
+			}
+			stream = stream[4:]
+			continue
+		case 0x00:
+			n := int(stream[1])<<16 | int(stream[2])<<8 | int(stream[3])
+			if n > len(stream)-4 {
+				return nil
+			}
+			frame = stream[4 : 4+n]
+			stream = stream[4+n:]
+			if n > MaxSMB2PacketBytes {
+				// Skip oversized data frames (e.g. 64 KiB+ READ/WRITE) without aborting the flow.
+				continue
+			}
+			if !bytes.HasPrefix(frame, smb2Magic) && !bytes.HasPrefix(frame, smb3TransformMagic) {
+				// Skip SMB1 Negotiate (\xffSMB), SMB3 compression (\xfcSMB), etc.
+				continue
+			}
+		default:
+			if !bytes.HasPrefix(stream, smb2Magic) && !bytes.HasPrefix(stream, smb3TransformMagic) {
+				return nil
+			}
+			frame = stream
+			stream = nil
 		}
-		stream = rest
 		for len(frame) > 0 {
 			msg, next, err := parseSMBCommand(frame)
 			frame = next
