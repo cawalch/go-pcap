@@ -15,8 +15,9 @@ import (
 // LiveCapture reads live packets from an OS network interface using standard
 // library syscalls (/dev/bpf* on macOS).
 type LiveCapture struct {
-	statsMu   sync.Mutex // serializes Stats accumulation
+	statsMu   sync.Mutex // serializes Stats accumulation and closed state
 	stats     LiveStats
+	closed    bool
 	file      *os.File
 	ifaceName string
 	linkType  LinkType

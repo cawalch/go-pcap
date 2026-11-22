@@ -177,19 +177,26 @@ func (lc *LiveCapture) ReadPacket() (PacketRecord, []byte, error) {
 		return PacketRecord{}, nil, ErrInvalidHeader
 	}
 	defer lc.releaseFD()
+	if len(lc.buf) == 0 {
+		return PacketRecord{}, nil, ErrInvalidHeader
+	}
+	wsaBuf := syscall.WSABuf{
+		Len: uint32(len(lc.buf)),
+		Buf: &lc.buf[0],
+	}
 	for {
 		if lc.isClosed() {
 			return PacketRecord{}, nil, ErrInvalidHeader
 		}
-		n, _, err := syscall.Recvfrom(fd, lc.buf, 0)
-		if err != nil {
+		var n, flags uint32
+		if err := syscall.WSARecv(fd, &wsaBuf, 1, &n, &flags, nil, nil); err != nil {
 			return PacketRecord{}, nil, err
 		}
-		if n <= 0 {
+		if n == 0 {
 			continue
 		}
 		pkt := lc.buf[:n]
-		capLen := uint32(n)
+		capLen := n
 		if len(lc.filter) > 0 {
 			snap, ok := EvalBPF(lc.filter, pkt)
 			if !ok || snap == 0 {
@@ -207,7 +214,7 @@ func (lc *LiveCapture) ReadPacket() (PacketRecord, []byte, error) {
 			LinkType:      lc.linkType,
 			TimestampNs:   time.Now().UnixNano(),
 			CaptureLen:    capLen,
-			OriginalLen:   uint32(n),
+			OriginalLen:   n,
 			PayloadOffset: 0,
 			PayloadLength: int64(capLen),
 		}
@@ -217,7 +224,8 @@ func (lc *LiveCapture) ReadPacket() (PacketRecord, []byte, error) {
 }
 
 // Close closes the underlying Windows raw socket handle and cancels any
-// blocked ReadPacket call without releasing the handle while a read is active.
+// blocked ReadPacket call while keeping the handle valid across cancellation
+// and active reads.
 func (lc *LiveCapture) Close() error {
 	if lc == nil {
 		return nil
@@ -234,8 +242,11 @@ func (lc *LiveCapture) Close() error {
 		lc.mu.Unlock()
 		return syscall.Closesocket(fd)
 	}
+	// Hold a reference across CancelIoEx so the last reader cannot close fd before cancellation runs.
+	lc.refs++
 	lc.mu.Unlock()
 	_, _, _ = procCancelIoEx.Call(uintptr(fd), 0)
+	lc.releaseFD()
 	return nil
 }
 

@@ -16,6 +16,9 @@ func (lc *LiveCapture) Stats() (LiveStats, error) {
 	}
 	lc.statsMu.Lock()
 	defer lc.statsMu.Unlock()
+	if lc.closed {
+		return LiveStats{}, ErrInvalidHeader
+	}
 	rawConn, err := lc.file.SyscallConn()
 	if err != nil {
 		if errors.Is(err, os.ErrClosed) {
@@ -28,7 +31,7 @@ func (lc *LiveCapture) Stats() (LiveStats, error) {
 	if err := rawConn.Control(func(fd uintptr) {
 		delta, deltaErr = lc.statsDelta(int(fd))
 	}); err != nil {
-		if errors.Is(err, os.ErrClosed) {
+		if lc.closed || errors.Is(err, os.ErrClosed) {
 			return LiveStats{}, ErrInvalidHeader
 		}
 		return LiveStats{}, err
@@ -47,6 +50,14 @@ func (lc *LiveCapture) Close() error {
 	if lc == nil || lc.file == nil {
 		return nil
 	}
+	lc.statsMu.Lock()
+	if lc.closed {
+		lc.statsMu.Unlock()
+		return nil
+	}
+	lc.closed = true
+	lc.statsMu.Unlock()
+
 	err := lc.file.Close()
 	if errors.Is(err, os.ErrClosed) {
 		return nil

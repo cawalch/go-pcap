@@ -48,6 +48,10 @@ func TestLiveCaptureConcurrentCloseUnblocksReadPacket(t *testing.T) {
 	if err := lc.Close(); err != nil {
 		t.Fatalf("second Close() error = %v", err)
 	}
+	// Stats after Close must return ErrInvalidHeader.
+	if _, err := lc.Stats(); !errors.Is(err, ErrInvalidHeader) {
+		t.Fatalf("Stats() after Close() error = %v, want ErrInvalidHeader", err)
+	}
 
 	select {
 	case readErr := <-done:

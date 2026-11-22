@@ -18,8 +18,9 @@ const LinkTypeUnknown LinkType = 0xffff
 // LiveCapture reads live packets from an OS network interface using standard
 // library AF_PACKET syscalls on Linux.
 type LiveCapture struct {
-	statsMu   sync.Mutex // serializes Stats accumulation
+	statsMu   sync.Mutex // serializes Stats accumulation and closed state
 	stats     LiveStats
+	closed    bool
 	file      *os.File
 	ifaceName string
 	linkType  LinkType
