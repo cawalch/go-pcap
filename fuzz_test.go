@@ -151,7 +151,10 @@ func FuzzDecryptQUICInitial(f *testing.F) {
 	f.Add([]byte{0xc0, 0x00, 0x00, 0x00, 0x01, 0x08, 1, 2, 3, 4, 5, 6, 7, 8, 0x00, 0x00, 0x14})
 
 	f.Fuzz(func(t *testing.T, data []byte) {
-		_, _ = ParseQUICInitialPacket(data)
+		hdr, err := ParseQUICInitialPacket(data)
+		if err == nil && (hdr.PayloadOffset <= 0 || hdr.PacketLength > len(data) || hdr.PayloadLength < 20 || hdr.PacketLength-hdr.PayloadOffset != hdr.PayloadLength) {
+			t.Fatalf("invalid decoded packet bounds: %+v (input %d)", hdr, len(data))
+		}
 		_, _ = DecryptQUICInitial([][]byte{data})
 	})
 }

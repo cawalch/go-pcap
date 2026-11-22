@@ -18,11 +18,8 @@ import (
 	"time"
 )
 
-// TestRFC9001AppendixAClientInitialVector verifies QUIC v1 Initial key derivation,
-// header-protection unmasking, AES-128-GCM decryption, CRYPTO frame extraction,
-// and TLS 1.3 ClientHello + JA4 fingerprinting against the official RFC 9001
-// Appendix A.1 and A.2 test vectors, as well as FoxIO JA4+ edge cases.
-func TestRFC9001AppendixAClientInitialVector(t *testing.T) {
+// Check the published IV and a locally encrypted ClientHello variant.
+func TestQUICInitialIVAndModifiedClientHello(t *testing.T) {
 	dcid, _ := hex.DecodeString("8394c8f03e515708")
 	keys, err := deriveQUICInitialKeys(dcid, QUICVersion1, true)
 	if err != nil {
@@ -33,9 +30,8 @@ func TestRFC9001AppendixAClientInitialVector(t *testing.T) {
 		t.Fatalf("RFC 9001 A.1 client IV = %x, want %x", keys.iv, wantIV)
 	}
 
-	// RFC 9001 Appendix A.2 plaintext CRYPTO frame containing the 237-byte TLS 1.3 ClientHello
-	// (0x01 0x00 0x00 0xed ... with SNI "example.org" and ALPN "hq-interop").
-	const rfc9001ClientHelloHandshakeHex = "" +
+	// Modified from the RFC handshake to use example.org and hq-interop.
+	const modifiedHelloHex = "" +
 		"010000ea0303ebf8fa56f12939b9584a3896472ec40bb863cfd3e86804fe3a47" +
 		"f06a2b69484c00000413011302010000bd00000010000e00000b6578616d706c" +
 		"652e6f7267ff01000100000a00080006001d001700180010000d000b0a68712d" +
@@ -45,24 +41,21 @@ func TestRFC9001AppendixAClientInitialVector(t *testing.T) {
 		"ffffffffffff05048000ffff07048000ffff0801100104800075300901100f08" +
 		"8394c8f03e51570806048000ffff"
 
-	chHandshake, err := hex.DecodeString(rfc9001ClientHelloHandshakeHex)
+	chHandshake, err := hex.DecodeString(modifiedHelloHex)
 	if err != nil {
-		t.Fatalf("hex.DecodeString(rfc9001ClientHelloHandshakeHex): %v", err)
+		t.Fatalf("hex.DecodeString(modifiedHelloHex): %v", err)
 	}
 	dgram := buildEncryptedQUICInitialDatagram(t, QUICVersion1, dcid, nil, nil, 2, 0, chHandshake)
 	hs, err := DecryptQUICInitial([][]byte{dgram})
 	if err != nil {
-		t.Fatalf("DecryptQUICInitial(RFC 9001 A.2) error = %v", err)
+		t.Fatalf("DecryptQUICInitial(modified hello) error = %v", err)
 	}
 	if hs.ClientHello.SNI != "example.org" || len(hs.ClientHello.ALPNs) != 1 || hs.ClientHello.ALPNs[0] != "hq-interop" {
-		t.Fatalf("RFC 9001 ClientHello SNI=%q ALPNs=%v", hs.ClientHello.SNI, hs.ClientHello.ALPNs)
+		t.Fatalf("modified ClientHello SNI=%q ALPNs=%v", hs.ClientHello.SNI, hs.ClientHello.ALPNs)
 	}
-	// Verify JA4 part 'a' for "hq-interop" (first='h', last='p') and 9 extensions (0000, ff01, 000a, 0010, 0033, 002b, 000d, 002d, 001c, 0039 -> 10 extensions):
-	wantJA4 := "q13d0210hp_" +
-		truncSHA256Hex12([]byte("1301,1302")) + "_" +
-		truncSHA256Hex12([]byte("000a,000d,001c,002b,002d,0033,0039,ff01_0403,0503,0603,0203,0804,0805,0806"))
+	const wantJA4 = "q13d0210hp_62ed6f6ca7ad_1508530f8893"
 	if hs.ClientHello.JA4 != wantJA4 {
-		t.Fatalf("RFC 9001 ClientHello JA4 = %q, want %q", hs.ClientHello.JA4, wantJA4)
+		t.Fatalf("modified ClientHello JA4 = %q, want %q", hs.ClientHello.JA4, wantJA4)
 	}
 }
 
@@ -300,6 +293,9 @@ func TestPublishedQUICInitialDatagrams(t *testing.T) {
 			hs := records[0].Handshake
 			if hs.Version != tc.version || !hs.HasClientHello || hs.ClientHello.SNI != "example.com" || !slices.Equal(hs.ClientHello.ALPNs, []string{"alpn"}) {
 				t.Fatalf("client: %+v", hs.ClientHello)
+			}
+			if hs.ClientHello.JA4 != "q13d0211an_62ed6f6ca7ad_4d634acda6c0" || hs.ServerHello.JA4S != "q130200_1301_234ea6891581" {
+				t.Fatalf("QUIC fingerprints = %q, %q", hs.ClientHello.JA4, hs.ServerHello.JA4S)
 			}
 			if !hs.HasServerHello || hs.ServerHello.CipherSuite != TLS_AES_128_GCM_SHA256 || hs.ServerHello.NegotiatedVersion != TLSVersion13 {
 				t.Fatalf("server: %+v", hs.ServerHello)

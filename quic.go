@@ -139,7 +139,7 @@ func ParseQUICInitialPacket(datagram []byte) (QUICInitialHeader, error) {
 	}
 
 	remLen, n, ok := ReadQUICVarint(datagram[offset:])
-	if !ok || remLen < 20 || offset+n+int(remLen) > len(datagram) {
+	if !ok || remLen < 20 || remLen > uint64(len(datagram)-offset-n) {
 		return QUICInitialHeader{}, fmt.Errorf("%w: invalid QUIC Initial payload length", ErrInvalidQUIC)
 	}
 	offset += n
