@@ -52,7 +52,9 @@ type TLSClientHello struct {
 	ALPNs              []string
 	SupportedVersions  []uint16
 	SignatureSchemes   []uint16
-	SupportedGroups    []uint16
+	SupportedGroups    []uint16 // Advertised non-GREASE groups in wire order.
+	KeyShareGroups     []uint16 // Offered non-GREASE groups in wire order, capped at MaxTLSExtensions.
+	HasECH             bool     // A nonempty encrypted_client_hello extension was observed.
 	JA4                string
 	Anomalies          TLSAnomalies
 }
@@ -60,18 +62,20 @@ type TLSClientHello struct {
 // TLSServerHello contains the parsed fields and JA4S fingerprint of a TLS
 // ServerHello handshake message.
 type TLSServerHello struct {
-	RecordVersion     uint16
-	HandshakeVersion  uint16
-	NegotiatedVersion uint16
-	Random            [32]byte
-	SessionID         []byte
-	CipherSuite       uint16
-	CompressionMethod uint8
-	Extensions        []uint16
-	ALPN              string
-	SupportedVersion  uint16
-	JA4S              string
-	Anomalies         TLSAnomalies
+	RecordVersion       uint16
+	HandshakeVersion    uint16
+	NegotiatedVersion   uint16
+	Random              [32]byte
+	SessionID           []byte
+	CipherSuite         uint16
+	CompressionMethod   uint8
+	Extensions          []uint16
+	ALPN                string
+	SelectedGroup       uint16 // Server key-share group, or the requested group in a HelloRetryRequest.
+	IsHelloRetryRequest bool   // The random matches the RFC 8446 retry marker.
+	SupportedVersion    uint16
+	JA4S                string
+	Anomalies           TLSAnomalies
 }
 
 // TLSCertificate contains metadata and the JA4X structural fingerprint of a
@@ -349,6 +353,10 @@ func parseTLSClientHelloWithRecordVersion(body []byte, recordVer uint16, isQUIC 
 				parseSignatureAlgorithms(extData, &ch)
 			case TLSExtSupportedGroups:
 				parseSupportedGroups(extData, &ch)
+			case TLSExtKeyShare:
+				ch.KeyShareGroups = appendClientKeyShareGroups(ch.KeyShareGroups, extData)
+			case TLSExtECH:
+				ch.HasECH = ch.HasECH || len(extData) > 0
 			}
 		}
 	}
@@ -460,12 +468,41 @@ func parseSupportedGroups(extData []byte, ch *TLSClientHello) {
 	if listLen%2 != 0 || 2+listLen > len(extData) {
 		return
 	}
-	count := min(listLen/2, MaxTLSExtensions)
-	for i := range count {
-		grp := binary.BigEndian.Uint16(extData[2+i*2 : 2+i*2+2])
-		ch.SupportedGroups = append(ch.SupportedGroups, grp)
+	for i := 2; i < 2+listLen && len(ch.SupportedGroups) < MaxTLSExtensions; i += 2 {
+		grp := binary.BigEndian.Uint16(extData[i : i+2])
+		if !IsGREASE(grp) {
+			ch.SupportedGroups = append(ch.SupportedGroups, grp)
+		}
 	}
 }
+
+// Publish group IDs only after validating the complete vector. Its uint16
+// length bounds the walk, including GREASE entries and entries past the cap.
+func appendClientKeyShareGroups(groups []uint16, data []byte) []uint16 {
+	if len(data) < 2 || int(binary.BigEndian.Uint16(data)) != len(data)-2 {
+		return groups
+	}
+	var offered [MaxTLSExtensions]uint16
+	n := 0
+	for data = data[2:]; len(data) > 0; {
+		if len(data) < 4 {
+			return groups
+		}
+		group := binary.BigEndian.Uint16(data)
+		size := int(binary.BigEndian.Uint16(data[2:]))
+		if size == 0 || size > len(data)-4 {
+			return groups
+		}
+		if n < MaxTLSExtensions-len(groups) && !IsGREASE(group) {
+			offered[n] = group
+			n++
+		}
+		data = data[4+size:]
+	}
+	return append(groups, offered[:n]...)
+}
+
+var helloRetryRandom = sha256.Sum256([]byte("HelloRetryRequest"))
 
 // ParseTLSServerHello parses a raw TLS ServerHello handshake body (excluding the
 // 4-byte handshake header and 5-byte TLS record header) and computes its JA4S
@@ -485,6 +522,7 @@ func parseTLSServerHelloWithRecordVersion(body []byte, recordVer uint16, isQUIC 
 		NegotiatedVersion: hsVer,
 	}
 	copy(sh.Random[:], body[2:34])
+	sh.IsHelloRetryRequest = sh.Random == helloRetryRandom
 
 	offset := 34
 	sidLen := int(body[offset])
@@ -527,6 +565,14 @@ func parseTLSServerHelloWithRecordVersion(body []byte, recordVer uint16, isQUIC 
 
 			sh.Extensions = append(sh.Extensions, extType)
 			switch extType {
+			case TLSExtKeyShare:
+				if sh.IsHelloRetryRequest {
+					if len(extData) == 2 {
+						sh.SelectedGroup = binary.BigEndian.Uint16(extData)
+					}
+				} else if len(extData) > 4 && int(binary.BigEndian.Uint16(extData[2:])) == len(extData)-4 {
+					sh.SelectedGroup = binary.BigEndian.Uint16(extData)
+				}
 			case TLSExtSupportedVersions:
 				if len(extData) == 2 {
 					v := binary.BigEndian.Uint16(extData[0:2])
