@@ -94,6 +94,8 @@ func TestFragmentedUDPDNSAndQUIC(t *testing.T) {
 		t.Fatalf("New() error = %v", err)
 	}
 
+	checkReaderParity(t, raw, cap.DNS, cap.DNSFromReaderAt)
+	checkReaderParity(t, raw, cap.QUIC, cap.QUICFromReaderAt)
 	dnsRecs, err := cap.DNS(raw)
 	if err != nil || len(dnsRecs) != 1 {
 		t.Fatalf("DNS() on fragmented UDP = (%d, %v), want 1", len(dnsRecs), err)
@@ -166,6 +168,8 @@ func TestIPv6FragmentPolicy(t *testing.T) {
 				if err != nil {
 					t.Fatal(err)
 				}
+				checkReaderParity(t, raw, c.DNS, c.DNSFromReaderAt)
+				checkReaderParity(t, raw, c.QUIC, c.QUICFromReaderAt)
 				var n int
 				if kind == "dns" {
 					r, e := c.DNS(raw)

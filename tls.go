@@ -905,6 +905,10 @@ func (c *Capture) TLSWithKeyLog(data []byte, extraKeyLog []byte) ([]TLSRecord, e
 	if err != nil {
 		return nil, err
 	}
+	return c.tlsFromStreams(streams, extraKeyLog)
+}
+
+func (c *Capture) tlsFromStreams(streams []TCPStream, extraKeyLog []byte) ([]TLSRecord, error) {
 	if len(streams) == 0 {
 		return nil, nil
 	}

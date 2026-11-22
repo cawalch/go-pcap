@@ -300,7 +300,7 @@ const (
 	MaxBPFFilterInstructions = 4096
 	DefaultLiveSnapLen       = 65535
 	DefaultLiveBufferSize    = 256 << 10
-	MaxReaderAtScanBytes     = 64 << 20 // 64 MiB per-call ReaderAt payload I/O budget
+	MaxReaderAtScanBytes     = 64 << 20 // 64 MiB per call: flow frame reads or all DNS/TLS/QUIC reads
 
 	// IPv4 / IPv6 defragmentation limits.
 	MaxFragmentGroups           = 1024

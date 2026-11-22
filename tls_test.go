@@ -274,6 +274,7 @@ func TestPCAPNGDSBTLS13DecryptionToHTTP(t *testing.T) {
 		t.Fatalf("New(PCAPNG) error = %v", err)
 	}
 
+	checkReaderParity(t, rawPCAPNG, cap.TLS, cap.TLSFromReaderAt)
 	httpRecords, err := cap.HTTP(rawPCAPNG)
 	if err != nil || len(httpRecords) != 2 {
 		t.Fatalf("cap.HTTP(DSB-decrypted) = (%d, %v), want 2 records", len(httpRecords), err)

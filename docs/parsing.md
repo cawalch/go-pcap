@@ -30,9 +30,21 @@ in order and break when you have enough. `PacketsFromReaderAt` collects a
 packet record slice. `FlowsFromReaderAt` starts with a 256-byte prefix or the
 whole frame when shorter. It reads additional bytes into a reusable buffer
 when needed to resolve flow headers and lengths. All frame reads count toward
-the 64 MiB flow budget. The metadata scan incurs additional I/O. `DNSFromReaderAt`, `TLSFromReaderAt`, and `QUICFromReaderAt`
-allocate a file-sized buffer and read the full capture. They return an error
-wrapping `ErrPacketLimit` when the file exceeds 64 MiB.
+the 64 MiB flow budget. Flow metadata incurs additional I/O.
+
+`DNSFromReaderAt`, `TLSFromReaderAt`, and `QUICFromReaderAt` each allow
+64 MiB of total reads, including container metadata, frame prefixes, and
+selected payloads. A call can finish on a larger file. A read that would
+exceed the remaining allowance returns `ErrPacketLimit` without partial results.
+Opening the capture has a separate scan cost.
+
+DNS selects DNS ports and UDP fragments. TLS reassembles TCP on any port.
+QUIC selects candidate UDP long headers and UDP fragments. Incomplete headers
+and tunnels can require a full frame read. Each selected transport byte comes
+from the read allowance, bounding retained input payloads to 64 MiB per call.
+TCP reassembly separately allows 4 MiB per direction and 64 MiB total output.
+Fragment and QUIC reassembly also apply the limits below. Decoded records,
+flow tables and scratch buffers use additional memory.
 
 If you don't modify its exported fields, you can read a `Capture` concurrently
 from multiple goroutines. Unlike `Capture`, `SafeReader` retains a reference to
@@ -74,7 +86,7 @@ The following limits bound parsing work and memory allocation on each call:
 | `MaxSSHKexPacketBytes` | 32 KiB | Bounds SSH `SSH_MSG_KEXINIT` packet length |
 | `MaxSMB2PacketBytes` | 64 KiB | Bounds NetBIOS-framed SMB2/3 message length |
 | `MaxNTLMTokenBytes` | 16 KiB | Bounds NTLMSSP token length |
-| `MaxReaderAtScanBytes` | 64 MiB | Bounds cumulative flow frame reads or total file size for DNS, TLS and QUIC ReaderAt calls |
+| `MaxReaderAtScanBytes` | 64 MiB | Bounds flow frame reads, or all reads per DNS, TLS or QUIC ReaderAt scan |
 | `MaxFragmentGroups` | 1,024 groups | Bounds concurrent IPv4/IPv6 fragment groups tracked per scan |
 | `MaxFragmentsPerGroup` | 16 fragments | Bounds IP fragments reassembled per fragmented packet |
 | `MaxReassembledIPPacketBytes` | 65,535 bytes | Bounds reassembled IPv4/IPv6 packet payload size |

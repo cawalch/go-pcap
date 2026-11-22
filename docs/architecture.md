@@ -48,9 +48,8 @@ behavior require separate verification on a host with capture permissions.
 
 ReaderAt packet iteration skips frame bytes in both formats. Use
 `BenchmarkReaderAtScan` to compare read counts, bytes read and allocations
-for metadata scans, packet collection and flows. Track
-[bounded DNS, TLS and QUIC reads](https://github.com/cawalch/go-pcap/issues/61)
-separately. Measure the benefit of [reusing TCP streams in HTTP and HTTP/2](https://github.com/cawalch/go-pcap/issues/41)
+for metadata scans, packet collection and flows. `BenchmarkReaderAtProtocols`
+measures bounded DNS, TLS and QUIC scans on mixed traffic. Measure the benefit of [reusing TCP streams in HTTP and HTTP/2](https://github.com/cawalch/go-pcap/issues/41)
 on captures with and without decryption keys before changing segment storage.
 Schedule header prefetching, fingerprint formatting, QUIC allocation changes
 and compiler bounds-check work when end-to-end measurements justify them.

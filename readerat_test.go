@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/binary"
 	"errors"
+	"io"
 	"net/netip"
 	"reflect"
 	"slices"
@@ -189,15 +190,26 @@ func TestReaderAtDissectorsParity(t *testing.T) {
 
 	tlsCH := buildTLS13ClientHelloRecord("readerat.example.com", "h2")
 	tlsSyn := buildEthernetIPv4TCPFrame([4]byte{10, 0, 0, 1}, [4]byte{10, 0, 0, 2}, 49152, 443, 100, 0, TCPFlagSYN, nil)
-	tlsPsh := buildEthernetIPv4TCPFrame([4]byte{10, 0, 0, 1}, [4]byte{10, 0, 0, 2}, 49152, 443, 101, 1, TCPFlagPSH|TCPFlagACK, tlsCH)
 
 	quicCH := buildTLS13ClientHelloRecord("quic-readerat.example.com", "h3")
 	quicDgram := buildEncryptedQUICInitialDatagram(t, QUICVersion1, []byte{1, 2, 3, 4, 5, 6, 7, 8}, []byte{9, 10, 11, 12}, nil, 1, 0, quicCH[5:])
 	quicFrame := buildEthernetIPv4UDPFrame([4]byte{10, 0, 0, 1}, [4]byte{10, 0, 0, 3}, 55124, 443, quicDgram)
 
-	raw := buildClassicPCAP(binary.LittleEndian, false, LinkTypeEthernet, 65535, [][]byte{
-		dnsFrame, tlsSyn, tlsPsh, quicFrame,
-	})
+	// Deliver a split ClientHello out of order, after its SYN.
+	tlsTail := buildEthernetIPv4TCPFrame([4]byte{10, 0, 0, 1}, [4]byte{10, 0, 0, 2}, 49152, 443, 121, 1, TCPFlagACK, tlsCH[20:])
+	tlsPsh := buildEthernetIPv4TCPFrame([4]byte{10, 0, 0, 1}, [4]byte{10, 0, 0, 2}, 49152, 443, 101, 1, TCPFlagACK, tlsCH[:20])
+	frames := [][]byte{dnsFrame, tlsSyn, tlsTail, tlsPsh, quicFrame}
+	raw := buildClassicPCAP(binary.LittleEndian, false, LinkTypeEthernet, 65535, frames)
+	for _, data := range [][]byte{raw, buildPCAPNGFixture(binary.BigEndian, nil, frames)} {
+		c, err := NewFromReaderAt(bytes.NewReader(data), int64(len(data)))
+		if err != nil {
+			t.Fatal(err)
+		}
+		checkReaderParity(t, data, c.DNS, c.DNSFromReaderAt)
+		checkReaderParity(t, data, c.TLS, c.TLSFromReaderAt)
+		checkReaderParity(t, data, c.QUIC, c.QUICFromReaderAt)
+	}
+
 	ra := bytes.NewReader(raw)
 	cap, err := NewFromReaderAt(ra, int64(len(raw)))
 	if err != nil {
@@ -501,5 +513,128 @@ func TestReaderAtMalformedPacketParity(t *testing.T) {
 		if err != nil || !reflect.DeepEqual(c, got) {
 			t.Fatalf("cut at %d: got %+v, want %+v (err %v)", n, got, c, err)
 		}
+	}
+}
+
+// Use 64 KiB classic PCAP records so 1,024 complete records exactly consume
+// the 64 MiB read budget. The virtual capture stores one physical record.
+func TestReaderAtProtocolReadBudget(t *testing.T) {
+	src, dst := [4]byte{10, 0, 0, 1}, [4]byte{10, 0, 0, 2}
+	const recordBytes = 64 << 10
+	const records = MaxReaderAtScanBytes/recordBytes + 1
+	for _, proto := range []string{"DNS", "TLS", "QUIC"} {
+		t.Run(proto, func(t *testing.T) {
+			frames := [][]byte{
+				buildEthernetIPv4UDPFrame(src, dst, 1234, 5678, make([]byte, recordBytes-16-42)),
+				buildEthernetIPv4UDPFrame(src, dst, 1234, 53, make([]byte, recordBytes-16-42)),
+			}
+			if proto == "TLS" {
+				frames[1] = buildEthernetIPv4TCPFrame(src, dst, 1234, 443, 1, 0, TCPFlagACK, make([]byte, recordBytes-16-54))
+			}
+			if proto == "QUIC" {
+				frames[1][42] = 0xc0
+			}
+			// Put one real record after the first 64 MiB of sparse traffic.
+			var last []byte
+			switch proto {
+			case "DNS":
+				last = buildEthernetIPv4UDPFrame(src, dst, 1234, 53, buildDNSQueryResponsePacket())
+			case "TLS":
+				last = buildEthernetIPv4TCPFrame(src, dst, 1234, 8443, 1, 0, TCPFlagACK, buildTLS13ClientHelloRecord("last.example", "h2"))
+			case "QUIC":
+				hello := buildTLS13ClientHelloRecord("last.example", "h3")
+				packet := buildEncryptedQUICInitialDatagram(t, QUICVersion2, []byte{1, 2, 3, 4}, nil, nil, 1, 0, hello[5:])
+				last = buildEthernetIPv4UDPFrame(src, dst, 1234, 4443, packet)
+			}
+			for i, frame := range frames {
+				raw := buildClassicPCAP(binary.LittleEndian, false, LinkTypeEthernet, 65535, [][]byte{frame})
+				const size = int64(pcapGlobalHeaderSize + records*recordBytes)
+				var calls, read int64
+				r := readAtFunc(func(p []byte, off int64) (int, error) {
+					if off < 0 || off+int64(len(p)) > size {
+						return 0, io.EOF
+					}
+					pos := off
+					if pos >= pcapGlobalHeaderSize {
+						pos = pcapGlobalHeaderSize + (pos-pcapGlobalHeaderSize)%recordBytes
+					}
+					n := copy(p, raw[pos:])
+					if i == 0 && off == size-recordBytes+16 {
+						copy(p, last)
+					}
+					if n != len(p) {
+						t.Fatal("read crossed a record boundary")
+					}
+					calls++
+					read += int64(n)
+					return n, nil
+				})
+				c, err := NewFromReaderAt(r, size)
+				if err != nil || c.PacketCount != records {
+					t.Fatalf("open: %v", err)
+				}
+				calls, read = 0, 0
+				var count int
+				switch proto {
+				case "DNS":
+					results, e := c.DNSFromReaderAt(r)
+					count, err = len(results), e
+				case "TLS":
+					results, e := c.TLSFromReaderAt(r)
+					count, err = len(results), e
+				case "QUIC":
+					results, e := c.QUICFromReaderAt(r)
+					count, err = len(results), e
+				}
+				if i == 0 {
+					if err != nil || count != 1 || calls != 2*records || read != records*(16+256) {
+						t.Fatalf("selective scan: %d records, %v, %d reads, %d bytes", count, err, calls, read)
+					}
+				} else if !errors.Is(err, ErrPacketLimit) || count != 0 || read != MaxReaderAtScanBytes || calls != 3*(records-1) {
+					t.Fatalf("exhausted scan: %d records, %v, %d reads, %d bytes", count, err, calls, read)
+				}
+			}
+		})
+	}
+}
+
+func checkReaderParity[T any](t *testing.T, raw []byte, slice func([]byte) ([]T, error), reader func(io.ReaderAt) ([]T, error)) {
+	t.Helper()
+	want, err := slice(raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := reader(bytes.NewReader(raw))
+	if err != nil || !reflect.DeepEqual(got, want) {
+		t.Fatalf("ReaderAt = %+v, %v; slice = %+v", got, err, want)
+	}
+}
+
+func TestReaderAtProtocolErrors(t *testing.T) {
+	raw := buildPCAPNGFixture(binary.LittleEndian, nil, [][]byte{buildEthernetIPv4UDPFrame([4]byte{1}, [4]byte{2}, 1234, 53, buildDNSQueryResponsePacket())})
+	c, err := New(raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	bad := bytes.Clone(raw)
+	bad[len(bad)-1] ^= 1
+	injected := errors.New("reader stopped")
+	checkProtocolErrors(t, c.DNS, c.DNSFromReaderAt, bad, injected)
+	checkProtocolErrors(t, c.TLS, c.TLSFromReaderAt, bad, injected)
+	checkProtocolErrors(t, c.QUIC, c.QUICFromReaderAt, bad, injected)
+}
+
+func checkProtocolErrors[T any](t *testing.T, slice func([]byte) ([]T, error), reader func(io.ReaderAt) ([]T, error), bad []byte, injected error) {
+	t.Helper()
+	want, se := slice(bad)
+	got, re := reader(bytes.NewReader(bad))
+	if want != nil || got != nil || !errors.Is(se, ErrInvalidBlock) || !errors.Is(re, ErrInvalidBlock) {
+		t.Fatalf("corrupt trailer: slice %v, reader %v", se, re)
+	}
+	if got, err := reader(readAtFunc(func([]byte, int64) (int, error) { return 0, injected })); got != nil || !errors.Is(err, injected) {
+		t.Fatalf("read failure: %v", err)
+	}
+	if got, err := reader(nil); got != nil || !errors.Is(err, ErrInvalidHeader) {
+		t.Fatalf("nil reader: %v", err)
 	}
 }

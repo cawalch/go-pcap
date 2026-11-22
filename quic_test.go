@@ -15,7 +15,7 @@ func appendQUICVarint2(buf *bytes.Buffer, v uint16) {
 }
 
 func buildEncryptedQUICInitialDatagram(
-	t *testing.T,
+	t testing.TB,
 	version uint32,
 	dcid, scid, token []byte,
 	packetNumber uint16,
@@ -109,6 +109,7 @@ func TestQUICInitialDecryptionMultiPacketAndJA4(t *testing.T) {
 		if err != nil {
 			t.Fatalf("New() error = %v", err)
 		}
+		checkReaderParity(t, rawPCAP, cap.QUIC, cap.QUICFromReaderAt)
 		qRecords, err := cap.QUIC(rawPCAP)
 		if err != nil || len(qRecords) != 1 {
 			t.Fatalf("cap.QUIC() = (%d, %v), want 1", len(qRecords), err)

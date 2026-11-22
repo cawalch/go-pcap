@@ -175,8 +175,8 @@ type ipFragAccumulator struct {
 	groups map[ipFragKey]*ipFragGroup
 }
 
-func (a *ipFragAccumulator) addUDPFragment(frame *Frame, packetPayload []byte) (udpPayload []byte, srcPort, dstPort uint16, ok bool) {
-	if (frame.PayloadLength == 0 && frame.IPVersion != 6) || uint64(frame.PayloadOffset)+uint64(frame.PayloadLength) > uint64(len(packetPayload)) {
+func (a *ipFragAccumulator) addUDPFragment(frame *Frame, fragBytes []byte) (udpPayload []byte, srcPort, dstPort uint16, ok bool) {
+	if frame.PayloadLength == 0 && frame.IPVersion != 6 {
 		return nil, 0, 0, false
 	}
 	if a.groups == nil {
@@ -201,7 +201,6 @@ func (a *ipFragAccumulator) addUDPFragment(frame *Frame, packetPayload []byte) (
 		return nil, 0, 0, false
 	}
 
-	fragBytes := packetPayload[frame.PayloadOffset : frame.PayloadOffset+frame.PayloadLength]
 	if frame.IPVersion == 6 && frame.Anomalies.TruncatedLayer {
 		g.done = true
 		g.frags = nil

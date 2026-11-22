@@ -259,27 +259,16 @@ type flowSegments struct {
 // Streams reassembles bounded TCP byte streams for all TCP flows in the capture
 // in deterministic first-seen flow order.
 func (c *Capture) Streams(data []byte) ([]TCPStream, error) {
-	if err := c.validateContainer(); err != nil {
-		return nil, err
-	}
-	if c.PacketCount == 0 {
-		return nil, nil
-	}
+	return collectStreams(ipFrameSource{capture: c, data: data})
+}
 
-	r := SafeReader{data: data, size: int64(len(data))}
+func collectStreams(source ipFrameSource) ([]TCPStream, error) {
+
 	var table flowIndexTable
 	tcpSlotByFlow := make(map[int]int)
 	var collected []flowSegments
 
-	err := c.walkPackets(&r, func(pkt PacketRecord) error {
-		payload, err := r.Slice(pkt.PayloadOffset, pkt.PayloadLength)
-		if err != nil {
-			return err
-		}
-		frame, err := DecodeFrame(payload, pkt.LinkType)
-		if err != nil || frame.IPVersion == 0 {
-			return nil
-		}
+	err := source.walk(func(_ PacketRecord, frame Frame, l4 []byte) error {
 		key, _ := makeCanonicalFlowKey(frame.IPProtocol, frame.SrcAddr, frame.SrcPort, frame.DstAddr, frame.DstPort)
 		flowIdx, _, err := table.lookupOrInsert(key)
 		if err != nil {
@@ -303,14 +292,10 @@ func (c *Capture) Streams(data []byte) ([]TCPStream, error) {
 		}
 
 		entry := &collected[slot]
-		var l4Payload []byte
-		if frame.PayloadLength > 0 && uint64(frame.PayloadOffset)+uint64(frame.PayloadLength) <= uint64(len(payload)) {
-			l4Payload = payload[frame.PayloadOffset : frame.PayloadOffset+frame.PayloadLength]
-		}
 		seg := TCPSegmentInput{
 			Seq:     frame.TCPSeq,
 			Flags:   frame.TCPFlags,
-			Payload: l4Payload,
+			Payload: l4,
 		}
 		if frame.SrcAddr == entry.srcAddr && frame.SrcPort == entry.srcPort {
 			if len(entry.client) >= MaxSegmentsPerFlow {

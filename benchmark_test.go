@@ -326,3 +326,50 @@ func BenchmarkReaderAtScan(b *testing.B) {
 		}
 	}
 }
+
+// Most of the bytes are unrelated UDP traffic. Each scanner also has a real
+// record to find, so the benchmark includes protocol parsing and output.
+func BenchmarkReaderAtProtocols(b *testing.B) {
+	src, dst := [4]byte{10, 0, 0, 1}, [4]byte{10, 0, 0, 2}
+	noise := buildEthernetIPv4UDPFrame(src, dst, 1234, 5678, make([]byte, 1440))
+	frames := make([][]byte, 512)
+	for i := range frames {
+		frames[i] = noise
+	}
+	hello := buildTLS13ClientHelloRecord("bench.example", "h2")
+	initial := buildEncryptedQUICInitialDatagram(b, QUICVersion1, []byte{1, 2, 3, 4}, nil, nil, 0, 0, hello[5:])
+	frames = append(frames, buildEthernetIPv4UDPFrame(src, dst, 1234, 53, buildDNSQueryResponsePacket()), buildEthernetIPv4TCPFrame(src, dst, 1234, 443, 1, 0, TCPFlagACK, hello), buildEthernetIPv4UDPFrame(src, dst, 1234, 443, initial))
+	for _, format := range []string{"PCAP", "PcapNG"} {
+		var raw []byte
+		if format == "PCAP" {
+			raw = buildClassicPCAP(binary.LittleEndian, false, LinkTypeEthernet, 65535, frames)
+		} else {
+			raw = buildPCAPNGFixture(binary.LittleEndian, nil, frames)
+		}
+		c, err := New(raw)
+		if err != nil {
+			b.Fatal(err)
+		}
+		for _, proto := range []string{"DNS", "TLS", "QUIC"} {
+			b.Run(format+"/"+proto, func(b *testing.B) {
+				r := &measuredReaderAt{Reader: bytes.NewReader(raw)}
+				b.ReportAllocs()
+				for b.Loop() {
+					switch proto {
+					case "DNS":
+						_, err = c.DNSFromReaderAt(r)
+					case "TLS":
+						_, err = c.TLSFromReaderAt(r)
+					case "QUIC":
+						_, err = c.QUICFromReaderAt(r)
+					}
+					if err != nil {
+						b.Fatal(err)
+					}
+				}
+				b.ReportMetric(float64(r.calls)/float64(b.N), "reads/op")
+				b.ReportMetric(float64(r.bytesRead)/float64(b.N), "read-B/op")
+			})
+		}
+	}
+}

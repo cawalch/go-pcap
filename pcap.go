@@ -5,6 +5,7 @@ import (
 	"encoding/binary"
 	"errors"
 	"fmt"
+	"io"
 	"iter"
 	"math"
 	"math/bits"
@@ -336,6 +337,39 @@ func (c *Capture) walkPackets(r *SafeReader, fn func(PacketRecord) error) error 
 	default:
 		return ErrInvalidHeader
 	}
+}
+
+// ipFrameSource visits all decoded IP frames to preserve first-seen flow
+// indices. Selected payloads remain valid after the visitor returns.
+type ipFrameSource struct {
+	capture      *Capture
+	data         []byte
+	reader       io.ReaderAt
+	needsPayload func(Frame, []byte) bool
+}
+
+func (s ipFrameSource) walk(visit func(PacketRecord, Frame, []byte) error) error {
+	if err := s.capture.validateContainer(); err != nil {
+		return err
+	}
+	if s.needsPayload != nil {
+		return s.walkReaderAt(visit)
+	}
+	if s.capture.PacketCount == 0 {
+		return nil
+	}
+	r := NewSafeReader(s.data)
+	return s.capture.walkPackets(r, func(pkt PacketRecord) error {
+		payload, err := r.Slice(pkt.PayloadOffset, pkt.PayloadLength)
+		if err != nil {
+			return err
+		}
+		frame, err := DecodeFrame(payload, pkt.LinkType)
+		if err != nil || frame.IPVersion == 0 {
+			return nil
+		}
+		return visit(pkt, frame, payload[frame.PayloadOffset:frame.PayloadOffset+frame.PayloadLength])
+	})
 }
 
 // Packets enumerates bounded packet records in file order from the original
