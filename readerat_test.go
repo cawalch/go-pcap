@@ -259,6 +259,13 @@ func TestReaderAtFlowParity(t *testing.T) {
 	copy(v6[310:], frames[0][34:54])
 	frames = append(frames, v6)
 
+	// Long UDP frames (> flowPrefixBytes) where IP and UDP declared lengths differ.
+	udpShorter := buildEthernetIPv4UDPFrame([4]byte{10, 0, 0, 1}, [4]byte{10, 0, 0, 2}, 40001, 50001, make([]byte, 400))
+	binary.BigEndian.PutUint16(udpShorter[34+4:34+6], 300) // UDP length < IP payload
+	udpLonger := buildEthernetIPv4UDPFrame([4]byte{10, 0, 0, 1}, [4]byte{10, 0, 0, 2}, 40002, 50002, make([]byte, 400))
+	binary.BigEndian.PutUint16(udpLonger[34+4:34+6], 500) // UDP length > IP payload
+	frames = append(frames, udpShorter, udpLonger)
+
 	// Classic PCAP metadata and all flow headers are available. Reading the
 	// application payload past byte 512 of the frame would return EOF.
 	classic := buildClassicPCAP(binary.LittleEndian, false, LinkTypeEthernet, 65535, [][]byte{v6})
