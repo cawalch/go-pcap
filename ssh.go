@@ -184,34 +184,8 @@ func (c *Capture) SSH(data []byte) ([]SSHRecord, error) {
 		return nil, nil
 	}
 
-	// Collect per-flow JA4SSH segments in a single packet pass.
-	r := SafeReader{data: data, size: int64(len(data))}
-	var table flowIndexTable
-	segsByFlow := make(map[int][]JA4SSHSegment)
-	_ = c.walkPackets(&r, func(pkt PacketRecord) error {
-		payload, err := r.Slice(pkt.PayloadOffset, pkt.PayloadLength)
-		if err != nil {
-			return err
-		}
-		frame, err := DecodeFrame(payload, pkt.LinkType)
-		if err != nil || frame.IPVersion == 0 || frame.IPProtocol != IPProtoTCP {
-			return nil
-		}
-		key, isFirst := makeCanonicalFlowKey(frame.IPProtocol, frame.SrcAddr, frame.SrcPort, frame.DstAddr, frame.DstPort)
-		flowIdx, _, err := table.lookupOrInsert(key)
-		if err != nil {
-			return err
-		}
-		_ = isFirst
-		segsByFlow[flowIdx] = append(segsByFlow[flowIdx], JA4SSHSegment{
-			IsClient:      frame.SrcAddr == streamsFlowClientAddr(streams, flowIdx, frame.SrcAddr),
-			PayloadLength: int(frame.PayloadLength),
-			Flags:         frame.TCPFlags,
-		})
-		return nil
-	})
-
 	var records []SSHRecord
+	sshFlows := make(map[flowKey]int)
 	for i := range streams {
 		st := &streams[i]
 		if !bytes.HasPrefix(st.Client.Data, []byte("SSH-")) && !bytes.HasPrefix(st.Server.Data, []byte("SSH-")) {
@@ -224,6 +198,8 @@ func (c *Capture) SSH(data []byte) ([]SSHRecord, error) {
 		if len(records) >= MaxSSHHandshakesPerScan {
 			return nil, fmt.Errorf("%w: exceeds %d SSH handshakes", ErrSSHLimit, MaxSSHHandshakesPerScan)
 		}
+		key, _ := makeCanonicalFlowKey(IPProtoTCP, st.SrcAddr, st.SrcPort, st.DstAddr, st.DstPort)
+		sshFlows[key] = len(records)
 		records = append(records, SSHRecord{
 			FlowIndex: st.FlowIndex,
 			SrcAddr:   st.SrcAddr,
@@ -231,17 +207,42 @@ func (c *Capture) SSH(data []byte) ([]SSHRecord, error) {
 			SrcPort:   st.SrcPort,
 			DstPort:   st.DstPort,
 			Handshake: hs,
-			JA4SSH:    JA4SSH(segsByFlow[st.FlowIndex]),
 		})
 	}
-	return records, nil
-}
-
-func streamsFlowClientAddr(streams []TCPStream, flowIndex int, fallback netip.Addr) netip.Addr {
-	for i := range streams {
-		if streams[i].FlowIndex == flowIndex {
-			return streams[i].SrcAddr
-		}
+	if len(records) == 0 {
+		return nil, nil
 	}
-	return fallback
+
+	// Accumulate JA4SSH statistics directly while walking packets without retaining segment slices.
+	r := SafeReader{data: data, size: int64(len(data))}
+	accByRecord := make([]ja4sshAccumulator, len(records))
+	if err := c.walkPackets(&r, func(pkt PacketRecord) error {
+		payload, err := r.Slice(pkt.PayloadOffset, pkt.PayloadLength)
+		if err != nil {
+			return err
+		}
+		frame, err := DecodeFrame(payload, pkt.LinkType)
+		if err != nil || frame.IPVersion == 0 || frame.IPProtocol != IPProtoTCP || !frame.hasPorts || frame.Anomalies.IPFragment {
+			return nil
+		}
+		key, _ := makeCanonicalFlowKey(frame.IPProtocol, frame.SrcAddr, frame.SrcPort, frame.DstAddr, frame.DstPort)
+		recIdx, ok := sshFlows[key]
+		if !ok {
+			return nil
+		}
+		rec := &records[recIdx]
+		accByRecord[recIdx].add(JA4SSHSegment{
+			IsClient:      frame.SrcAddr == rec.SrcAddr && frame.SrcPort == rec.SrcPort,
+			PayloadLength: int(frame.PayloadLength),
+			Flags:         frame.TCPFlags,
+		})
+		return nil
+	}); err != nil {
+		return nil, err
+	}
+
+	for i := range records {
+		records[i].JA4SSH = accByRecord[i].fingerprint()
+	}
+	return records, nil
 }
