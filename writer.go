@@ -31,14 +31,22 @@ type PCAPNGWriter struct {
 // Description Block (IDB, interface ID 0 with nanosecond timestamp resolution)
 // to w and returns a [PCAPNGWriter].
 func NewPCAPNGWriter(w io.Writer, opts PCAPNGWriterOptions) (*PCAPNGWriter, error) {
+	if opts.LinkType == 0 && opts.InterfaceName != "lo0" {
+		opts.LinkType = LinkTypeEthernet
+	}
+	if opts.SnapLen == 0 {
+		opts.SnapLen = DefaultLiveSnapLen
+	}
+	return newPCAPNGWriter(w, opts)
+}
+
+// newPCAPNGWriter accepts the exact link type and snaplen, including zero.
+func newPCAPNGWriter(w io.Writer, opts PCAPNGWriterOptions) (*PCAPNGWriter, error) {
 	if w == nil {
 		return nil, fmt.Errorf("%w: nil writer", ErrInvalidHeader)
 	}
 	if len(opts.Hardware) > MaxOptionStringBytes || len(opts.OS) > MaxOptionStringBytes || len(opts.UserApplication) > MaxOptionStringBytes {
 		return nil, ErrOptionLimit
-	}
-	if opts.LinkType == 0 && opts.InterfaceName != "lo0" {
-		opts.LinkType = LinkTypeEthernet
 	}
 	var buf bytes.Buffer
 
@@ -88,6 +96,9 @@ func (pw *PCAPNGWriter) AddInterface(opts PCAPNGWriterOptions) (uint32, error) {
 	if pw.interfaceCount >= MaxInterfaces {
 		return 0, ErrInterfaceLimit
 	}
+	if opts.SnapLen == 0 {
+		opts.SnapLen = DefaultLiveSnapLen
+	}
 	var buf bytes.Buffer
 	if err := appendInterfaceBlock(&buf, opts); err != nil {
 		return 0, err
@@ -105,9 +116,6 @@ func appendInterfaceBlock(buf *bytes.Buffer, opts PCAPNGWriterOptions) error {
 		return ErrOptionLimit
 	}
 	snapLen := opts.SnapLen
-	if snapLen == 0 {
-		snapLen = DefaultLiveSnapLen
-	}
 	if snapLen > MaxSnapLen {
 		return ErrInvalidHeader
 	}

@@ -646,98 +646,25 @@ func scanPCAPNGBlocks(r SafeReader, collectPackets bool, hintCount int) (scanSum
 }
 
 func scanPCAPNGBlocksWithCallback(r *SafeReader, collectPackets bool, hintCount int, cb func(PacketRecord) error) (scanSummary, []PacketRecord, error) {
-	size := r.Size()
-	if size < pcapngSHBMinSize {
-		return scanSummary{}, nil, fmt.Errorf("%w: PcapNG section header block shorter than %d bytes", ErrInvalidHeader, pcapngSHBMinSize)
-	}
-
 	var summary scanSummary
 	var packets []PacketRecord
 	if collectPackets && hintCount > 0 {
 		packets = make([]PacketRecord, 0, min(hintCount, MaxPackets))
 	}
 	var totalSecretBytes int64
-	order := binary.ByteOrder(binary.LittleEndian)
-	haveSection := false
-	offset := int64(0)
-
-	for offset < size {
-		remaining := size - offset
-		if remaining < pcapngMinBlockSize {
-			if !haveSection {
-				return scanSummary{}, nil, fmt.Errorf("%w: missing PcapNG section header", ErrInvalidHeader)
-			}
-			summary.anomalies.TrailingBytes = true
-			summary.declaredExtent = max(summary.declaredExtent, uint64(offset+pcapngMinBlockSize))
-			break
-		}
-
-		// For a Section Header Block, determine endianness from the byte-order magic at offset+8.
-		header := r.data[offset : offset+pcapngMinBlockSize]
-		rawTypeLE := binary.LittleEndian.Uint32(header[:4])
-		if rawTypeLE == BlockTypeSectionHeader {
-			if remaining < pcapngSHBMinSize {
-				if !haveSection {
-					return scanSummary{}, nil, fmt.Errorf("%w: truncated PcapNG section header", ErrInvalidHeader)
-				}
-				summary.anomalies.TruncatedPacketBlock = true
-				summary.declaredExtent = max(summary.declaredExtent, uint64(offset+pcapngSHBMinSize))
-				break
-			}
-			boMagicLE := binary.LittleEndian.Uint32(header[8:12])
-			switch boMagicLE {
-			case PCAPNGByteOrderMagic:
-				order = binary.LittleEndian
-			case 0x4d3c2b1a:
-				order = binary.BigEndian
-			default:
-				return scanSummary{}, nil, fmt.Errorf("%w: %w", ErrInvalidHeader, ErrInvalidMagic)
-			}
-		} else if !haveSection {
-			return scanSummary{}, nil, fmt.Errorf("%w: PcapNG must start with a Section Header Block", ErrInvalidHeader)
-		}
-
-		blockType := order.Uint32(header[:4])
-		blockLen := order.Uint32(header[4:8])
-		if blockLen < pcapngMinBlockSize {
-			return scanSummary{}, nil, fmt.Errorf("%w: block length %d smaller than minimum %d", ErrInvalidBlock, blockLen, pcapngMinBlockSize)
-		}
-		if blockLen%4 != 0 {
-			summary.anomalies.UnalignedBlockLength = true
-		}
-
-		// PcapNG pads block bodies to 32-bit alignment before the trailing 4-byte total length.
-		paddedLen := uint64(blockLen)
-		if rem := paddedLen % 4; rem != 0 {
-			paddedLen += 4 - rem
-		}
-		blockEnd := uint64(offset) + paddedLen
-		summary.declaredExtent = max(summary.declaredExtent, blockEnd)
-
-		if blockEnd > uint64(size) {
-			if !haveSection {
-				return scanSummary{}, nil, fmt.Errorf("%w: first PcapNG Section Header Block is truncated", ErrInvalidHeader)
-			}
-			summary.anomalies.TruncatedPacketBlock = true
-			break
-		}
-
-		trailingLen, _ := r.ReadUint32Order(int64(blockEnd)-4, order)
-		if trailingLen != blockLen {
-			return scanSummary{}, nil, fmt.Errorf("%w: trailing block length %d does not match leading length %d", ErrInvalidBlock, trailingLen, blockLen)
-		}
-
+	var haveSection bool
+	err := walkPCAPNGBlockBytes(r, &summary, func(blockType uint32, order binary.ByteOrder, offset int64, block []byte) error {
 		bodyStart := offset + 8
-		bodyEnd := int64(blockEnd) - 4
+		bodyEnd := offset + int64(len(block)) - 4
 
 		switch blockType {
 		case BlockTypeSectionHeader:
 			if err := decodeSHB(r, bodyStart, bodyEnd, order, &summary, &haveSection); err != nil {
-				return scanSummary{}, nil, err
+				return err
 			}
 		case BlockTypeInterfaceDesc:
 			if err := decodeIDB(r, bodyStart, bodyEnd, order, &summary); err != nil {
-				return scanSummary{}, nil, err
+				return err
 			}
 		case BlockTypeEnhancedPacket, BlockTypeSimplePacket:
 			body := r.data[bodyStart:bodyEnd]
@@ -753,40 +680,127 @@ func scanPCAPNGBlocksWithCallback(r *SafeReader, collectPackets bool, hintCount 
 				rec, err = decodeSPBHeader(body, bodyStart+4, bodyEnd, order, &summary)
 			}
 			if err != nil {
-				return scanSummary{}, nil, err
+				return err
 			}
 			if collectPackets {
 				packets = append(packets, rec)
 			}
 			if cb != nil {
 				if err := cb(rec); err != nil {
-					return scanSummary{}, nil, err
+					return err
 				}
 			}
 		case BlockTypeDecryptionSecrets:
 			if err := decodeDSB(r, bodyStart, bodyEnd, order, &totalSecretBytes, &summary); err != nil {
-				return scanSummary{}, nil, err
+				return err
 			}
 		case BlockTypeNameResolution:
 			if err := decodeNRB(r, bodyStart, bodyEnd, order, &summary); err != nil {
-				return scanSummary{}, nil, err
+				return err
 			}
 		case BlockTypeInterfaceStats:
 			if err := decodeISB(r, bodyStart, bodyEnd, order, &summary); err != nil {
-				return scanSummary{}, nil, err
+				return err
 			}
 		case BlockTypeDarwinProcessEvent:
 			if err := decodeDPEB(r, bodyStart, bodyEnd, order, &summary); err != nil {
-				return scanSummary{}, nil, err
+				return err
 			}
 		default:
 			// Other blocks (vendor custom blocks) are skipped after framing validation.
 		}
+		return nil
+	})
+	if err != nil {
+		return scanSummary{}, nil, err
+	}
+	return summary, packets, nil
+}
 
-		offset = int64(blockEnd)
+// walkPCAPNGBlockBytes visits complete, framing-validated blocks in section byte order.
+func walkPCAPNGBlockBytes(r *SafeReader, summary *scanSummary, visit func(uint32, binary.ByteOrder, int64, []byte) error) error {
+	size := r.Size()
+	if size < pcapngSHBMinSize {
+		return fmt.Errorf("%w: PcapNG section header block shorter than %d bytes", ErrInvalidHeader, pcapngSHBMinSize)
 	}
 
-	return summary, packets, nil
+	order := binary.ByteOrder(binary.LittleEndian)
+	haveSection := false
+	offset := int64(0)
+
+	for offset < size {
+		remaining := size - offset
+		if remaining < pcapngMinBlockSize {
+			if !haveSection {
+				return fmt.Errorf("%w: missing PcapNG section header", ErrInvalidHeader)
+			}
+			summary.anomalies.TrailingBytes = true
+			summary.declaredExtent = max(summary.declaredExtent, uint64(offset+pcapngMinBlockSize))
+			break
+		}
+
+		// For a Section Header Block, determine endianness from the byte-order magic at offset+8.
+		header := r.data[offset : offset+pcapngMinBlockSize]
+		rawTypeLE := binary.LittleEndian.Uint32(header[:4])
+		if rawTypeLE == BlockTypeSectionHeader {
+			if remaining < pcapngSHBMinSize {
+				if !haveSection {
+					return fmt.Errorf("%w: truncated PcapNG section header", ErrInvalidHeader)
+				}
+				summary.anomalies.TruncatedPacketBlock = true
+				summary.declaredExtent = max(summary.declaredExtent, uint64(offset+pcapngSHBMinSize))
+				break
+			}
+			boMagicLE := binary.LittleEndian.Uint32(header[8:12])
+			switch boMagicLE {
+			case PCAPNGByteOrderMagic:
+				order = binary.LittleEndian
+			case 0x4d3c2b1a:
+				order = binary.BigEndian
+			default:
+				return fmt.Errorf("%w: %w", ErrInvalidHeader, ErrInvalidMagic)
+			}
+		} else if !haveSection {
+			return fmt.Errorf("%w: PcapNG must start with a Section Header Block", ErrInvalidHeader)
+		}
+
+		blockType := order.Uint32(header[:4])
+		blockLen := order.Uint32(header[4:8])
+		if blockLen < pcapngMinBlockSize {
+			return fmt.Errorf("%w: block length %d smaller than minimum %d", ErrInvalidBlock, blockLen, pcapngMinBlockSize)
+		}
+		if blockLen%4 != 0 {
+			summary.anomalies.UnalignedBlockLength = true
+		}
+
+		// PcapNG pads block bodies to 32-bit alignment before the trailing 4-byte total length.
+		paddedLen := uint64(blockLen)
+		if rem := paddedLen % 4; rem != 0 {
+			paddedLen += 4 - rem
+		}
+		blockEnd := uint64(offset) + paddedLen
+		summary.declaredExtent = max(summary.declaredExtent, blockEnd)
+
+		if blockEnd > uint64(size) {
+			if !haveSection {
+				return fmt.Errorf("%w: first PcapNG Section Header Block is truncated", ErrInvalidHeader)
+			}
+			summary.anomalies.TruncatedPacketBlock = true
+			break
+		}
+
+		trailingLen, _ := r.ReadUint32Order(int64(blockEnd)-4, order)
+		if trailingLen != blockLen {
+			return fmt.Errorf("%w: trailing block length %d does not match leading length %d", ErrInvalidBlock, trailingLen, blockLen)
+		}
+
+		if err := visit(blockType, order, offset, r.data[offset:blockEnd]); err != nil {
+			return err
+		}
+		haveSection = true
+		offset = int64(blockEnd)
+	}
+	return nil
 }
 
 func decodeSHB(

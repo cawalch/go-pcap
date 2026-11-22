@@ -417,6 +417,15 @@ for each additional interface and use its returned ID in `PacketRecord` and
 `InterfaceStatistics`. Each interface has its own link type and snaplen. After
 an output error, start a new capture stream.
 
+Call `capture.ExtractFlowPCAPNG(data, w, flowIndex)` to write one bidirectional
+flow. Pass the original capture bytes and the zero-based index from `Flows`.
+For PcapNG input, the export retains the source sections, registers only the
+interfaces used by selected packets, and preserves their timestamp encoding
+and packet options. Name records, process definitions and decryption secrets
+are capture-wide and can describe other flows. Classic PCAP input becomes a
+single-interface PcapNG capture. An absent flow returns `ErrOutOfBounds`
+before writing output.
+
 ## Capture live interface traffic
 
 Use `OpenLive(ifaceName, opts)` to capture live packets from an OS network

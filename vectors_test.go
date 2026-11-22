@@ -245,6 +245,14 @@ func TestPCAPNGBinaryTimestampResolutionAndOffset(t *testing.T) {
 	if pkts[0].TimestampNs != wantNs {
 		t.Fatalf("PacketRecord.TimestampNs = %d, want %d", pkts[0].TimestampNs, wantNs)
 	}
+	var exported bytes.Buffer
+	if err := cap.ExtractFlowPCAPNG(raw, &exported, 0); err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(raw, exported.Bytes()) {
+		t.Fatal("export changed binary timestamp metadata or raw ticks")
+	}
+
 }
 
 // The datagrams are the protected packets in RFC 9001 and RFC 9369,

@@ -283,6 +283,21 @@ func TestPCAPNGDSBTLS13DecryptionToHTTP(t *testing.T) {
 	if err != nil || len(httpRecords) != 2 {
 		t.Fatalf("cap.HTTP(DSB-decrypted) = (%d, %v), want 2 records", len(httpRecords), err)
 	}
+	var exported bytes.Buffer
+	if err := cap.ExtractFlowPCAPNG(rawPCAPNG, &exported, 0); err != nil {
+		t.Fatal(err)
+	}
+	r := bytes.NewReader(exported.Bytes())
+	carved, err := NewFromReaderAt(r, r.Size())
+	if err != nil {
+		t.Fatal(err)
+	}
+	checkReaderParity(t, exported.Bytes(), carved.TLS, carved.TLSFromReaderAt)
+	fromExport, err := carved.HTTP(exported.Bytes())
+	if err != nil || len(fromExport) != 2 || !fromExport[0].IsDecrypted || !fromExport[1].IsDecrypted ||
+		fromExport[0].Request.Path != httpRecords[0].Request.Path || !bytes.Equal(fromExport[1].Response.Body, httpRecords[1].Response.Body) {
+		t.Fatalf("decryption after export: %v, %v", fromExport, err)
+	}
 	if !httpRecords[0].IsDecrypted || httpRecords[0].Request.Path != "/beacon" || httpRecords[0].Request.Host != "secure.c2.example.com" {
 		t.Fatalf("Decrypted HTTPRequest = %+v", httpRecords[0])
 	}
