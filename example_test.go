@@ -231,3 +231,21 @@ func ExamplePCAPNGWriter_AddInterface() {
 	fmt.Println(id)
 	// Output: 1
 }
+
+func ExampleCapture_ExtractFlowPCAPNG() {
+	data := buildExamplePCAPNG()
+	c, err := pcap.New(data)
+	if err != nil {
+		log.Fatal(err)
+	}
+	var out bytes.Buffer
+	if err := c.ExtractFlowPCAPNG(data, &out, 0); err != nil {
+		log.Fatal(err)
+	}
+	selected, err := pcap.New(out.Bytes())
+	if err != nil {
+		log.Fatal(err)
+	}
+	fmt.Println(selected.Format, selected.PacketCount, selected.Interfaces[0].Name)
+	// Output: pcapng 1 en0
+}
