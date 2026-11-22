@@ -4,7 +4,9 @@ import (
 	"bytes"
 	"compress/gzip"
 	"encoding/binary"
+	"io"
 	"net/netip"
+	"reflect"
 	"testing"
 )
 
@@ -225,10 +227,10 @@ func FuzzParseBPFBuffer(f *testing.F) {
 }
 
 func FuzzDefragmentIP(f *testing.F) {
-	f.Add(false, int16(0), true, []byte("01234567"), int16(8), false, []byte("89ABCDEF"), int16(0), true, []byte{})
-	f.Add(true, int16(0), true, []byte("01234567"), int16(8), false, []byte("89ABCDEF"), int16(4), true, []byte("xxxx"))
+	f.Add(false, uint8(2), uint16(0), true, []byte("01234567"), uint16(8), false, []byte("89ABCDEF"), uint16(0), true, []byte{})
+	f.Add(true, uint8(3), uint16(0), true, []byte("01234567"), uint16(8), false, []byte("89ABCDEF"), uint16(4), true, []byte("xxxx"))
 
-	f.Fuzz(func(t *testing.T, ipv6 bool, off1 int16, mf1 bool, p1 []byte, off2 int16, mf2 bool, p2 []byte, off3 int16, mf3 bool, p3 []byte) {
+	f.Fuzz(func(t *testing.T, ipv6 bool, count uint8, off1 uint16, mf1 bool, p1 []byte, off2 uint16, mf2 bool, p2 []byte, off3 uint16, mf3 bool, p3 []byte) {
 		src := netip.AddrFrom4([4]byte{10, 0, 0, 1})
 		dst := netip.AddrFrom4([4]byte{10, 0, 0, 2})
 		if ipv6 {
@@ -240,7 +242,7 @@ func FuzzDefragmentIP(f *testing.F) {
 			{SrcAddr: src, DstAddr: dst, Protocol: IPProtoUDP, FragmentOffset: int(off2), MoreFragments: mf2, Payload: p2},
 			{SrcAddr: src, DstAddr: dst, Protocol: IPProtoUDP, FragmentOffset: int(off3), MoreFragments: mf3, Payload: p3},
 		}
-		out, _, err := DefragmentIP(frags)
+		out, _, err := DefragmentIP(frags[:count%4])
 		if err != nil {
 			return
 		}
@@ -311,22 +313,47 @@ func FuzzReaderAt(f *testing.F) {
 	f.Add(buildPCAPNGFixture(binary.LittleEndian, []byte("CLIENT_RANDOM deadbeef cafebabe\n"), [][]byte{frame}))
 
 	f.Fuzz(func(t *testing.T, data []byte) {
+		// Keep both paths inside the ReaderAt byte budget and bound fuzz iteration cost.
+		if len(data) > 64<<10 {
+			return
+		}
 		r := bytes.NewReader(data)
-		c, err := NewFromReaderAt(r, int64(len(data)))
+		c, err := New(data)
+		meta, readerErr := NewFromReaderAt(r, int64(len(data)))
+		if (err == nil) != (readerErr == nil) {
+			t.Fatalf("open: slice %v, ReaderAt %v", err, readerErr)
+		}
 		if err != nil {
 			return
 		}
-		for _, e := range c.PacketSeqFromReaderAt(r) {
-			if e != nil {
-				break
+		checkFuzzReaderParity(t, data, c.Packets, meta.PacketsFromReaderAt)
+		want, err := c.Packets(data)
+		if err == nil {
+			i := 0
+			for pkt, e := range meta.PacketSeqFromReaderAt(r) {
+				if e != nil || i >= len(want) || pkt != want[i] {
+					t.Fatalf("iterator differs at packet %d: %v", i, e)
+				}
+				i++
+			}
+			if i != len(want) {
+				t.Fatalf("iterated %d of %d packets", i, len(want))
 			}
 		}
-		_, _ = c.PacketsFromReaderAt(r)
-		_, _ = c.FlowsFromReaderAt(r)
-		_, _ = c.DNSFromReaderAt(r)
-		_, _ = c.TLSFromReaderAt(r)
-		_, _ = c.QUICFromReaderAt(r)
+		checkFuzzReaderParity(t, data, c.Flows, meta.FlowsFromReaderAt)
+		checkFuzzReaderParity(t, data, c.DNS, meta.DNSFromReaderAt)
+		checkFuzzReaderParity(t, data, c.TLS, meta.TLSFromReaderAt)
+		checkFuzzReaderParity(t, data, c.QUIC, meta.QUICFromReaderAt)
 	})
+}
+
+func checkFuzzReaderParity[T any](t *testing.T, data []byte, slice func([]byte) ([]T, error), reader func(io.ReaderAt) ([]T, error)) {
+	t.Helper()
+	a, e := slice(data)
+	b, f := reader(bytes.NewReader(data))
+	if (e == nil) != (f == nil) || (e == nil && (len(a) != len(b) || (len(a) > 0 && !reflect.DeepEqual(a, b)))) {
+		t.Fatalf("slice and ReaderAt disagree for %T: lengths %d/%d, errors %v/%v", a, len(a), len(b), e, f)
+	}
 }
 
 func FuzzTLSDecrypt(f *testing.F) {
@@ -356,6 +383,12 @@ func FuzzDecompressCapture(f *testing.F) {
 
 	f.Fuzz(func(t *testing.T, data []byte) {
 		out, err := DecompressCapture(data)
+		if !bytes.HasPrefix(data, []byte{0x1f, 0x8b}) {
+			if err != nil || !bytes.Equal(out, data) {
+				t.Fatalf("plain input changed: %v", err)
+			}
+			return
+		}
 		if err != nil {
 			return
 		}
