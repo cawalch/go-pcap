@@ -645,6 +645,12 @@ func scanPCAPNGBlocks(r SafeReader, collectPackets bool, hintCount int) (scanSum
 	return scanPCAPNGBlocksWithCallback(&r, collectPackets, hintCount, nil)
 }
 
+// These blocks are validated and retained on open. Unlike interface and
+// process descriptions, they never affect the decoding of a packet record.
+func isCaptureOnlyBlock(kind uint32) bool {
+	return kind == BlockTypeDecryptionSecrets || kind == BlockTypeNameResolution || kind == BlockTypeInterfaceStats
+}
+
 func scanPCAPNGBlocksWithCallback(r *SafeReader, collectPackets bool, hintCount int, cb func(PacketRecord) error) (scanSummary, []PacketRecord, error) {
 	var summary scanSummary
 	var packets []PacketRecord
@@ -654,6 +660,9 @@ func scanPCAPNGBlocksWithCallback(r *SafeReader, collectPackets bool, hintCount 
 	var totalSecretBytes int64
 	var haveSection bool
 	err := walkPCAPNGBlockBytes(r, &summary, func(blockType uint32, order binary.ByteOrder, offset int64, block []byte) error {
+		if (collectPackets || cb != nil) && isCaptureOnlyBlock(blockType) {
+			return nil
+		}
 		bodyStart := offset + 8
 		bodyEnd := offset + int64(len(block)) - 4
 

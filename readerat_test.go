@@ -736,7 +736,7 @@ func TestFileReaderAtParity(t *testing.T) {
 		}
 		wantCalls, wantBytes := int64(1), int64(pcapPacketHeaderSize)
 		if got.Format == FormatPCAPNG {
-			wantCalls, wantBytes = 2, 12+fileWindowSize
+			wantCalls, wantBytes = 2, 8+fileWindowSize
 		}
 		if count != 1 || r.calls != wantCalls || r.bytesRead != wantBytes {
 			t.Fatalf("early stop: records=%d calls=%d bytes=%d", count, r.calls, r.bytesRead)

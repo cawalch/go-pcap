@@ -768,7 +768,7 @@ func scanPCAPNGReaderAt(r io.ReaderAt, size int64, cb func(PacketRecord) error) 
 			break
 		}
 
-		if err := readExactAt(r, headerBuf[:12], offset, size); err != nil {
+		if err := readExactAt(r, headerBuf[:8], offset, size); err != nil {
 			return scanSummary{}, err
 		}
 
@@ -781,6 +781,9 @@ func scanPCAPNGReaderAt(r io.ReaderAt, size int64, cb func(PacketRecord) error) 
 				summary.anomalies.TruncatedPacketBlock = true
 				summary.declaredExtent = max(summary.declaredExtent, uint64(offset+pcapngSHBMinSize))
 				break
+			}
+			if err := readExactAt(r, headerBuf[8:12], offset+8, size); err != nil {
+				return scanSummary{}, err
 			}
 			boMagicLE := binary.LittleEndian.Uint32(headerBuf[8:12])
 			switch boMagicLE {
@@ -825,9 +828,9 @@ func scanPCAPNGReaderAt(r io.ReaderAt, size int64, cb func(PacketRecord) error) 
 		var packetErr error
 		switch blockType {
 		case BlockTypeEnhancedPacket:
-			header := headerBuf[8:12]
+			var header []byte
 			if bodyEnd-offset >= 28 {
-				if err := readExactAt(r, headerBuf[12:28], offset+12, size); err != nil {
+				if err := readExactAt(r, headerBuf[8:28], offset+8, size); err != nil {
 					return scanSummary{}, err
 				}
 				header = headerBuf[8:28]
@@ -839,9 +842,16 @@ func scanPCAPNGReaderAt(r io.ReaderAt, size int64, cb func(PacketRecord) error) 
 			}
 		case BlockTypeSimplePacket:
 			header := headerBuf[8:min(int64(12), bodyEnd-offset)]
+			if err := readExactAt(r, header, offset+8, size); err != nil {
+				return scanSummary{}, err
+			}
 			rec, packetErr = decodeSPBHeader(header, offset+12, bodyEnd, order, &summary)
-		case BlockTypeSectionHeader, BlockTypeInterfaceDesc, BlockTypeDecryptionSecrets, BlockTypeNameResolution, BlockTypeInterfaceStats, BlockTypeDarwinProcessEvent:
+		case BlockTypeSectionHeader, BlockTypeInterfaceDesc, BlockTypeDarwinProcessEvent:
 			tailOffset = offset + 8
+		default:
+			if cb == nil && isCaptureOnlyBlock(blockType) {
+				tailOffset = offset + 8
+			}
 		}
 
 		// The tail contains the trailer and any metadata following the skipped frame.
@@ -861,6 +871,10 @@ func scanPCAPNGReaderAt(r io.ReaderAt, size int64, cb func(PacketRecord) error) 
 		}
 		if packetErr != nil {
 			return scanSummary{}, packetErr
+		}
+		if cb != nil && isCaptureOnlyBlock(blockType) {
+			offset = int64(blockEnd)
+			continue
 		}
 		body := tail[:n-4]
 		sr := SafeReader{data: body, size: int64(len(body))}
