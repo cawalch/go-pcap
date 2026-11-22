@@ -68,6 +68,7 @@ The following limits bound parsing work and memory allocation on each call:
 
 | Limit | Maximum | Purpose |
 | --- | --- | --- |
+| `MaxDecompressedCaptureBytes` | 64 MiB | Bounds decompressed output across gzip members in `DecompressCapture` |
 | `MaxInterfaces` | 256 interfaces | Bounds PcapNG `IDB` descriptors per capture |
 | `MaxPackets` | 1,048,576 packets | Bounds packets indexed or returned by `New`, `PacketSeq`, `Packets`, and `Flows` |
 | `MaxFlows` | 65,536 flows | Bounds distinct 5-tuple flows aggregated by `Flows` and L7 dissectors |
@@ -89,30 +90,45 @@ The following limits bound parsing work and memory allocation on each call:
 | `MaxDNSQuestions` | 64 questions | Bounds questions per DNS message |
 | `MaxDNSResourceRecords` | 256 records | Bounds total answer, authority, and additional records per DNS message |
 | `MaxDNSCompressionJumps` | 16 jumps | Bounds RFC 1035 label pointer hops per domain name |
+| `MaxDNSALPNProtocols` | 32 identifiers | Bounds ALPN identifiers per DNS `SVCB` or `HTTPS` record |
+| `MaxDNSMessagesPerScan` | 65,536 messages | Bounds DNS messages returned per capture scan |
 | `MaxTLSHandshakeBytes` | 256 KiB | Bounds coalesced TLS handshake payload size |
+| `MaxTLSExtensions` | 128 extensions | Bounds TLS extensions parsed per handshake message |
 | `MaxTLSCertSANsPerKind` | 64 per kind | Bounds retained DNS names and IP addresses independently for each certificate |
 | `MaxTLSCertificates` | 16 certificates | Bounds X.509 certificates parsed per TLS Certificate message |
+| `MaxTLSHandshakesPerScan` | 16,384 handshakes | Bounds TLS handshakes returned per capture scan |
+| `MaxTLSKeyLogEntries` | 4,096 entries | Bounds NSS keylog entries parsed per `ParseTLSKeyLog` / `TLSKeyLog` call |
 | `MaxQUICCryptoBytes` | 64 KiB | Bounds reassembled QUIC Initial `CRYPTO` stream size |
 | `MaxQUICPacketsPerFlow` | 64 packets | Bounds Initial UDP datagrams inspected per QUIC flow |
+| `MaxQUICFlowsPerScan` | 16,384 flows | Bounds QUIC Initial flows returned per capture scan |
 | `MaxHTTPHeaders` | 128 headers | Bounds HTTP header lines per request or response |
 | `MaxHTTPBodyBytes` | 4 MiB | Bounds carved HTTP request or response body size |
+| `MaxHTTPMessagesPerScan` | 16,384 messages | Bounds HTTP/1.x and HTTP/2 records returned per capture scan |
 | `MaxSSHKexPacketBytes` | 32 KiB | Bounds SSH `SSH_MSG_KEXINIT` packet length |
+| `MaxSSHHandshakesPerScan` | 16,384 handshakes | Bounds SSH handshakes returned per capture scan |
 | `MaxSMB2PacketBytes` | 64 KiB | Bounds NetBIOS-framed SMB2/3 message length |
 | `MaxNTLMTokenBytes` | 16 KiB | Bounds NTLMSSP token length |
+| `MaxSMBRecordsPerScan` | 16,384 records | Bounds SMB2/3 records returned per capture scan |
+| `MaxBPFFilterInstructions` | 4,096 instructions | Bounds classic BPF filter program length in `OpenLive` and `EvalBPF` |
 | `MaxReaderAtScanBytes` | 64 MiB | Bounds flow frame reads, or all reads per DNS, TLS or QUIC ReaderAt scan |
 | `MaxFragmentGroups` | 1,024 groups | Bounds concurrent IPv4/IPv6 fragment groups tracked per scan |
 | `MaxFragmentsPerGroup` | 16 fragments | Bounds IP fragments reassembled per fragmented packet |
 | `MaxReassembledIPPacketBytes` | 65,535 bytes | Bounds reassembled IPv4/IPv6 packet payload size |
 | `MaxHTTP2FramesPerStream` | 1,024 frames | Bounds HTTP/2 frames parsed per directional stream |
+| `MaxHTTP2FramePayload` | 1 MiB | Bounds individual HTTP/2 frame payload size |
 | `MaxKRB5PacketBytes` | 64 KiB | Bounds Kerberos v5 message length |
+| `MaxKRB5RecordsPerScan` | 16,384 records | Bounds Kerberos v5 records returned per capture scan |
 | `MaxRDPPacketBytes` | 16 KiB | Bounds RDP TPKT/X.224 negotiation PDU length |
+| `MaxRDPRecordsPerScan` | 16,384 records | Bounds RDP negotiation records returned per capture scan |
 
 Use `errors.Is` with `ErrNotPCAP`, `ErrInvalidMagic`, `ErrInvalidHeader`,
 `ErrInvalidBlock`, `ErrInvalidPacket`, `ErrInvalidFrame`, `ErrInvalidDNS`,
 `ErrInvalidTLS`, `ErrInvalidQUIC`, `ErrInvalidHTTP`, `ErrInvalidSSH`,
-`ErrInvalidSMB`, `ErrInterfaceLimit`, `ErrPacketLimit`, `ErrFlowLimit`,
-`ErrSecretLimit`, `ErrOptionLimit`, `ErrReassemblyLimit`, `ErrDNSLimit`,
-`ErrTLSLimit`, `ErrQUICLimit`, `ErrHTTPLimit`, `ErrSSHLimit`, `ErrSMBLimit`,
+`ErrInvalidSMB`, `ErrInvalidKRB5`, `ErrInvalidRDP`,
+`ErrLiveCaptureUnsupported`, `ErrInterfaceLimit`, `ErrPacketLimit`,
+`ErrFlowLimit`, `ErrSecretLimit`, `ErrOptionLimit`, `ErrReassemblyLimit`,
+`ErrFragmentLimit`, `ErrDNSLimit`, `ErrTLSLimit`, `ErrQUICLimit`,
+`ErrHTTPLimit`, `ErrSSHLimit`, `ErrSMBLimit`, `ErrKRB5Limit`, `ErrRDPLimit`,
 `ErrOutOfBounds`, or `ErrIntegerOverflow` to classify failures.
 
 ## Inspect truncation and anomalies
