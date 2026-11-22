@@ -1,6 +1,7 @@
 package pcap
 
 import (
+	"encoding/binary"
 	"errors"
 	"testing"
 )
@@ -78,5 +79,34 @@ func TestReassembleTCPLimits(t *testing.T) {
 	}
 	if used != 6 || string(buf.Data) != "012345" || !buf.Anomalies.Truncated {
 		t.Fatalf("reassembleTCPWithBudget(6) = (%q, used=%d, %+v)", buf.Data, used, buf.Anomalies)
+	}
+}
+
+func TestMidstreamSequenceOrder(t *testing.T) {
+	for _, start := range []uint32{100, 0xfffffffe} {
+		for _, reverse := range []bool{false, true} {
+			segs := []TCPSegmentInput{{Seq: start, Payload: []byte("abc")}, {Seq: start + 3, Payload: []byte("def")}}
+			if reverse {
+				segs[0], segs[1] = segs[1], segs[0]
+			}
+			want := StreamAnomalies{MidstreamPickup: true}
+			buf, err := ReassembleTCP(segs)
+			if err != nil || string(buf.Data) != "abcdef" || buf.Anomalies != want {
+				t.Fatalf("start %x reverse %v: %+v, %v", start, reverse, buf, err)
+			}
+			var frames [][]byte
+			for _, seg := range segs {
+				frames = append(frames, buildEthernetIPv4TCPFrame([4]byte{10, 0, 0, 1}, [4]byte{10, 0, 0, 2}, 12345, 443, seg.Seq, 0, TCPFlagACK, seg.Payload))
+			}
+			raw := buildClassicPCAP(binary.LittleEndian, false, LinkTypeEthernet, 65535, frames)
+			c, err := New(raw)
+			if err != nil {
+				t.Fatal(err)
+			}
+			streams, err := c.Streams(raw)
+			if err != nil || len(streams) != 1 || string(streams[0].Client.Data) != "abcdef" || streams[0].Client.Anomalies != want {
+				t.Fatalf("streams = %+v, %v", streams, err)
+			}
+		}
 	}
 }

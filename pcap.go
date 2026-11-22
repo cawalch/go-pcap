@@ -90,7 +90,7 @@ type NameResolutionRecord struct {
 // InterfaceStatistics holds capture statistics from a PcapNG Interface
 // Statistics Block (ISB).
 type InterfaceStatistics struct {
-	InterfaceID        uint32
+	InterfaceID        uint32 // Index in Capture.Interfaces across all sections.
 	TimestampNs        int64
 	StartTimeNs        int64
 	EndTimeNs          int64
@@ -113,7 +113,7 @@ type ProcessEvent struct {
 // within the capture buffer.
 type PacketRecord struct {
 	Index         int
-	InterfaceID   uint32
+	InterfaceID   uint32 // Index in Capture.Interfaces across all sections.
 	LinkType      LinkType
 	TimestampNs   int64
 	CaptureLen    uint32
@@ -433,20 +433,21 @@ func parseClassicPCAP(r *SafeReader, fileSize int64, order binary.ByteOrder, nan
 }
 
 type scanSummary struct {
-	packetCount    int
-	declaredExtent uint64
-	anomalies      CaptureAnomalies
-	bigEndian      bool
-	vMajor         uint16
-	vMinor         uint16
-	hardware       string
-	os             string
-	userAppl       string
-	interfaces     []InterfaceDescriptor
-	secrets        []DecryptionSecret
-	nameRecords    []NameResolutionRecord
-	interfaceStats []InterfaceStatistics
-	processes      []ProcessEvent
+	sectionInterfaceBase int
+	packetCount          int
+	declaredExtent       uint64
+	anomalies            CaptureAnomalies
+	bigEndian            bool
+	vMajor               uint16
+	vMinor               uint16
+	hardware             string
+	os                   string
+	userAppl             string
+	interfaces           []InterfaceDescriptor
+	secrets              []DecryptionSecret
+	nameRecords          []NameResolutionRecord
+	interfaceStats       []InterfaceStatistics
+	processes            []ProcessEvent
 }
 
 func scanClassicPCAPPackets(
@@ -729,6 +730,7 @@ func decodeSHB(
 		return fmt.Errorf("%w: unsupported PcapNG version %d.%d", ErrInvalidHeader, vMajor, vMinor)
 	}
 
+	summary.sectionInterfaceBase = len(summary.interfaces)
 	if !*haveSection {
 		summary.bigEndian = order == binary.BigEndian
 		summary.vMajor = vMajor
@@ -913,10 +915,10 @@ func decodeEPBWithCallback(
 		return fmt.Errorf("%w: Enhanced Packet Block body too short", ErrInvalidBlock)
 	}
 	ifaceID, _ := r.ReadUint32Order(bodyStart, order)
-	if int(ifaceID) >= len(summary.interfaces) {
-		return fmt.Errorf("%w: EPB interface ID %d out of range (%d interfaces)", ErrInvalidPacket, ifaceID, len(summary.interfaces))
+	if ifaceID >= uint32(len(summary.interfaces)-summary.sectionInterfaceBase) {
+		return fmt.Errorf("%w: EPB interface ID %d out of range (%d section interfaces)", ErrInvalidPacket, ifaceID, len(summary.interfaces)-summary.sectionInterfaceBase)
 	}
-	iface := summary.interfaces[ifaceID]
+	iface := summary.interfaces[summary.sectionInterfaceBase+int(ifaceID)]
 
 	tsHigh, _ := r.ReadUint32Order(bodyStart+4, order)
 	tsLow, _ := r.ReadUint32Order(bodyStart+8, order)
@@ -1011,7 +1013,7 @@ func decodeEPBWithCallback(
 		tsNs := scaleRawTimestampNs(rawTicks, iface)
 		rec := PacketRecord{
 			Index:         summary.packetCount - 1,
-			InterfaceID:   ifaceID,
+			InterfaceID:   iface.ID,
 			LinkType:      iface.LinkType,
 			TimestampNs:   tsNs,
 			CaptureLen:    capLen,
@@ -1066,10 +1068,10 @@ func decodeSPBWithCallback(
 	if bodyEnd-bodyStart < 4 {
 		return fmt.Errorf("%w: Simple Packet Block body too short", ErrInvalidBlock)
 	}
-	if len(summary.interfaces) == 0 {
+	if len(summary.interfaces) == summary.sectionInterfaceBase {
 		return fmt.Errorf("%w: Simple Packet Block requires interface 0", ErrInvalidPacket)
 	}
-	iface := summary.interfaces[0]
+	iface := summary.interfaces[summary.sectionInterfaceBase]
 	origLen, _ := r.ReadUint32Order(bodyStart, order)
 	payloadOffset := bodyStart + 4
 	avail := bodyEnd - payloadOffset
@@ -1091,7 +1093,7 @@ func decodeSPBWithCallback(
 	if collect || cb != nil {
 		rec := PacketRecord{
 			Index:         summary.packetCount - 1,
-			InterfaceID:   0,
+			InterfaceID:   iface.ID,
 			LinkType:      iface.LinkType,
 			CaptureLen:    capLen,
 			OriginalLen:   origLen,
@@ -1247,15 +1249,15 @@ func decodeISB(
 		return fmt.Errorf("%w: ISB count exceeds %d", ErrOptionLimit, MaxInterfaceStats)
 	}
 	ifaceID, _ := r.ReadUint32Order(bodyStart, order)
-	if int(ifaceID) >= len(summary.interfaces) {
+	if ifaceID >= uint32(len(summary.interfaces)-summary.sectionInterfaceBase) {
 		return fmt.Errorf("%w: ISB interface ID %d out of range", ErrInvalidPacket, ifaceID)
 	}
-	iface := summary.interfaces[ifaceID]
+	iface := summary.interfaces[summary.sectionInterfaceBase+int(ifaceID)]
 	tsHigh, _ := r.ReadUint32Order(bodyStart+4, order)
 	tsLow, _ := r.ReadUint32Order(bodyStart+8, order)
 
 	stat := InterfaceStatistics{
-		InterfaceID: ifaceID,
+		InterfaceID: iface.ID,
 		TimestampNs: scaleRawTimestampNs((uint64(tsHigh)<<32)|uint64(tsLow), iface),
 	}
 

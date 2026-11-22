@@ -122,7 +122,7 @@ func reassembleTCPWithBudget(segments []TCPSegmentInput, remainingBudget int64) 
 			seq++
 		}
 		rel := int64(int32(seq - baseSeq))
-		if rel < 0 {
+		if hasSYN && rel < 0 {
 			// Segment precedes the chosen initial sequence number.
 			trim := -rel
 			if trim >= int64(len(seg.Payload)) {
@@ -165,6 +165,10 @@ func reassembleTCPWithBudget(segments []TCPSegmentInput, remainingBudget int64) 
 	maxBytes := min(int64(MaxFlowStreamBytes), remainingBudget)
 	var buf bytes.Buffer
 	var cursor int64
+	// Midstream input can begin after bytes captured later in packet order.
+	if !hasSYN && len(norm) > 0 {
+		cursor = norm[0].relStart
+	}
 
 	for i := range norm {
 		seg := &norm[i]
@@ -183,20 +187,12 @@ func reassembleTCPWithBudget(segments []TCPSegmentInput, remainingBudget int64) 
 			overlapLen := overlapEnd - seg.relStart
 			out.OverlapBytes += uint64(overlapLen)
 
-			// Check whether the overlapping prefix disagrees with already-written bytes.
-			// Only check when no sequence gap occurred or within the contiguous tail.
+			// Starts are sorted, so this overlap lies in the contiguous
+			// output since the last gap. Convert sequence to buffer offsets.
 			written := buf.Bytes()
-			if int64(len(written)) >= overlapLen && cursor == seg.relStart+int64(len(written)) {
-				existing := written[:overlapLen]
-				if !bytes.Equal(existing, seg.payload[:overlapLen]) {
-					out.Anomalies.OverlapConflict = true
-				}
-			} else if overlapLen <= int64(len(written)) {
-				// Compare against the trailing overlapLen bytes written just before cursor.
-				existing := written[int64(len(written))-(cursor-seg.relStart) : int64(len(written))-(cursor-overlapEnd)]
-				if !bytes.Equal(existing, seg.payload[:overlapLen]) {
-					out.Anomalies.OverlapConflict = true
-				}
+			start := int64(len(written)) - (cursor - seg.relStart)
+			if !bytes.Equal(written[start:start+overlapLen], seg.payload[:overlapLen]) {
+				out.Anomalies.OverlapConflict = true
 			}
 
 			if seg.relEnd <= cursor {
