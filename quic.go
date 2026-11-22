@@ -470,11 +470,10 @@ func DecryptQUICInitial(datagrams [][]byte) (QUICHandshake, error) {
 // capture and extracts their embedded TLS 1.3 ClientHello and 'q13...' JA4
 // fingerprints.
 func (c *Capture) QUIC(data []byte) ([]QUICRecord, error) {
-	packets, err := c.Packets(data)
-	if err != nil {
+	if err := c.validateContainer(); err != nil {
 		return nil, err
 	}
-	if len(packets) == 0 {
+	if c.PacketCount == 0 {
 		return nil, nil
 	}
 
@@ -489,47 +488,40 @@ func (c *Capture) QUIC(data []byte) ([]QUICRecord, error) {
 	}
 
 	r := SafeReader{data: data, size: int64(len(data))}
-	flowIndexByKey := make(map[flowKey]int)
+	var table flowIndexTable
 	slotByFlow := make(map[int]int)
 	var flows []quicFlowBuf
-	nextFlowIdx := 0
 
-	for i := range packets {
-		pkt := &packets[i]
+	err := c.walkPackets(&r, func(pkt PacketRecord) error {
 		payload, err := r.Slice(pkt.PayloadOffset, pkt.PayloadLength)
 		if err != nil {
-			return nil, err
+			return err
 		}
 		frame, err := DecodeFrame(payload, pkt.LinkType)
 		if err != nil || frame.IPVersion == 0 {
-			continue
+			return nil
 		}
 
 		key, _ := makeCanonicalFlowKey(frame.IPProtocol, frame.SrcAddr, frame.SrcPort, frame.DstAddr, frame.DstPort)
-		flowIdx, exists := flowIndexByKey[key]
-		if !exists {
-			if nextFlowIdx >= MaxFlows {
-				return nil, fmt.Errorf("%w: exceeds %d", ErrFlowLimit, MaxFlows)
-			}
-			flowIdx = nextFlowIdx
-			nextFlowIdx++
-			flowIndexByKey[key] = flowIdx
+		flowIdx, _, err := table.lookupOrInsert(key)
+		if err != nil {
+			return err
 		}
 		if frame.IPProtocol != IPProtoUDP || frame.PayloadLength < 7 {
-			continue
+			return nil
 		}
 		udpPayload := payload[frame.PayloadOffset : frame.PayloadOffset+frame.PayloadLength]
 		if (udpPayload[0] & 0xc0) != 0xc0 {
-			continue
+			return nil
 		}
 		if _, err := ParseQUICInitialPacket(udpPayload); err != nil {
-			continue
+			return nil
 		}
 
 		slot, hasSlot := slotByFlow[flowIdx]
 		if !hasSlot {
 			if len(flows) >= MaxQUICFlowsPerScan {
-				return nil, fmt.Errorf("%w: exceeds %d QUIC flows", ErrQUICLimit, MaxQUICFlowsPerScan)
+				return fmt.Errorf("%w: exceeds %d QUIC flows", ErrQUICLimit, MaxQUICFlowsPerScan)
 			}
 			slot = len(flows)
 			slotByFlow[flowIdx] = slot
@@ -552,6 +544,10 @@ func (c *Capture) QUIC(data []byte) ([]QUICRecord, error) {
 				fb.serverPkt = append(fb.serverPkt, udpPayload)
 			}
 		}
+		return nil
+	})
+	if err != nil {
+		return nil, err
 	}
 
 	var records []QUICRecord

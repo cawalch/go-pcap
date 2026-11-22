@@ -142,12 +142,12 @@ errors, and protocol dissectors.
 | Write PcapNG blocks, DSB secrets, and process-tagged packets | `NewPCAPNGWriter`, `PCAPNGWriter.WritePacket`, `PCAPNGWriter.WriteDecryptionSecrets` | [Write PcapNG](docs/parsing.md#write-pcapng-captures) |
 | Capture live interface packets without CGO or libpcap | `OpenLive`, `LiveCapture.ReadPacket`, `ParseBPFBuffer` | [Live capture](docs/parsing.md#capture-live-interface-traffic) |
 | Check truncation, extents, and container anomalies | `Capture.DeclaredExtent`, `Capture.InputTruncated`, `Capture.Anomalies` | [Bounds and anomalies](docs/parsing.md#inspect-truncation-and-anomalies) |
-| Enumerate bounded packet records and payload slices | `Capture.Packets`, `Capture.PacketPayload`, `Capture.PacketsFromReaderAt` | [Packet records](docs/parsing.md#read-packet-records) |
+| Enumerate bounded packet records and payload slices | `Capture.PacketSeq`, `Capture.Packets`, `Capture.PacketPayload`, `Capture.PacketsFromReaderAt` | [Packet records](docs/parsing.md#read-packet-records) |
 | Decode L2–L4 frames and compute JA4T fingerprints | `DecodeFrame`, `Frame.JA4T`, `JA4T` | [Frame decoding](docs/parsing.md#decode-l2-l4-frames) |
 | Aggregate deterministic 5-tuple flows | `Capture.Flows` | [Flow aggregation](docs/parsing.md#aggregate-5-tuple-flows) |
 | Reassemble bounded TCP byte streams | `Capture.Streams`, `ReassembleTCP` | [TCP reassembly](docs/parsing.md#reassemble-tcp-streams) |
 | Parse DNS queries and resource records | `Capture.DNS`, `Capture.HasDNSQuery`, `ParseDNS` | [DNS messages](docs/parsing.md#parse-dns-messages) |
-| Parse TLS handshakes, X.509 certificates, and JA4/JA4S/JA4X | `Capture.TLS`, `Capture.HasTLSJA4`, `Capture.HasTLSSNI`, `ParseTLSRecords`, `JA4XFromDER` | [TLS handshakes](docs/parsing.md#parse-tls-handshakes-and-ja4-fingerprints) |
+| Parse TLS handshakes, X.509 certificates, and JA4/JA4S/JA4X | `Capture.TLS`, `Capture.TLSWithKeyLog`, `Capture.HasTLSJA4`, `Capture.HasTLSSNI`, `ParseTLSRecords`, `JA4XFromDER` | [TLS handshakes](docs/parsing.md#parse-tls-handshakes-and-ja4-fingerprints) |
 | Decrypt QUIC v1/v2 Initial packets and extract inner TLS 1.3 JA4 | `Capture.QUIC`, `Capture.HasQUICJA4`, `Capture.HasQUICSNI`, `DecryptQUICInitial`, `ParseQUICInitialPacket` | [QUIC Initial](docs/parsing.md#decrypt-quic-initial-packets) |
 | Decrypt TLS 1.3 streams offline via PcapNG DSB or keylog | `Capture.DecryptedTLSStreams`, `Capture.TLSKeyLog`, `DecryptTLS13Records`, `ParseTLSKeyLog` | [TLS decryption](docs/parsing.md#decrypt-tls-13-streams-offline) |
 | Parse HTTP/1.x, compute JA4H, and carve payloads | `Capture.HTTP`, `ParseHTTPRequest`, `ParseHTTPResponse` | [HTTP and carving](docs/parsing.md#parse-http-messages-and-carve-payloads) |
@@ -176,6 +176,7 @@ install Go.
 ## References
 
 - [Parsing guide](docs/parsing.md)
+- [Workload comparisons and parser audit](docs/workloads-and-audit.md)
 - [Architecture, roadmap, and YARA integration](docs/architecture.md)
 - [Release guide](docs/releases.md)
 - [Changelog](CHANGELOG.md)

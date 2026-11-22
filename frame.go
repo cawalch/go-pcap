@@ -476,40 +476,82 @@ func makeCanonicalFlowKey(proto uint8, src netip.Addr, srcPort uint16, dst netip
 	}, false
 }
 
+// flowIndexTable indexes canonical 5-tuple flow keys without heap allocations
+// when a capture contains up to 12 flows, spilling to an open-addressed table
+// for larger flow counts.
+type flowIndexTable struct {
+	inlineKeys [12]flowKey
+	inlineIdx  [12]int
+	count      int
+	overflow   map[flowKey]int
+}
+
+func (t *flowIndexTable) lookupOrInsert(k flowKey) (idx int, exists bool, err error) {
+	if t.overflow != nil {
+		if idx, ok := t.overflow[k]; ok {
+			return idx, true, nil
+		}
+		if t.count >= MaxFlows {
+			return 0, false, fmt.Errorf("%w: exceeds %d", ErrFlowLimit, MaxFlows)
+		}
+		idx = t.count
+		t.count++
+		t.overflow[k] = idx
+		return idx, false, nil
+	}
+	for i := range t.count {
+		if t.inlineKeys[i] == k {
+			return t.inlineIdx[i], true, nil
+		}
+	}
+	if t.count < len(t.inlineKeys) {
+		idx = t.count
+		t.inlineKeys[idx] = k
+		t.inlineIdx[idx] = idx
+		t.count++
+		return idx, false, nil
+	}
+	t.overflow = make(map[flowKey]int, 32)
+	for i := range t.count {
+		t.overflow[t.inlineKeys[i]] = t.inlineIdx[i]
+	}
+	idx = t.count
+	t.count++
+	t.overflow[k] = idx
+	return idx, false, nil
+}
+
 // Flows decodes all packets in the capture and aggregates IPv4/IPv6 flows in
-// deterministic first-seen order. Non-IP packets (such as ARP) are skipped.
+// deterministic first-seen order without allocating intermediate packet slices.
+// Non-IP packets (such as ARP) are skipped.
 func (c *Capture) Flows(data []byte) ([]FlowSummary, error) {
-	packets, err := c.Packets(data)
-	if err != nil {
+	if err := c.validateContainer(); err != nil {
 		return nil, err
 	}
-	if len(packets) == 0 {
+	if c.PacketCount == 0 {
 		return nil, nil
 	}
 
-	r := NewSafeReader(data)
-	indexByKey := make(map[flowKey]int, min(len(packets), 256))
+	r := SafeReader{data: data, size: int64(len(data))}
+	var table flowIndexTable
 	var flows []FlowSummary
 
-	for i := range packets {
-		pkt := &packets[i]
+	err := c.walkPackets(&r, func(pkt PacketRecord) error {
 		payload, err := r.Slice(pkt.PayloadOffset, pkt.PayloadLength)
 		if err != nil {
-			return nil, err
+			return err
 		}
 		frame, err := DecodeFrame(payload, pkt.LinkType)
 		if err != nil || frame.IPVersion == 0 {
-			continue
+			return nil
 		}
 
 		key, _ := makeCanonicalFlowKey(frame.IPProtocol, frame.SrcAddr, frame.SrcPort, frame.DstAddr, frame.DstPort)
-		idx, exists := indexByKey[key]
+		idx, exists, err := table.lookupOrInsert(key)
+		if err != nil {
+			return err
+		}
 		if !exists {
-			if len(flows) >= MaxFlows {
-				return nil, fmt.Errorf("%w: exceeds %d", ErrFlowLimit, MaxFlows)
-			}
-			idx = len(flows)
-			indexByKey[key] = idx
 			flows = append(flows, FlowSummary{
 				Protocol:         frame.IPProtocol,
 				SrcAddr:          frame.SrcAddr,
@@ -555,6 +597,10 @@ func (c *Capture) Flows(data []byte) ([]FlowSummary, error) {
 				}
 			}
 		}
+		return nil
+	})
+	if err != nil {
+		return nil, err
 	}
 
 	return flows, nil

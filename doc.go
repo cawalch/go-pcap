@@ -18,7 +18,8 @@
 // structural anomalies.
 //
 // To enumerate packet records in file order, pass the original bytes to
-// [Capture.Packets] and slice individual packet frames with
+// [Capture.PacketSeq] (single-pass iterator without slice allocation) or
+// [Capture.Packets], and slice individual packet frames with
 // [Capture.PacketPayload]. Each [PacketRecord] reports normalized nanosecond
 // timestamps, zero-copy payload offsets, and any PcapNG Enhanced Packet Block
 // process attribution (process ID, thread ID, flags, and drop counts).

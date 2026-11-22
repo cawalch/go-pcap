@@ -72,6 +72,7 @@ const (
 	optIDBDescription uint16 = 3
 	optIDBTsResol     uint16 = 9
 	optIDBOS          uint16 = 12
+	optIDBTsOffset    uint16 = 14
 
 	// Enhanced Packet Block (EPB) options (including Wireshark/ptcpdump process extensions).
 	optEPBFlags     uint16 = 2

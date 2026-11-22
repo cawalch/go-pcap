@@ -362,43 +362,35 @@ func isDNSPort(port uint16) bool {
 // DNS extracts and parses DNS messages across all UDP (ports 53, 5353, 5355)
 // and TCP (port 53 length-prefixed) packets in the capture.
 func (c *Capture) DNS(data []byte) ([]DNSRecord, error) {
-	packets, err := c.Packets(data)
-	if err != nil {
+	if err := c.validateContainer(); err != nil {
 		return nil, err
 	}
-	if len(packets) == 0 {
+	if c.PacketCount == 0 {
 		return nil, nil
 	}
 
 	r := SafeReader{data: data, size: int64(len(data))}
-	flowIndexByKey := make(map[flowKey]int)
-	nextFlowIdx := 0
+	var table flowIndexTable
 	var records []DNSRecord
 
-	for i := range packets {
-		pkt := &packets[i]
+	err := c.walkPackets(&r, func(pkt PacketRecord) error {
 		payload, err := r.Slice(pkt.PayloadOffset, pkt.PayloadLength)
 		if err != nil {
-			return nil, err
+			return err
 		}
 		frame, err := DecodeFrame(payload, pkt.LinkType)
 		if err != nil || frame.IPVersion == 0 {
-			continue
+			return nil
 		}
 
 		key, _ := makeCanonicalFlowKey(frame.IPProtocol, frame.SrcAddr, frame.SrcPort, frame.DstAddr, frame.DstPort)
-		flowIdx, exists := flowIndexByKey[key]
-		if !exists {
-			if nextFlowIdx >= MaxFlows {
-				return nil, fmt.Errorf("%w: exceeds %d", ErrFlowLimit, MaxFlows)
-			}
-			flowIdx = nextFlowIdx
-			nextFlowIdx++
-			flowIndexByKey[key] = flowIdx
+		flowIdx, _, err := table.lookupOrInsert(key)
+		if err != nil {
+			return err
 		}
 
 		if frame.PayloadLength == 0 || !isDNSPort(frame.SrcPort) && !isDNSPort(frame.DstPort) {
-			continue
+			return nil
 		}
 		l4 := payload[frame.PayloadOffset : frame.PayloadOffset+frame.PayloadLength]
 
@@ -406,10 +398,10 @@ func (c *Capture) DNS(data []byte) ([]DNSRecord, error) {
 		case IPProtoUDP:
 			msg, err := ParseDNS(l4)
 			if err != nil {
-				continue
+				return nil
 			}
 			if len(records) >= MaxDNSMessagesPerScan {
-				return nil, fmt.Errorf("%w: exceeds %d messages", ErrDNSLimit, MaxDNSMessagesPerScan)
+				return fmt.Errorf("%w: exceeds %d messages", ErrDNSLimit, MaxDNSMessagesPerScan)
 			}
 			records = append(records, DNSRecord{
 				PacketIndex: pkt.Index,
@@ -424,18 +416,18 @@ func (c *Capture) DNS(data []byte) ([]DNSRecord, error) {
 
 		case IPProtoTCP:
 			if len(l4) < 14 {
-				continue
+				return nil
 			}
 			dnsLen := int(binary.BigEndian.Uint16(l4[0:2]))
 			if dnsLen < 12 || 2+dnsLen > len(l4) {
-				continue
+				return nil
 			}
 			msg, err := ParseDNS(l4[2 : 2+dnsLen])
 			if err != nil {
-				continue
+				return nil
 			}
 			if len(records) >= MaxDNSMessagesPerScan {
-				return nil, fmt.Errorf("%w: exceeds %d messages", ErrDNSLimit, MaxDNSMessagesPerScan)
+				return fmt.Errorf("%w: exceeds %d messages", ErrDNSLimit, MaxDNSMessagesPerScan)
 			}
 			records = append(records, DNSRecord{
 				PacketIndex: pkt.Index,
@@ -448,6 +440,10 @@ func (c *Capture) DNS(data []byte) ([]DNSRecord, error) {
 				Message:     msg,
 			})
 		}
+		return nil
+	})
+	if err != nil {
+		return nil, err
 	}
 
 	return records, nil
@@ -459,45 +455,49 @@ func (c *Capture) HasDNSQuery(data []byte, qname string) (bool, error) {
 	if err := c.validateContainer(); err != nil {
 		return false, err
 	}
-	target := strings.TrimSuffix(qname, ".")
-	packets, err := c.Packets(data)
-	if err != nil {
-		return false, err
+	if c.PacketCount == 0 {
+		return false, nil
 	}
+	target := strings.TrimSuffix(qname, ".")
 	r := SafeReader{data: data, size: int64(len(data))}
+	found := false
 
-	for i := range packets {
-		pkt := &packets[i]
+	err := c.walkPackets(&r, func(pkt PacketRecord) error {
 		payload, err := r.Slice(pkt.PayloadOffset, pkt.PayloadLength)
 		if err != nil {
-			return false, err
+			return err
 		}
 		frame, err := DecodeFrame(payload, pkt.LinkType)
 		if err != nil || frame.IPVersion == 0 || frame.PayloadLength == 0 {
-			continue
+			return nil
 		}
 		if !isDNSPort(frame.SrcPort) && !isDNSPort(frame.DstPort) {
-			continue
+			return nil
 		}
 		l4 := payload[frame.PayloadOffset : frame.PayloadOffset+frame.PayloadLength]
 		dnsPayload := l4
 		if frame.IPProtocol == IPProtoTCP {
 			if len(l4) < 14 {
-				continue
+				return nil
 			}
 			dnsLen := int(binary.BigEndian.Uint16(l4[0:2]))
 			if dnsLen < 12 || 2+dnsLen > len(l4) {
-				continue
+				return nil
 			}
 			dnsPayload = l4[2 : 2+dnsLen]
 		} else if frame.IPProtocol != IPProtoUDP {
-			continue
+			return nil
 		}
 		if dnsPayloadHasQuery(dnsPayload, target) {
-			return true, nil
+			found = true
+			return errStopWalk
 		}
+		return nil
+	})
+	if err != nil {
+		return false, err
 	}
-	return false, nil
+	return found, nil
 }
 
 func dnsPayloadHasQuery(payload []byte, target string) bool {

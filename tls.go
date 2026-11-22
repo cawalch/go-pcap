@@ -889,7 +889,18 @@ func mergeTLSAnomalies(a, b TLSAnomalies) TLSAnomalies {
 
 // TLS extracts TLS handshakes (ClientHello, ServerHello, X.509 certificates,
 // JA4, JA4S, and JA4X) across all reassembled TCP streams in the capture.
+// When the capture contains PcapNG Decryption Secrets Blocks (DSB) with
+// SERVER_HANDSHAKE_TRAFFIC_SECRET matching a TLS 1.3 ClientHello.Random, TLS
+// also decrypts and extracts the encrypted server Certificate handshake message.
 func (c *Capture) TLS(data []byte) ([]TLSRecord, error) {
+	return c.TLSWithKeyLog(data, nil)
+}
+
+// TLSWithKeyLog extracts TLS handshakes across all reassembled TCP streams in
+// the capture, using embedded PcapNG Decryption Secrets Blocks (DSB) and
+// optional extraKeyLog bytes to decrypt TLS 1.3 server Certificate handshake
+// messages when SERVER_HANDSHAKE_TRAFFIC_SECRET is available.
+func (c *Capture) TLSWithKeyLog(data []byte, extraKeyLog []byte) ([]TLSRecord, error) {
 	streams, err := c.Streams(data)
 	if err != nil {
 		return nil, err
@@ -897,6 +908,8 @@ func (c *Capture) TLS(data []byte) ([]TLSRecord, error) {
 	if len(streams) == 0 {
 		return nil, nil
 	}
+
+	keyLog, _ := c.TLSKeyLog(extraKeyLog)
 
 	var records []TLSRecord
 	for i := range streams {
@@ -931,6 +944,16 @@ func (c *Capture) TLS(data []byte) ([]TLSRecord, error) {
 			}
 		}
 
+		// In TLS 1.3, the server Certificate message is encrypted inside outer
+		// ApplicationData records under SERVER_HANDSHAKE_TRAFFIC_SECRET.
+		if merged.HasClientHello && merged.HasServerHello && len(merged.Certificates) == 0 && keyLog != nil && len(keyLog.Entries) > 0 {
+			if entry, ok := keyLog.Entries[merged.ClientHello.Random]; ok && len(entry.ServerHandshakeSecret) > 0 {
+				if hsPlain, _, err := DecryptTLS13Records(st.Server.Data, merged.ServerHello.CipherSuite, entry.ServerHandshakeSecret, nil); err == nil && len(hsPlain) >= 4 {
+					parseDecryptedTLS13HandshakeCertificates(hsPlain, &merged)
+				}
+			}
+		}
+
 		if found {
 			if len(records) >= MaxTLSHandshakesPerScan {
 				return nil, fmt.Errorf("%w: exceeds %d TLS handshakes", ErrTLSLimit, MaxTLSHandshakesPerScan)
@@ -947,6 +970,98 @@ func (c *Capture) TLS(data []byte) ([]TLSRecord, error) {
 	}
 
 	return records, nil
+}
+
+func parseDecryptedTLS13HandshakeCertificates(hsData []byte, out *TLSHandshake) {
+	offset := 0
+	for offset+4 <= len(hsData) {
+		msgType := hsData[offset]
+		msgLen := int(hsData[offset+1])<<16 | int(hsData[offset+2])<<8 | int(hsData[offset+3])
+		if msgLen > MaxTLSHandshakeBytes || offset+4+msgLen > len(hsData) {
+			break
+		}
+		body := hsData[offset+4 : offset+4+msgLen]
+		offset += 4 + msgLen
+
+		if msgType == TLSHandshakeCertificate && len(out.Certificates) == 0 {
+			if certs, certAnom, err := parseTLSCertificateWithTLS13Context(body); err == nil && len(certs) > 0 {
+				out.Certificates = certs
+				out.Anomalies = mergeTLSAnomalies(out.Anomalies, certAnom)
+				return
+			}
+		}
+	}
+}
+
+// parseTLSCertificateWithTLS13Context parses a TLS 1.3 Certificate handshake
+// body (RFC 8446 §4.4.2: 1-byte certificate_request_context length + context,
+// followed by 3-byte certificate_list length and entries where each entry has
+// a 3-byte cert_data length, DER bytes, and a 2-byte extensions length) or
+// falls back to TLS 1.2 Certificate body layout.
+func parseTLSCertificateWithTLS13Context(body []byte) ([]TLSCertificate, TLSAnomalies, error) {
+	var anomalies TLSAnomalies
+	if len(body) < 4 {
+		return nil, anomalies, ErrInvalidTLS
+	}
+	ctxLen := int(body[0])
+	if 1+ctxLen+3 > len(body) {
+		return parseTLSCertificateBody(body)
+	}
+	pos := 1 + ctxLen
+	listLen := int(body[pos])<<16 | int(body[pos+1])<<8 | int(body[pos+2])
+	pos += 3
+	if pos+listLen != len(body) {
+		// Fall back to TLS 1.2 layout (no certificate_request_context prefix or per-cert extensions).
+		return parseTLSCertificateBody(body)
+	}
+
+	end := pos + listLen
+	var certs []TLSCertificate
+	for pos+3 <= end && len(certs) < MaxTLSCertificates {
+		certLen := int(body[pos])<<16 | int(body[pos+1])<<8 | int(body[pos+2])
+		pos += 3
+		if certLen <= 0 || pos+certLen > end {
+			anomalies.TruncatedRecord = true
+			break
+		}
+		der := bytes.Clone(body[pos : pos+certLen])
+		pos += certLen
+
+		// TLS 1.3 CertificateEntry carries a 2-byte extensions length after cert_data.
+		if pos+2 <= end {
+			extLen := int(binary.BigEndian.Uint16(body[pos : pos+2]))
+			if pos+2+extLen <= end {
+				pos += 2 + extLen
+			}
+		}
+
+		parsed, err := x509.ParseCertificate(der)
+		if err != nil {
+			anomalies.InvalidCertificateDER = true
+			continue
+		}
+		selfSigned := bytes.Equal(parsed.RawIssuer, parsed.RawSubject)
+		if len(certs) == 0 && selfSigned {
+			anomalies.SelfSignedCertificate = true
+		}
+		var serialHex string
+		if parsed.SerialNumber != nil {
+			serialHex = hex.EncodeToString(parsed.SerialNumber.Bytes())
+		}
+		certs = append(certs, TLSCertificate{
+			Version:    parsed.Version,
+			Serial:     serialHex,
+			Subject:    parsed.Subject.String(),
+			Issuer:     parsed.Issuer.String(),
+			NotBefore:  parsed.NotBefore.Unix(),
+			NotAfter:   parsed.NotAfter.Unix(),
+			DNSNames:   slices.Clone(parsed.DNSNames),
+			SelfSigned: selfSigned,
+			JA4X:       JA4XFromCert(parsed),
+			RawDER:     der,
+		})
+	}
+	return certs, anomalies, nil
 }
 
 func findTLSHandshakeStart(buf []byte) int {

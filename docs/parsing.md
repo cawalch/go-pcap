@@ -58,7 +58,9 @@ The following limits apply to each parse call:
 Use `errors.Is` with `ErrNotPCAP`, `ErrInvalidMagic`, `ErrInvalidHeader`,
 `ErrInvalidBlock`, `ErrInvalidPacket`, `ErrInvalidFrame`, `ErrInterfaceLimit`,
 `ErrPacketLimit`, `ErrFlowLimit`, `ErrSecretLimit`, `ErrOptionLimit`,
-`ErrOutOfBounds`, or `ErrIntegerOverflow` to classify failures.
+`ErrOutOfBounds`, or `ErrIntegerOverflow` to classify failures. See
+[Workload comparisons and parser audit](workloads-and-audit.md) for worst-case
+complexity bounds, adversarial input handling, and benchmark measurements.
 
 ## Inspect truncation and anomalies
 

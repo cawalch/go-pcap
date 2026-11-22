@@ -240,42 +240,34 @@ type flowSegments struct {
 // Streams reassembles bounded TCP byte streams for all TCP flows in the capture
 // in deterministic first-seen flow order.
 func (c *Capture) Streams(data []byte) ([]TCPStream, error) {
-	packets, err := c.Packets(data)
-	if err != nil {
+	if err := c.validateContainer(); err != nil {
 		return nil, err
 	}
-	if len(packets) == 0 {
+	if c.PacketCount == 0 {
 		return nil, nil
 	}
 
 	r := SafeReader{data: data, size: int64(len(data))}
-	flowIndexByKey := make(map[flowKey]int)
+	var table flowIndexTable
 	tcpSlotByFlow := make(map[int]int)
 	var collected []flowSegments
-	nextFlowIdx := 0
 
-	for i := range packets {
-		pkt := &packets[i]
+	err := c.walkPackets(&r, func(pkt PacketRecord) error {
 		payload, err := r.Slice(pkt.PayloadOffset, pkt.PayloadLength)
 		if err != nil {
-			return nil, err
+			return err
 		}
 		frame, err := DecodeFrame(payload, pkt.LinkType)
 		if err != nil || frame.IPVersion == 0 {
-			continue
+			return nil
 		}
 		key, _ := makeCanonicalFlowKey(frame.IPProtocol, frame.SrcAddr, frame.SrcPort, frame.DstAddr, frame.DstPort)
-		flowIdx, exists := flowIndexByKey[key]
-		if !exists {
-			if nextFlowIdx >= MaxFlows {
-				return nil, fmt.Errorf("%w: exceeds %d", ErrFlowLimit, MaxFlows)
-			}
-			flowIdx = nextFlowIdx
-			nextFlowIdx++
-			flowIndexByKey[key] = flowIdx
+		flowIdx, _, err := table.lookupOrInsert(key)
+		if err != nil {
+			return err
 		}
 		if frame.IPProtocol != IPProtoTCP {
-			continue
+			return nil
 		}
 
 		slot, hasSlot := tcpSlotByFlow[flowIdx]
@@ -303,15 +295,19 @@ func (c *Capture) Streams(data []byte) ([]TCPStream, error) {
 		}
 		if frame.SrcAddr == entry.srcAddr && frame.SrcPort == entry.srcPort {
 			if len(entry.client) >= MaxSegmentsPerFlow {
-				return nil, fmt.Errorf("%w: flow %d client segments exceed %d", ErrReassemblyLimit, flowIdx, MaxSegmentsPerFlow)
+				return fmt.Errorf("%w: flow %d client segments exceed %d", ErrReassemblyLimit, flowIdx, MaxSegmentsPerFlow)
 			}
 			entry.client = append(entry.client, seg)
 		} else {
 			if len(entry.server) >= MaxSegmentsPerFlow {
-				return nil, fmt.Errorf("%w: flow %d server segments exceed %d", ErrReassemblyLimit, flowIdx, MaxSegmentsPerFlow)
+				return fmt.Errorf("%w: flow %d server segments exceed %d", ErrReassemblyLimit, flowIdx, MaxSegmentsPerFlow)
 			}
 			entry.server = append(entry.server, seg)
 		}
+		return nil
+	})
+	if err != nil {
+		return nil, err
 	}
 
 	if len(collected) == 0 {

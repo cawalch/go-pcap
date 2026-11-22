@@ -157,11 +157,10 @@ func medianUint64(sorted []uint64) uint64 {
 // directional Producer-Consumer Ratio (PCR) metrics for every IPv4/IPv6 flow in
 // the capture.
 func (c *Capture) Beacons(data []byte) ([]FlowBeacon, error) {
-	packets, err := c.Packets(data)
-	if err != nil {
+	if err := c.validateContainer(); err != nil {
 		return nil, err
 	}
-	if len(packets) == 0 {
+	if c.PacketCount == 0 {
 		return nil, nil
 	}
 
@@ -179,28 +178,25 @@ func (c *Capture) Beacons(data []byte) ([]FlowBeacon, error) {
 	}
 
 	r := SafeReader{data: data, size: int64(len(data))}
-	indexByKey := make(map[flowKey]int)
+	var table flowIndexTable
 	var flows []flowAccum
 
-	for i := range packets {
-		pkt := &packets[i]
+	err := c.walkPackets(&r, func(pkt PacketRecord) error {
 		payload, err := r.Slice(pkt.PayloadOffset, pkt.PayloadLength)
 		if err != nil {
-			return nil, err
+			return err
 		}
 		frame, err := DecodeFrame(payload, pkt.LinkType)
 		if err != nil || frame.IPVersion == 0 {
-			continue
+			return nil
 		}
 
 		key, _ := makeCanonicalFlowKey(frame.IPProtocol, frame.SrcAddr, frame.SrcPort, frame.DstAddr, frame.DstPort)
-		idx, exists := indexByKey[key]
+		idx, exists, err := table.lookupOrInsert(key)
+		if err != nil {
+			return err
+		}
 		if !exists {
-			if len(flows) >= MaxFlows {
-				return nil, ErrFlowLimit
-			}
-			idx = len(flows)
-			indexByKey[key] = idx
 			flows = append(flows, flowAccum{
 				flowIndex: idx,
 				proto:     frame.IPProtocol,
@@ -219,6 +215,10 @@ func (c *Capture) Beacons(data []byte) ([]FlowBeacon, error) {
 		} else {
 			fa.serverBytes += uint64(frame.PayloadLength)
 		}
+		return nil
+	})
+	if err != nil {
+		return nil, err
 	}
 
 	out := make([]FlowBeacon, len(flows))

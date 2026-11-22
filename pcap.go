@@ -3,8 +3,11 @@ package pcap
 import (
 	"bytes"
 	"encoding/binary"
+	"errors"
 	"fmt"
+	"iter"
 	"math"
+	"math/bits"
 	"os"
 )
 
@@ -30,9 +33,18 @@ type InterfaceDescriptor struct {
 	Description string
 	OS          string
 	// TimestampScaleNs is the multiplier in nanoseconds per raw timestamp tick
-	// when TimestampsBinary is false (default 1,000 for microsecond resolution,
+	// when TimestampBinary is false (default 1,000 for microsecond resolution,
 	// 1 for nanosecond resolution).
 	TimestampScaleNs uint64
+	// TimestampBinary reports whether if_tsresol uses a binary power-of-two
+	// resolution (2^-TimestampExponent seconds per tick).
+	TimestampBinary bool
+	// TimestampExponent is the decimal (10^-N) or binary (2^-N) exponent from
+	// PcapNG option if_tsresol (default 6 for 10^-6 s).
+	TimestampExponent uint8
+	// TimestampOffsetSec is the signed seconds offset from PcapNG option
+	// if_tsoffset added to raw packet timestamps.
+	TimestampOffsetSec int64
 }
 
 // DecryptionSecret holds key material from a PcapNG Decryption Secrets Block (DSB),
@@ -46,12 +58,13 @@ type DecryptionSecret struct {
 
 // CaptureAnomalies reports non-fatal container or packet framing anomalies.
 type CaptureAnomalies struct {
-	TruncatedPacketBlock      bool
-	CaptureLenExceedsOriginal bool
-	CaptureLenExceedsSnapLen  bool
-	UnknownLinkType           bool
-	TrailingBytes             bool
-	UnalignedBlockLength      bool
+	TruncatedPacketBlock       bool
+	CaptureLenExceedsOriginal  bool
+	CaptureLenExceedsSnapLen   bool
+	UnknownLinkType            bool
+	TrailingBytes              bool
+	UnalignedBlockLength       bool
+	InvalidTimestampResolution bool
 }
 
 // Any reports whether any container anomaly was detected.
@@ -61,7 +74,8 @@ func (a CaptureAnomalies) Any() bool {
 		a.CaptureLenExceedsSnapLen ||
 		a.UnknownLinkType ||
 		a.TrailingBytes ||
-		a.UnalignedBlockLength
+		a.UnalignedBlockLength ||
+		a.InvalidTimestampResolution
 }
 
 // PacketRecord describes one captured packet's metadata and payload byte span
@@ -233,9 +247,61 @@ func (c *Capture) PacketPayload(data []byte, pkt PacketRecord) ([]byte, error) {
 	return r.Slice(pkt.PayloadOffset, pkt.PayloadLength)
 }
 
+// PacketSeq returns a single-pass iterator over packet records in file order
+// without allocating a slice of [PacketRecord] values.
+func (c *Capture) PacketSeq(data []byte) iter.Seq2[PacketRecord, error] {
+	return func(yield func(PacketRecord, error) bool) {
+		if err := c.validateContainer(); err != nil {
+			yield(PacketRecord{}, err)
+			return
+		}
+		r := SafeReader{data: data, size: int64(len(data))}
+		stopped := false
+		err := c.walkPackets(&r, func(pkt PacketRecord) error {
+			if !yield(pkt, nil) {
+				stopped = true
+				return errStopWalk
+			}
+			return nil
+		})
+		if err != nil && !stopped {
+			yield(PacketRecord{}, err)
+		}
+	}
+}
+
+var errStopWalk = errors.New("stop packet walk")
+
+func (c *Capture) walkPackets(r *SafeReader, fn func(PacketRecord) error) error {
+	if err := c.validateContainer(); err != nil {
+		return err
+	}
+	switch c.Format {
+	case FormatPCAP:
+		order := binary.ByteOrder(binary.LittleEndian)
+		if c.BigEndian {
+			order = binary.BigEndian
+		}
+		_, _, err := scanClassicPCAPPacketsWithCallback(r, c.SnapLen, c.LinkType, order, c.NanoTimestamp, false, 0, fn)
+		if errors.Is(err, errStopWalk) {
+			return nil
+		}
+		return err
+	case FormatPCAPNG:
+		_, _, err := scanPCAPNGBlocksWithCallback(r, false, 0, fn)
+		if errors.Is(err, errStopWalk) {
+			return nil
+		}
+		return err
+	default:
+		return ErrInvalidHeader
+	}
+}
+
 // Packets enumerates bounded packet records in file order from the original
 // bytes passed to [New]. It does not copy packet payloads; use
-// [Capture.PacketPayload] to slice a packet's bytes from data.
+// [Capture.PacketPayload] to slice a packet's bytes from data, or
+// [Capture.PacketSeq] to stream packets without allocating a slice.
 func (c *Capture) Packets(data []byte) ([]PacketRecord, error) {
 	if err := c.validateContainer(); err != nil {
 		return nil, err
@@ -247,10 +313,10 @@ func (c *Capture) Packets(data []byte) ([]PacketRecord, error) {
 		if c.BigEndian {
 			order = binary.BigEndian
 		}
-		_, packets, err := scanClassicPCAPPackets(&r, c.SnapLen, c.LinkType, order, c.NanoTimestamp, true, c.PacketCount)
+		_, packets, err := scanClassicPCAPPackets(r, c.SnapLen, c.LinkType, order, c.NanoTimestamp, true, c.PacketCount)
 		return packets, err
 	case FormatPCAPNG:
-		_, packets, err := scanPCAPNGBlocks(&r, true, c.PacketCount)
+		_, packets, err := scanPCAPNGBlocks(r, true, c.PacketCount)
 		return packets, err
 	default:
 		return nil, ErrInvalidHeader
@@ -289,7 +355,7 @@ func parseClassicPCAP(r *SafeReader, fileSize int64, order binary.ByteOrder, nan
 	rawLinkType, _ := r.ReadUint32Order(20, order)
 	linkType := LinkType(rawLinkType & 0xffff)
 
-	meta, _, err := scanClassicPCAPPackets(r, snapLen, linkType, order, nano, false, 0)
+	meta, _, err := scanClassicPCAPPackets(*r, snapLen, linkType, order, nano, false, 0)
 	if err != nil {
 		return nil, err
 	}
@@ -298,8 +364,10 @@ func parseClassicPCAP(r *SafeReader, fileSize int64, order binary.ByteOrder, nan
 	}
 
 	scaleNs := uint64(1_000)
+	exp := uint8(6)
 	if nano {
 		scaleNs = 1
+		exp = 9
 	}
 
 	return &Capture{
@@ -311,10 +379,11 @@ func parseClassicPCAP(r *SafeReader, fileSize int64, order binary.ByteOrder, nan
 		SnapLen:       snapLen,
 		LinkType:      linkType,
 		Interfaces: []InterfaceDescriptor{{
-			ID:               0,
-			LinkType:         linkType,
-			SnapLen:          snapLen,
-			TimestampScaleNs: scaleNs,
+			ID:                0,
+			LinkType:          linkType,
+			SnapLen:           snapLen,
+			TimestampScaleNs:  scaleNs,
+			TimestampExponent: exp,
 		}},
 		PacketCount:    meta.packetCount,
 		fileSize:       fileSize,
@@ -338,6 +407,18 @@ type scanSummary struct {
 }
 
 func scanClassicPCAPPackets(
+	r SafeReader,
+	snapLen uint32,
+	linkType LinkType,
+	order binary.ByteOrder,
+	nano bool,
+	collect bool,
+	hintCount int,
+) (scanSummary, []PacketRecord, error) {
+	return scanClassicPCAPPacketsWithCallback(&r, snapLen, linkType, order, nano, collect, hintCount, nil)
+}
+
+func scanClassicPCAPPacketsWithCallback(
 	r *SafeReader,
 	snapLen uint32,
 	linkType LinkType,
@@ -345,6 +426,7 @@ func scanClassicPCAPPackets(
 	nano bool,
 	collect bool,
 	hintCount int,
+	cb func(PacketRecord) error,
 ) (scanSummary, []PacketRecord, error) {
 	summary := scanSummary{
 		declaredExtent: pcapGlobalHeaderSize,
@@ -392,13 +474,13 @@ func scanClassicPCAPPackets(
 		}
 		summary.packetCount++
 
-		if collect {
+		if collect || cb != nil {
 			subNs := int64(tsSub) * 1_000
 			if nano {
 				subNs = int64(tsSub)
 			}
 			tsNs := int64(tsSec)*1_000_000_000 + subNs
-			packets = append(packets, PacketRecord{
+			rec := PacketRecord{
 				Index:         summary.packetCount - 1,
 				InterfaceID:   0,
 				LinkType:      linkType,
@@ -407,7 +489,15 @@ func scanClassicPCAPPackets(
 				OriginalLen:   origLen,
 				PayloadOffset: payloadOffset,
 				PayloadLength: int64(capLen),
-			})
+			}
+			if collect {
+				packets = append(packets, rec)
+			}
+			if cb != nil {
+				if err := cb(rec); err != nil {
+					return summary, packets, err
+				}
+			}
 		}
 
 		offset = int64(recordEnd)
@@ -417,7 +507,7 @@ func scanClassicPCAPPackets(
 }
 
 func parsePCAPNG(r *SafeReader, fileSize int64) (*Capture, error) {
-	meta, _, err := scanPCAPNGBlocks(r, false, 0)
+	meta, _, err := scanPCAPNGBlocks(*r, false, 0)
 	if err != nil {
 		return nil, err
 	}
@@ -446,7 +536,11 @@ func parsePCAPNG(r *SafeReader, fileSize int64) (*Capture, error) {
 	}, nil
 }
 
-func scanPCAPNGBlocks(r *SafeReader, collectPackets bool, hintCount int) (scanSummary, []PacketRecord, error) {
+func scanPCAPNGBlocks(r SafeReader, collectPackets bool, hintCount int) (scanSummary, []PacketRecord, error) {
+	return scanPCAPNGBlocksWithCallback(&r, collectPackets, hintCount, nil)
+}
+
+func scanPCAPNGBlocksWithCallback(r *SafeReader, collectPackets bool, hintCount int, cb func(PacketRecord) error) (scanSummary, []PacketRecord, error) {
 	size := r.Size()
 	if size < pcapngSHBMinSize {
 		return scanSummary{}, nil, fmt.Errorf("%w: PcapNG section header block shorter than %d bytes", ErrInvalidHeader, pcapngSHBMinSize)
@@ -540,11 +634,11 @@ func scanPCAPNGBlocks(r *SafeReader, collectPackets bool, hintCount int) (scanSu
 				return scanSummary{}, nil, err
 			}
 		case BlockTypeEnhancedPacket:
-			if err := decodeEPB(r, bodyStart, bodyEnd, order, collectPackets, &summary, &packets); err != nil {
+			if err := decodeEPBWithCallback(r, bodyStart, bodyEnd, order, collectPackets, &summary, &packets, cb); err != nil {
 				return scanSummary{}, nil, err
 			}
 		case BlockTypeSimplePacket:
-			if err := decodeSPB(r, bodyStart, bodyEnd, order, collectPackets, &summary, &packets); err != nil {
+			if err := decodeSPBWithCallback(r, bodyStart, bodyEnd, order, collectPackets, &summary, &packets, cb); err != nil {
 				return scanSummary{}, nil, err
 			}
 		case BlockTypeDecryptionSecrets:
@@ -623,10 +717,11 @@ func decodeIDB(
 	}
 
 	iface := InterfaceDescriptor{
-		ID:               uint32(len(summary.interfaces)),
-		LinkType:         LinkType(rawLink),
-		SnapLen:          snapLen,
-		TimestampScaleNs: defaultTimestampResolN,
+		ID:                uint32(len(summary.interfaces)),
+		LinkType:          LinkType(rawLink),
+		SnapLen:           snapLen,
+		TimestampScaleNs:  defaultTimestampResolN,
+		TimestampExponent: 6,
 	}
 	if !isKnownLinkType(iface.LinkType) {
 		summary.anomalies.UnknownLinkType = true
@@ -642,9 +737,13 @@ func decodeIDB(
 			iface.OS = string(val)
 		case optIDBTsResol:
 			if len(val) == 1 {
-				if scale, ok := parseTimestampResolutionNs(val[0]); ok {
-					iface.TimestampScaleNs = scale
-				}
+				applyTimestampResolution(val[0], &iface, &summary.anomalies)
+			} else {
+				summary.anomalies.InvalidTimestampResolution = true
+			}
+		case optIDBTsOffset:
+			if len(val) == 8 {
+				iface.TimestampOffsetSec = int64(order.Uint64(val))
 			}
 		}
 		return nil
@@ -657,20 +756,79 @@ func decodeIDB(
 	return nil
 }
 
-func parseTimestampResolutionNs(resol uint8) (uint64, bool) {
-	if resol&0x80 != 0 {
-		// Binary power-of-two resolution is left at default microsecond scale in MVP.
-		return defaultTimestampResolN, false
-	}
+func applyTimestampResolution(resol uint8, iface *InterfaceDescriptor, anomalies *CaptureAnomalies) {
 	exp := resol & 0x7f
+	if resol&0x80 != 0 {
+		if exp > 63 {
+			anomalies.InvalidTimestampResolution = true
+			return
+		}
+		iface.TimestampBinary = true
+		iface.TimestampExponent = exp
+		return
+	}
 	if exp > 9 {
-		return 1, true
+		anomalies.InvalidTimestampResolution = true
+		return
 	}
 	scale := uint64(1)
 	for range 9 - exp {
 		scale *= 10
 	}
-	return scale, true
+	iface.TimestampBinary = false
+	iface.TimestampExponent = exp
+	iface.TimestampScaleNs = scale
+}
+
+func scaleRawTimestampNs(rawTicks uint64, iface InterfaceDescriptor) int64 {
+	var ns uint64
+	var overflow bool
+	if iface.TimestampBinary {
+		exp := iface.TimestampExponent
+		// ns = floor(rawTicks * 10^9 / 2^exp) using 128-bit unsigned arithmetic.
+		hi, lo := bits.Mul64(rawTicks, 1_000_000_000)
+		if exp == 0 {
+			ns = lo
+			overflow = hi != 0
+		} else if exp <= 63 {
+			ns = (lo >> exp) | (hi << (64 - exp))
+			overflow = (hi >> exp) != 0
+		}
+	} else {
+		scale := iface.TimestampScaleNs
+		if scale == 0 {
+			scale = defaultTimestampResolN
+		}
+		hi, lo := bits.Mul64(rawTicks, scale)
+		ns = lo
+		overflow = hi != 0
+	}
+
+	if overflow || ns > uint64(math.MaxInt64) {
+		return math.MaxInt64
+	}
+	baseNs := int64(ns)
+	if iface.TimestampOffsetSec == 0 {
+		return baseNs
+	}
+	if iface.TimestampOffsetSec > 0 {
+		if iface.TimestampOffsetSec > math.MaxInt64/1_000_000_000 {
+			return math.MaxInt64
+		}
+		offNs := iface.TimestampOffsetSec * 1_000_000_000
+		if baseNs > math.MaxInt64-offNs {
+			return math.MaxInt64
+		}
+		return baseNs + offNs
+	}
+	if iface.TimestampOffsetSec < math.MinInt64/1_000_000_000 {
+		return math.MinInt64
+	}
+	offNs := iface.TimestampOffsetSec * 1_000_000_000
+	if baseNs < math.MinInt64-offNs {
+		return math.MinInt64
+	}
+	return baseNs + offNs
 }
 
 func decodeEPB(
@@ -680,6 +838,18 @@ func decodeEPB(
 	collect bool,
 	summary *scanSummary,
 	packets *[]PacketRecord,
+) error {
+	return decodeEPBWithCallback(r, bodyStart, bodyEnd, order, collect, summary, packets, nil)
+}
+
+func decodeEPBWithCallback(
+	r *SafeReader,
+	bodyStart, bodyEnd int64,
+	order binary.ByteOrder,
+	collect bool,
+	summary *scanSummary,
+	packets *[]PacketRecord,
+	cb func(PacketRecord) error,
 ) error {
 	if bodyEnd-bodyStart < 20 {
 		return fmt.Errorf("%w: Enhanced Packet Block body too short", ErrInvalidBlock)
@@ -752,19 +922,10 @@ func decodeEPB(
 		}
 	}
 
-	if collect {
+	if collect || cb != nil {
 		rawTicks := (uint64(tsHigh) << 32) | uint64(tsLow)
-		scale := iface.TimestampScaleNs
-		if scale == 0 {
-			scale = defaultTimestampResolN
-		}
-		var tsNs int64
-		if rawTicks <= uint64(math.MaxInt64)/scale {
-			tsNs = int64(rawTicks * scale)
-		} else {
-			tsNs = math.MaxInt64
-		}
-		*packets = append(*packets, PacketRecord{
+		tsNs := scaleRawTimestampNs(rawTicks, iface)
+		rec := PacketRecord{
 			Index:         summary.packetCount - 1,
 			InterfaceID:   ifaceID,
 			LinkType:      iface.LinkType,
@@ -779,7 +940,15 @@ func decodeEPB(
 			DropCount:     dropCount,
 			HasProcessID:  hasPID,
 			HasThreadID:   hasTID,
-		})
+		}
+		if collect {
+			*packets = append(*packets, rec)
+		}
+		if cb != nil {
+			if err := cb(rec); err != nil {
+				return err
+			}
+		}
 	}
 
 	return nil
@@ -792,6 +961,18 @@ func decodeSPB(
 	collect bool,
 	summary *scanSummary,
 	packets *[]PacketRecord,
+) error {
+	return decodeSPBWithCallback(r, bodyStart, bodyEnd, order, collect, summary, packets, nil)
+}
+
+func decodeSPBWithCallback(
+	r *SafeReader,
+	bodyStart, bodyEnd int64,
+	order binary.ByteOrder,
+	collect bool,
+	summary *scanSummary,
+	packets *[]PacketRecord,
+	cb func(PacketRecord) error,
 ) error {
 	if bodyEnd-bodyStart < 4 {
 		return fmt.Errorf("%w: Simple Packet Block body too short", ErrInvalidBlock)
@@ -818,8 +999,8 @@ func decodeSPB(
 	}
 	summary.packetCount++
 
-	if collect {
-		*packets = append(*packets, PacketRecord{
+	if collect || cb != nil {
+		rec := PacketRecord{
 			Index:         summary.packetCount - 1,
 			InterfaceID:   0,
 			LinkType:      iface.LinkType,
@@ -827,7 +1008,15 @@ func decodeSPB(
 			OriginalLen:   origLen,
 			PayloadOffset: payloadOffset,
 			PayloadLength: int64(capLen),
-		})
+		}
+		if collect {
+			*packets = append(*packets, rec)
+		}
+		if cb != nil {
+			if err := cb(rec); err != nil {
+				return err
+			}
+		}
 	}
 	return nil
 }
