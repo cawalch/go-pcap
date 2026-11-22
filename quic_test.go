@@ -144,3 +144,38 @@ func TestQUICBoundsAndMalformedPackets(t *testing.T) {
 		t.Fatalf("DecryptQUICInitial(tooMany) err = %v, want ErrQUICLimit", err)
 	}
 }
+
+func TestQUICInitialHeaderOwnership(t *testing.T) {
+	dcid, scid := []byte{1, 2, 3, 4}, []byte{5, 6, 7, 8}
+	token := bytes.Repeat([]byte{9}, MaxQUICTokenBytes)
+	hello := buildTLS13ClientHelloRecord("ownership.example", "h3")
+	wire := buildEncryptedQUICInitialDatagram(t, QUICVersion2, dcid, scid, token, 1, 0, hello[5:])
+	original := bytes.Clone(wire)
+	h, err := ParseQUICInitialPacket(wire)
+	if err != nil {
+		t.Fatal(err)
+	}
+	hs, err := DecryptQUICInitial([][]byte{wire})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(original, wire) {
+		t.Fatal("parsing modified the input datagram")
+	}
+	clear(wire)
+	for _, fields := range [][]byte{h.DCID, hs.DCID} {
+		if !bytes.Equal(fields, dcid) {
+			t.Fatal("DCID differs after input mutation")
+		}
+	}
+	for _, fields := range [][]byte{h.SCID, hs.SCID} {
+		if !bytes.Equal(fields, scid) {
+			t.Fatal("SCID differs after input mutation")
+		}
+	}
+	for _, fields := range [][]byte{h.Token, hs.Token} {
+		if !bytes.Equal(fields, token) {
+			t.Fatal("token differs after input mutation")
+		}
+	}
+}

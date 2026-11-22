@@ -87,6 +87,18 @@ func ReadQUICVarint(buf []byte) (uint64, int, bool) {
 // ParseQUICInitialPacket parses the outer unencrypted long header of the first
 // QUIC v1 or QUIC v2 Initial packet in datagram without decrypting its payload.
 func ParseQUICInitialPacket(datagram []byte) (QUICInitialHeader, error) {
+	hdr, err := parseQUICInitialPacketView(datagram)
+	if err != nil {
+		return QUICInitialHeader{}, err
+	}
+	hdr.DCID = bytes.Clone(hdr.DCID)
+	hdr.SCID = bytes.Clone(hdr.SCID)
+	hdr.Token = bytes.Clone(hdr.Token)
+	return hdr, nil
+}
+
+// The ID and token slices borrow datagram for the duration of the scan.
+func parseQUICInitialPacketView(datagram []byte) (QUICInitialHeader, error) {
 	if len(datagram) < 7 {
 		return QUICInitialHeader{}, fmt.Errorf("%w: datagram shorter than minimum QUIC long header", ErrInvalidQUIC)
 	}
@@ -116,7 +128,7 @@ func ParseQUICInitialPacket(datagram []byte) (QUICInitialHeader, error) {
 	if dcidLen > MaxQUICConnIDBytes || offset+dcidLen+1 > len(datagram) {
 		return QUICInitialHeader{}, fmt.Errorf("%w: invalid DCID length %d", ErrInvalidQUIC, dcidLen)
 	}
-	dcid := bytes.Clone(datagram[offset : offset+dcidLen])
+	dcid := datagram[offset : offset+dcidLen]
 	offset += dcidLen
 
 	scidLen := int(datagram[offset])
@@ -124,7 +136,7 @@ func ParseQUICInitialPacket(datagram []byte) (QUICInitialHeader, error) {
 	if scidLen > MaxQUICConnIDBytes || offset+scidLen > len(datagram) {
 		return QUICInitialHeader{}, fmt.Errorf("%w: invalid SCID length %d", ErrInvalidQUIC, scidLen)
 	}
-	scid := bytes.Clone(datagram[offset : offset+scidLen])
+	scid := datagram[offset : offset+scidLen]
 	offset += scidLen
 
 	tokenLen, n, ok := ReadQUICVarint(datagram[offset:])
@@ -134,7 +146,7 @@ func ParseQUICInitialPacket(datagram []byte) (QUICInitialHeader, error) {
 	offset += n
 	var token []byte
 	if tokenLen > 0 {
-		token = bytes.Clone(datagram[offset : offset+int(tokenLen)])
+		token = datagram[offset : offset+int(tokenLen)]
 		offset += int(tokenLen)
 	}
 
@@ -254,8 +266,12 @@ func decryptSingleQUICInitial(pkt []byte, hdr QUICInitialHeader, keys quicInitia
 	}
 
 	// Copy header + packet number to construct Associated Data (AAD) and unmask PN.
-	aad := make([]byte, hdr.PayloadOffset+pnLen)
-	copy(aad, pkt[:hdr.PayloadOffset+pnLen])
+	// Header and plaintext share an allocation with disjoint AEAD input
+	// and output ranges. The caller retains ownership of the wire packet.
+	work := make([]byte, hdr.PacketLength-keys.aead.Overhead())
+	headerLen := hdr.PayloadOffset + pnLen
+	aad := work[:headerLen:headerLen]
+	copy(aad, pkt[:headerLen])
 	aad[0] = unmaskedFirst
 	var pn uint64
 	for i := range pnLen {
@@ -269,7 +285,7 @@ func decryptSingleQUICInitial(pkt []byte, hdr QUICInitialHeader, keys quicInitia
 	}
 
 	ciphertext := pkt[hdr.PayloadOffset+pnLen : hdr.PacketLength]
-	plaintext, err := keys.aead.Open(nil, nonce[:], ciphertext, aad)
+	plaintext, err := keys.aead.Open(work[headerLen:][:0], nonce[:], ciphertext, aad)
 	if err != nil {
 		return nil, fmt.Errorf("%w: QUIC Initial AEAD decryption failed: %w", ErrInvalidQUIC, err)
 	}
@@ -368,6 +384,10 @@ func reassembleQUICCryptoChunks(chunks []quicCryptoChunk) ([]byte, bool) {
 	if len(chunks) == 0 {
 		return nil, false
 	}
+	// One complete CRYPTO frame already has the required contiguous layout.
+	if len(chunks) == 1 && chunks[0].offset == 0 && len(chunks[0].data) <= MaxQUICCryptoBytes {
+		return chunks[0].data, false
+	}
 	slices.SortFunc(chunks, func(a, b quicCryptoChunk) int {
 		return cmp.Compare(a.offset, b.offset)
 	})
@@ -414,7 +434,7 @@ func DecryptQUICInitial(datagrams [][]byte) (QUICHandshake, error) {
 	for _, dgram := range datagrams {
 		rem := dgram
 		for len(rem) >= 7 {
-			hdr, err := ParseQUICInitialPacket(rem)
+			hdr, err := parseQUICInitialPacketView(rem)
 			if err != nil {
 				break
 			}
@@ -457,9 +477,9 @@ func DecryptQUICInitial(datagrams [][]byte) (QUICHandshake, error) {
 
 	return QUICHandshake{
 		Version:        firstHdr.Version,
-		DCID:           firstHdr.DCID,
-		SCID:           firstHdr.SCID,
-		Token:          firstHdr.Token,
+		DCID:           bytes.Clone(firstHdr.DCID),
+		SCID:           bytes.Clone(firstHdr.SCID),
+		Token:          bytes.Clone(firstHdr.Token),
 		HasClientHello: true,
 		ClientHello:    ch,
 		Anomalies:      ch.Anomalies,
@@ -517,7 +537,7 @@ func scanQUIC(source ipFrameSource) ([]QUICRecord, error) {
 		if (udpPayload[0] & 0xc0) != 0xc0 {
 			return nil
 		}
-		if _, err := ParseQUICInitialPacket(udpPayload); err != nil {
+		if _, err := parseQUICInitialPacketView(udpPayload); err != nil {
 			return nil
 		}
 
@@ -592,7 +612,7 @@ func decryptQUICServerInitial(datagrams [][]byte, clientDCID []byte, version uin
 	for _, dgram := range datagrams {
 		rem := dgram
 		for len(rem) >= 7 {
-			hdr, err := ParseQUICInitialPacket(rem)
+			hdr, err := parseQUICInitialPacketView(rem)
 			if err != nil {
 				break
 			}
