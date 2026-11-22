@@ -81,6 +81,22 @@ func TestSSHHandshakeAndHASSH(t *testing.T) {
 	if err != nil || len(sshRecords) != 1 || sshRecords[0].Handshake.HASSH != wantHASSH {
 		t.Fatalf("cap.SSH() = (%+v, %v)", sshRecords, err)
 	}
+
+	// Loopback SSH flow (identical src/dst IP, distinct ports) must classify server packets separately for JA4SSH.
+	lp1 := buildEthernetIPv4TCPFrame([4]byte{127, 0, 0, 1}, [4]byte{127, 0, 0, 1}, 52222, 22, 1, 1, TCPFlagPSH|TCPFlagACK, cStream)
+	lp2 := buildEthernetIPv4TCPFrame([4]byte{127, 0, 0, 1}, [4]byte{127, 0, 0, 1}, 22, 52222, 1, 1+uint32(len(cStream)), TCPFlagPSH|TCPFlagACK, sStream)
+	loopPCAP := buildClassicPCAP(binary.LittleEndian, false, LinkTypeEthernet, 65535, [][]byte{lp1, lp2})
+	loopCap, err := New(loopPCAP)
+	if err != nil {
+		t.Fatalf("New(loopback) error = %v", err)
+	}
+	loopRecords, err := loopCap.SSH(loopPCAP)
+	if err != nil || len(loopRecords) != 1 {
+		t.Fatalf("loopCap.SSH() = (%+v, %v)", loopRecords, err)
+	}
+	if loopRecords[0].JA4SSH != sshRecords[0].JA4SSH {
+		t.Fatalf("loopback JA4SSH = %q, want %q", loopRecords[0].JA4SSH, sshRecords[0].JA4SSH)
+	}
 }
 
 func TestSSHBoundsAndMalformedInputs(t *testing.T) {
