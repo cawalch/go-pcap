@@ -624,10 +624,11 @@ type TCPTimestamp struct {
 // process metadata for a 5-tuple network flow.
 type FlowSummary struct {
 	Protocol         uint8
-	SrcAddr          netip.Addr
-	DstAddr          netip.Addr
+	TCPFlags         uint8
 	SrcPort          uint16
 	DstPort          uint16
+	SrcAddr          netip.Addr
+	DstAddr          netip.Addr
 	PacketCount      int
 	ClientPackets    int
 	ServerPackets    int
@@ -635,7 +636,6 @@ type FlowSummary struct {
 	ServerBytes      uint64
 	FirstTimestampNs int64
 	LastTimestampNs  int64
-	TCPFlags         uint8
 	ClientJA4T       string
 	ServerJA4TS      string
 	// SYNTimestamp is the first valid timestamp observed on a SYN without ACK.
