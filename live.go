@@ -15,6 +15,12 @@ type BPFInstruction struct {
 	K    uint32
 }
 
+// LiveStats reports kernel packet counters for one live capture handle.
+type LiveStats struct {
+	PacketsReceived uint64 // Packets counted as received by the capture backend.
+	PacketsDropped  uint64 // Packets dropped because the capture buffer was full.
+}
+
 // LiveOptions configures live interface packet capture via [OpenLive].
 type LiveOptions struct {
 	SnapLen     uint32

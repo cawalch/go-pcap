@@ -58,3 +58,8 @@ func (lc *LiveCapture) ReadPacket() (PacketRecord, []byte, error) {
 func (lc *LiveCapture) Close() error {
 	return nil
 }
+
+// Stats returns [ErrLiveCaptureUnsupported] because this backend lacks capture counters.
+func (lc *LiveCapture) Stats() (LiveStats, error) {
+	return LiveStats{}, ErrLiveCaptureUnsupported
+}
