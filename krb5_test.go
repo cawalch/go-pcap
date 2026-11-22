@@ -100,3 +100,83 @@ func TestParseKRB5AndCaptureKerberos(t *testing.T) {
 		t.Fatalf("ParseKRB5(short) err = %v, want ErrInvalidKRB5", err)
 	}
 }
+
+func buildKRB5TGSRepFixture(realm string, cname string, sname []string, ticketEType int, encPartEType int) []byte {
+	pvno, _ := asn1.Marshal(5)
+	msgType, _ := asn1.Marshal(int(KRB5MsgTGSRep))
+	realmBytes, _ := asn1.Marshal(realm)
+
+	encData := func(etype int) []byte {
+		etB, _ := asn1.Marshal(etype)
+		cipherB, _ := asn1.Marshal([]byte{0xde, 0xad, 0xbe, 0xef})
+		seq := append(
+			asn1WrapExplicit(0, asn1.ClassContextSpecific, etB),
+			asn1WrapExplicit(2, asn1.ClassContextSpecific, cipherB)...,
+		)
+		return asn1WrapExplicit(asn1.TagSequence, asn1.ClassUniversal, seq)
+	}
+
+	tktVno, _ := asn1.Marshal(5)
+	var tktBody []byte
+	tktBody = append(tktBody, asn1WrapExplicit(0, asn1.ClassContextSpecific, tktVno)...)
+	tktBody = append(tktBody, asn1WrapExplicit(1, asn1.ClassContextSpecific, realmBytes)...)
+	tktBody = append(tktBody, asn1WrapExplicit(2, asn1.ClassContextSpecific, buildKRB5Principal(2, sname...))...)
+	tktBody = append(tktBody, asn1WrapExplicit(3, asn1.ClassContextSpecific, encData(ticketEType))...)
+	ticket := asn1WrapExplicit(1, asn1.ClassApplication, asn1WrapExplicit(asn1.TagSequence, asn1.ClassUniversal, tktBody))
+
+	var repBody []byte
+	repBody = append(repBody, asn1WrapExplicit(0, asn1.ClassContextSpecific, pvno)...)
+	repBody = append(repBody, asn1WrapExplicit(1, asn1.ClassContextSpecific, msgType)...)
+	repBody = append(repBody, asn1WrapExplicit(3, asn1.ClassContextSpecific, realmBytes)...)
+	repBody = append(repBody, asn1WrapExplicit(4, asn1.ClassContextSpecific, buildKRB5Principal(1, cname))...)
+	repBody = append(repBody, asn1WrapExplicit(5, asn1.ClassContextSpecific, ticket)...)
+	repBody = append(repBody, asn1WrapExplicit(6, asn1.ClassContextSpecific, encData(encPartEType))...)
+
+	return asn1WrapExplicit(int(KRB5MsgTGSRep), asn1.ClassApplication, asn1WrapExplicit(asn1.TagSequence, asn1.ClassUniversal, repBody))
+}
+
+func TestKRB5UDPRecordMarkCollisionRepliesAndMultiSegmentTCP(t *testing.T) {
+	// 1. UDP Kerberos message whose byte 4 has bits 0x60 set (e.g., long-form outer length
+	//    with inner SEQUENCE length 0x64) must NOT be misclassified as a 4-byte TCP record mark.
+	tgsRep := buildKRB5TGSRepFixture("CORP.EXAMPLE.COM", "jdoe", []string{"MSSQLSvc", "sql01.corp.example.com"}, int(KRB5ETypeRC4HMAC), 18)
+	if len(tgsRep) < 5 || (tgsRep[4]&0x60) != 0x60 {
+		// Pad cname slightly if needed so inner SEQUENCE length falls in 0x60..0x7f.
+		tgsRep = buildKRB5TGSRepFixture("CORP.EXAMPLE.COM", "jdoe_long_principal", []string{"MSSQLSvc", "sql01.corp.example.com"}, int(KRB5ETypeRC4HMAC), 18)
+	}
+	msg, err := ParseKRB5(tgsRep)
+	if err != nil {
+		t.Fatalf("ParseKRB5(TGS-REP) error = %v", err)
+	}
+	if msg.MsgType != KRB5MsgTGSRep || !msg.HasRC4HMAC || len(msg.ServiceNames) != 2 || msg.ServiceNames[0] != "MSSQLSvc" {
+		t.Fatalf("TGS-REP = %+v", msg)
+	}
+	if len(msg.ETypes) != 2 || msg.ETypes[0] != KRB5ETypeRC4HMAC || msg.ETypes[1] != 18 {
+		t.Fatalf("TGS-REP ETypes = %v, want [23 18]", msg.ETypes)
+	}
+
+	// 2. Multi-segment pipelined TCP Kerberos messages on port 88.
+	asReq := buildKRB5ASReqFixture("CORP.EXAMPLE.COM", "jdoe", []string{"krbtgt", "CORP.EXAMPLE.COM"}, []int{18})
+	var tcpStream []byte
+	for _, m := range [][]byte{asReq, tgsRep} {
+		var mark [4]byte
+		binary.BigEndian.PutUint32(mark[:], uint32(len(m)))
+		tcpStream = append(tcpStream, mark[:]...)
+		tcpStream = append(tcpStream, m...)
+	}
+	split := len(tcpStream) / 2
+	f1 := buildEthernetIPv4TCPFrame([4]byte{10, 0, 0, 5}, [4]byte{10, 0, 0, 88}, 52002, 88, 1, 1, TCPFlagPSH|TCPFlagACK, tcpStream[:split])
+	f2 := buildEthernetIPv4TCPFrame([4]byte{10, 0, 0, 5}, [4]byte{10, 0, 0, 88}, 52002, 88, 1+uint32(split), 1, TCPFlagPSH|TCPFlagACK, tcpStream[split:])
+	raw := buildClassicPCAP(binary.LittleEndian, false, LinkTypeEthernet, 65535, [][]byte{f1, f2})
+
+	c, err := New(raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	recs, err := c.Kerberos(raw)
+	if err != nil || len(recs) != 2 {
+		t.Fatalf("Capture.Kerberos(multi-segment TCP) = (%d, %v), want 2", len(recs), err)
+	}
+	if recs[0].Message.MsgType != KRB5MsgASReq || recs[1].Message.MsgType != KRB5MsgTGSRep || !recs[1].Message.HasRC4HMAC {
+		t.Fatalf("TCP Kerberos records = %+v", recs)
+	}
+}

@@ -4,7 +4,9 @@ import (
 	"encoding/asn1"
 	"encoding/binary"
 	"fmt"
+	"math"
 	"net/netip"
+	"slices"
 )
 
 // KRB5Message contains metadata parsed from a Kerberos v5 AS-REQ, AS-REP,
@@ -32,10 +34,28 @@ type KRB5Record struct {
 	Message     KRB5Message
 }
 
+func isKRB5ApplicationTag(b byte) bool {
+	switch b {
+	case 0x60 | KRB5MsgASReq, 0x60 | KRB5MsgASRep, 0x60 | KRB5MsgTGSReq, 0x60 | KRB5MsgTGSRep, 0x60 | KRB5MsgError:
+		return true
+	default:
+		return false
+	}
+}
+
+func isKnownKRB5MsgType(tag int) bool {
+	switch tag {
+	case int(KRB5MsgASReq), int(KRB5MsgASRep), int(KRB5MsgTGSReq), int(KRB5MsgTGSRep), int(KRB5MsgError):
+		return true
+	default:
+		return false
+	}
+}
+
 // ParseKRB5 parses a Kerberos v5 message (AS-REQ, AS-REP, TGS-REQ, TGS-REP, or
 // KRB-ERROR) from buf (with or without a 4-byte TCP record mark length prefix).
 func ParseKRB5(buf []byte) (KRB5Message, error) {
-	if len(buf) >= 5 && (buf[0]&0x80) == 0 && (buf[4]&0x60) == 0x60 {
+	if len(buf) >= 5 && !isKRB5ApplicationTag(buf[0]) && (buf[0]&0x80) == 0 && (buf[4]&0x60) == 0x60 {
 		recLen := int(binary.BigEndian.Uint32(buf[0:4]) & 0x7fffffff)
 		if recLen > MaxKRB5PacketBytes {
 			return KRB5Message{}, fmt.Errorf("%w: Kerberos TCP record length %d exceeds %d", ErrKRB5Limit, recLen, MaxKRB5PacketBytes)
@@ -54,13 +74,17 @@ func ParseKRB5(buf []byte) (KRB5Message, error) {
 	if _, err := asn1.Unmarshal(buf, &app); err != nil || app.Class != asn1.ClassApplication || !app.IsCompound {
 		return KRB5Message{}, fmt.Errorf("%w: missing Kerberos APPLICATION tag", ErrInvalidKRB5)
 	}
+	if !isKnownKRB5MsgType(app.Tag) {
+		return KRB5Message{}, fmt.Errorf("%w: unsupported Kerberos message type %d", ErrInvalidKRB5, app.Tag)
+	}
 
 	var seq asn1.RawValue
 	if _, err := asn1.Unmarshal(app.Bytes, &seq); err != nil || seq.Tag != asn1.TagSequence {
 		return KRB5Message{}, fmt.Errorf("%w: missing inner Kerberos SEQUENCE", ErrInvalidKRB5)
 	}
 
-	msg := KRB5Message{MsgType: uint8(app.Tag)}
+	msgType := uint8(app.Tag)
+	msg := KRB5Message{MsgType: msgType}
 	rest := seq.Bytes
 	for len(rest) > 0 {
 		var field asn1.RawValue
@@ -73,7 +97,7 @@ func ParseKRB5(buf []byte) (KRB5Message, error) {
 			continue
 		}
 
-		switch msg.MsgType {
+		switch msgType {
 		case KRB5MsgASReq, KRB5MsgTGSReq:
 			switch field.Tag {
 			case 1:
@@ -83,7 +107,7 @@ func ParseKRB5(buf []byte) (KRB5Message, error) {
 				}
 			case 2:
 				var mt int
-				if _, err := asn1.Unmarshal(field.Bytes, &mt); err == nil && mt > 0 {
+				if _, err := asn1.Unmarshal(field.Bytes, &mt); err == nil && isKnownKRB5MsgType(mt) {
 					msg.MsgType = uint8(mt)
 				}
 			case 4:
@@ -99,13 +123,19 @@ func ParseKRB5(buf []byte) (KRB5Message, error) {
 				}
 			case 1:
 				var mt int
-				if _, err := asn1.Unmarshal(field.Bytes, &mt); err == nil && mt > 0 {
+				if _, err := asn1.Unmarshal(field.Bytes, &mt); err == nil && isKnownKRB5MsgType(mt) {
 					msg.MsgType = uint8(mt)
 				}
 			case 3:
 				msg.Realm = parseASN1String(field.Bytes)
 			case 4:
 				msg.ClientNames = parseKRB5PrincipalName(field.Bytes)
+			case 5:
+				parseKRB5Ticket(field.Bytes, &msg)
+			case 6:
+				if et, ok := parseKRB5EncryptedDataEType(field.Bytes); ok {
+					appendKRB5EType(&msg, et)
+				}
 			}
 
 		case KRB5MsgError:
@@ -117,12 +147,12 @@ func ParseKRB5(buf []byte) (KRB5Message, error) {
 				}
 			case 1:
 				var mt int
-				if _, err := asn1.Unmarshal(field.Bytes, &mt); err == nil && mt > 0 {
+				if _, err := asn1.Unmarshal(field.Bytes, &mt); err == nil && isKnownKRB5MsgType(mt) {
 					msg.MsgType = uint8(mt)
 				}
 			case 6:
-				var code int
-				if _, err := asn1.Unmarshal(field.Bytes, &code); err == nil {
+				var code int64
+				if _, err := asn1.Unmarshal(field.Bytes, &code); err == nil && code >= math.MinInt32 && code <= math.MaxInt32 {
 					msg.ErrorCode = int32(code)
 				}
 			case 9:
@@ -137,6 +167,71 @@ func ParseKRB5(buf []byte) (KRB5Message, error) {
 		return KRB5Message{}, fmt.Errorf("%w: unsupported Kerberos pvno %d", ErrInvalidKRB5, msg.PVNO)
 	}
 	return msg, nil
+}
+
+func appendKRB5EType(msg *KRB5Message, et int32) {
+	if et == KRB5ETypeRC4HMAC {
+		msg.HasRC4HMAC = true
+	}
+	if len(msg.ETypes) >= MaxKRB5ETypes || slices.Contains(msg.ETypes, et) {
+		return
+	}
+	msg.ETypes = append(msg.ETypes, et)
+}
+
+func parseKRB5Ticket(raw []byte, msg *KRB5Message) {
+	var app asn1.RawValue
+	if _, err := asn1.Unmarshal(raw, &app); err != nil || app.Class != asn1.ClassApplication || !app.IsCompound || app.Tag != 1 {
+		return
+	}
+	var seq asn1.RawValue
+	if _, err := asn1.Unmarshal(app.Bytes, &seq); err != nil || seq.Tag != asn1.TagSequence {
+		return
+	}
+	rest := seq.Bytes
+	for len(rest) > 0 {
+		var f asn1.RawValue
+		var err error
+		rest, err = asn1.Unmarshal(rest, &f)
+		if err != nil {
+			break
+		}
+		if f.Class != asn1.ClassContextSpecific {
+			continue
+		}
+		switch f.Tag {
+		case 2:
+			msg.ServiceNames = parseKRB5PrincipalName(f.Bytes)
+		case 3:
+			if et, ok := parseKRB5EncryptedDataEType(f.Bytes); ok {
+				appendKRB5EType(msg, et)
+			}
+		}
+	}
+}
+
+func parseKRB5EncryptedDataEType(raw []byte) (int32, bool) {
+	var seq asn1.RawValue
+	if _, err := asn1.Unmarshal(raw, &seq); err != nil || seq.Tag != asn1.TagSequence {
+		return 0, false
+	}
+	rest := seq.Bytes
+	for len(rest) > 0 {
+		var f asn1.RawValue
+		var err error
+		rest, err = asn1.Unmarshal(rest, &f)
+		if err != nil {
+			break
+		}
+		if f.Class == asn1.ClassContextSpecific && f.Tag == 0 {
+			var v int64
+			if _, err := asn1.Unmarshal(f.Bytes, &v); err == nil && v >= math.MinInt32 && v <= math.MaxInt32 {
+				return int32(v), true
+			}
+			return 0, false
+		}
+	}
+	return 0, false
 }
 
 func parseKRB5KDCReqBody(raw []byte, msg *KRB5Message) {
@@ -214,11 +309,14 @@ func parseKRB5ETypeSeq(raw []byte) []int32 {
 	rest := seq.Bytes
 	var out []int32
 	for len(rest) > 0 && len(out) < MaxKRB5ETypes {
-		var v int
+		var v int64
 		var err error
 		rest, err = asn1.Unmarshal(rest, &v)
 		if err != nil {
 			break
+		}
+		if v < math.MinInt32 || v > math.MaxInt32 {
+			continue
 		}
 		out = append(out, int32(v))
 	}
@@ -233,8 +331,8 @@ func parseASN1String(raw []byte) string {
 	return string(val.Bytes)
 }
 
-// Kerberos extracts Kerberos v5 messages across all UDP and TCP packets on port
-// 88 in the capture.
+// Kerberos extracts Kerberos v5 messages across all UDP packets and
+// reassembled TCP streams on port 88 in the capture.
 func (c *Capture) Kerberos(data []byte) ([]KRB5Record, error) {
 	if err := c.validateContainer(); err != nil {
 		return nil, err
@@ -246,6 +344,7 @@ func (c *Capture) Kerberos(data []byte) ([]KRB5Record, error) {
 	r := SafeReader{data: data, size: int64(len(data))}
 	var table flowIndexTable
 	var records []KRB5Record
+	var hasTCP88 bool
 
 	err := c.walkPackets(&r, func(pkt PacketRecord) error {
 		payload, err := r.Slice(pkt.PayloadOffset, pkt.PayloadLength)
@@ -253,7 +352,7 @@ func (c *Capture) Kerberos(data []byte) ([]KRB5Record, error) {
 			return err
 		}
 		frame, err := DecodeFrame(payload, pkt.LinkType)
-		if err != nil || frame.IPVersion == 0 || frame.PayloadLength == 0 {
+		if err != nil || frame.IPVersion == 0 {
 			return nil
 		}
 		key, _ := makeCanonicalFlowKey(frame.IPProtocol, frame.SrcAddr, frame.SrcPort, frame.DstAddr, frame.DstPort)
@@ -262,6 +361,13 @@ func (c *Capture) Kerberos(data []byte) ([]KRB5Record, error) {
 			return err
 		}
 		if frame.SrcPort != 88 && frame.DstPort != 88 {
+			return nil
+		}
+		if frame.IPProtocol == IPProtoTCP {
+			hasTCP88 = true
+			return nil
+		}
+		if frame.IPProtocol != IPProtoUDP || frame.PayloadLength == 0 || frame.Anomalies.IPFragment {
 			return nil
 		}
 		l4 := payload[frame.PayloadOffset : frame.PayloadOffset+frame.PayloadLength]
@@ -286,5 +392,59 @@ func (c *Capture) Kerberos(data []byte) ([]KRB5Record, error) {
 	if err != nil {
 		return nil, err
 	}
+
+	if hasTCP88 {
+		streams, err := c.Streams(data)
+		if err != nil {
+			return nil, err
+		}
+		for i := range streams {
+			st := &streams[i]
+			if st.SrcPort != 88 && st.DstPort != 88 {
+				continue
+			}
+			if err := extractKRB5FromTCPStream(st.Client.Data, st.FlowIndex, st.SrcAddr, st.DstAddr, st.SrcPort, st.DstPort, &records); err != nil {
+				return nil, err
+			}
+			if err := extractKRB5FromTCPStream(st.Server.Data, st.FlowIndex, st.DstAddr, st.SrcAddr, st.DstPort, st.SrcPort, &records); err != nil {
+				return nil, err
+			}
+		}
+	}
 	return records, nil
+}
+
+func extractKRB5FromTCPStream(
+	stream []byte,
+	flowIndex int,
+	srcAddr, dstAddr netip.Addr,
+	srcPort, dstPort uint16,
+	records *[]KRB5Record,
+) error {
+	for off := 0; off+4 < len(stream); {
+		if (stream[off] & 0x80) != 0 {
+			break
+		}
+		recLen := int(binary.BigEndian.Uint32(stream[off:off+4]) & 0x7fffffff)
+		if recLen < 8 || recLen > MaxKRB5PacketBytes || off+4+recLen > len(stream) {
+			break
+		}
+		msg, err := ParseKRB5(stream[off : off+4+recLen])
+		off += 4 + recLen
+		if err != nil {
+			continue
+		}
+		if len(*records) >= MaxKRB5RecordsPerScan {
+			return fmt.Errorf("%w: exceeds %d Kerberos records", ErrKRB5Limit, MaxKRB5RecordsPerScan)
+		}
+		*records = append(*records, KRB5Record{
+			FlowIndex: flowIndex,
+			SrcAddr:   srcAddr,
+			DstAddr:   dstAddr,
+			SrcPort:   srcPort,
+			DstPort:   dstPort,
+			Message:   msg,
+		})
+	}
+	return nil
 }
