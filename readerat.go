@@ -415,7 +415,26 @@ func completeFlowPrefix(f *Frame, prefix []byte, captured int64) bool {
 		return false
 	}
 	f.Anomalies.IPTotalLengthExceedsFrame = end > captured
-	f.PayloadLength = uint32(min(end, captured) - int64(f.PayloadOffset))
+	ipBound := min(end, captured)
+	payloadBound := ipBound
+	if transport == LayerUDP {
+		udpOff := int64(layers[len(layers)-1].Offset)
+		udpLen := int64(binary.BigEndian.Uint16(prefix[udpOff+4:]))
+		avail := ipBound - udpOff
+		if udpLen > 0 {
+			if udpLen < 8 {
+				f.Anomalies.TruncatedLayer = true
+				payloadBound = udpOff + 8
+			} else if udpLen > avail {
+				if !f.Anomalies.IPTotalLengthExceedsFrame {
+					f.Anomalies.TruncatedLayer = true
+				}
+			} else {
+				payloadBound = udpOff + udpLen
+			}
+		}
+	}
+	f.PayloadLength = uint32(payloadBound - int64(f.PayloadOffset))
 	return true
 }
 
