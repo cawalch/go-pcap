@@ -481,6 +481,17 @@ func TestReaderAtMalformedPacketParity(t *testing.T) {
 			}
 		})
 	}
+	// A truncated block can declare a size larger than the metadata buffer limit.
+	huge := bytes.Clone(raw)
+	order.PutUint32(huge[len(base)+4:], 0xfffffffc)
+	slice, err := New(huge)
+	if err != nil || !slice.InputTruncated() {
+		t.Fatalf("slice = %+v, %v", slice, err)
+	}
+	reader, err := NewFromReaderAt(bytes.NewReader(huge), int64(len(huge)))
+	if err != nil || !reflect.DeepEqual(slice, reader) {
+		t.Fatalf("oversized truncated block: got %+v, want %+v (err %v)", reader, slice, err)
+	}
 	for n := len(base); n < len(raw); n++ {
 		c, err := New(raw[:n])
 		if err != nil {

@@ -585,7 +585,7 @@ func scanPCAPNGReaderAt(r io.ReaderAt, size int64, cb func(PacketRecord) error) 
 
 		blockType := order.Uint32(headerBuf[0:4])
 		blockLen := order.Uint32(headerBuf[4:8])
-		if blockLen < pcapngMinBlockSize || blockLen > MaxSnapLen+4096 {
+		if blockLen < pcapngMinBlockSize {
 			return scanSummary{}, fmt.Errorf("%w: invalid block length %d", ErrInvalidBlock, blockLen)
 		}
 		if blockLen%4 != 0 {
@@ -634,6 +634,9 @@ func scanPCAPNGReaderAt(r io.ReaderAt, size int64, cb func(PacketRecord) error) 
 
 		// The tail contains the trailer and any metadata following the skipped frame.
 		n := int64(blockEnd) - tailOffset
+		if n > MaxSnapLen+4096 {
+			return scanSummary{}, fmt.Errorf("%w: metadata read length %d exceeds limit", ErrInvalidBlock, n)
+		}
 		if int64(cap(scratch)) < n {
 			scratch = make([]byte, n)
 		}
