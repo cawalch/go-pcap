@@ -76,7 +76,7 @@ func TestDefragmentIPOutOfOrderAndOverlap(t *testing.T) {
 		t.Fatalf("gapConflict out = %q (len=%d), want 8 zero bytes + AAAAAAAA", outGap, len(outGap))
 	}
 
-	// Zero-length terminal fragment should mark seenTerminal without false TruncatedLayer.
+	// Zero-length terminal fragment contiguous with received data should not set TruncatedLayer.
 	zeroTerm := []IPFragmentInput{
 		{SrcAddr: src, DstAddr: dst, Protocol: IPProtoUDP, Identification: 102, FragmentOffset: 0, MoreFragments: true, Payload: []byte("01234567")},
 		{SrcAddr: src, DstAddr: dst, Protocol: IPProtoUDP, Identification: 102, FragmentOffset: 8, MoreFragments: false, Payload: nil},
@@ -84,6 +84,16 @@ func TestDefragmentIPOutOfOrderAndOverlap(t *testing.T) {
 	outZeroTerm, anomZeroTerm, err := DefragmentIP(zeroTerm)
 	if err != nil || anomZeroTerm.TruncatedLayer || string(outZeroTerm) != "01234567" {
 		t.Fatalf("DefragmentIP(zeroTerm) = (%q, %+v, %v)", outZeroTerm, anomZeroTerm, err)
+	}
+
+	// Zero-length terminal fragment beyond a missing tail must set TruncatedLayer.
+	gappedZeroTerm := []IPFragmentInput{
+		{SrcAddr: src, DstAddr: dst, Protocol: IPProtoUDP, Identification: 102, FragmentOffset: 0, MoreFragments: true, Payload: []byte("01234567")},
+		{SrcAddr: src, DstAddr: dst, Protocol: IPProtoUDP, Identification: 102, FragmentOffset: 16, MoreFragments: false, Payload: nil},
+	}
+	_, anomGappedZeroTerm, err := DefragmentIP(gappedZeroTerm)
+	if err != nil || !anomGappedZeroTerm.TruncatedLayer {
+		t.Fatalf("DefragmentIP(gappedZeroTerm) = (%+v, %v), want TruncatedLayer", anomGappedZeroTerm, err)
 	}
 
 	// Fragment extending past an earlier terminal fragment sets TruncatedLayer.
@@ -96,15 +106,27 @@ func TestDefragmentIPOutOfOrderAndOverlap(t *testing.T) {
 		t.Fatalf("DefragmentIP(pastTerm) = (%+v, %v), want TruncatedLayer", anomPast, err)
 	}
 
-	// ipFragAccumulator must evict completed groups so >MaxFragmentGroups and reused IPIDs succeed.
+	// ipFragAccumulator must sustain turnover at MaxFragmentGroups capacity (incomplete groups)
+	// and evict completed groups so reused IPIDs succeed.
 	var acc ipFragAccumulator
 	udp := make([]byte, 16)
 	binary.BigEndian.PutUint16(udp[0:2], 53)
 	binary.BigEndian.PutUint16(udp[2:4], 12345)
 	binary.BigEndian.PutUint16(udp[4:6], 16)
 	copy(udp[8:], []byte("12345678"))
+	// Fill to capacity with incomplete groups, then churn past capacity.
+	for i := range MaxFragmentGroups * 2 {
+		f1 := Frame{IPVersion: 4, IPProtocol: IPProtoUDP, SrcAddr: src, DstAddr: dst, IPID: uint32(10000 + i), IPFragOffset: 0, IPMoreFragments: true, PayloadLength: 8}
+		if _, _, _, ok := acc.addUDPFragment(&f1, udp[:8]); ok {
+			t.Fatalf("incomplete iter %d unexpectedly completed", i)
+		}
+		if len(acc.groups) > MaxFragmentGroups {
+			t.Fatalf("groups len = %d, exceeds MaxFragmentGroups %d", len(acc.groups), MaxFragmentGroups)
+		}
+	}
+	// While at capacity, new complete datagrams (including reused IPIDs) must still reassemble.
 	for i := range MaxFragmentGroups + 10 {
-		ipID := uint32(i % 64) // also exercises IPID reuse
+		ipID := uint32(i % 64)
 		f1 := Frame{IPVersion: 4, IPProtocol: IPProtoUDP, SrcAddr: src, DstAddr: dst, IPID: ipID, IPFragOffset: 0, IPMoreFragments: true, PayloadLength: 8}
 		f2 := Frame{IPVersion: 4, IPProtocol: IPProtoUDP, SrcAddr: src, DstAddr: dst, IPID: ipID, IPFragOffset: 8, IPMoreFragments: false, PayloadLength: 8}
 		if _, _, _, ok := acc.addUDPFragment(&f1, udp[:8]); ok {

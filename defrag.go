@@ -98,9 +98,12 @@ func DefragmentIP(fragments []IPFragmentInput) ([]byte, FrameAnomalies, error) {
 	}
 
 	if len(norm) == 0 {
+		if seenTerminal && terminalEnd > 0 {
+			anomalies.TruncatedLayer = true
+		}
 		return nil, anomalies, nil
 	}
-	if !seenTerminal || maxEnd > terminalEnd {
+	if !seenTerminal || maxEnd != terminalEnd {
 		anomalies.TruncatedLayer = true
 	}
 
@@ -182,32 +185,46 @@ type ipFragKey struct {
 }
 
 type ipFragGroup struct {
+	key         ipFragKey
 	frags       []IPFragmentInput
 	hasZero     bool
 	hasTerminal bool
 	done        bool
-	seq         uint64
+	prev        *ipFragGroup
+	next        *ipFragGroup
 }
 
 type ipFragAccumulator struct {
-	groups  map[ipFragKey]*ipFragGroup
-	nextSeq uint64
+	groups map[ipFragKey]*ipFragGroup
+	head   *ipFragGroup
+	tail   *ipFragGroup
 }
 
-func (a *ipFragAccumulator) evictOldest() {
-	var oldestKey ipFragKey
-	var oldestSeq uint64
-	first := true
-	for k, g := range a.groups {
-		if first || g.seq < oldestSeq {
-			oldestKey = k
-			oldestSeq = g.seq
-			first = false
-		}
+func (a *ipFragAccumulator) pushBack(g *ipFragGroup) {
+	g.prev = a.tail
+	g.next = nil
+	if a.tail != nil {
+		a.tail.next = g
+	} else {
+		a.head = g
 	}
-	if !first {
-		delete(a.groups, oldestKey)
+	a.tail = g
+}
+
+func (a *ipFragAccumulator) removeGroup(g *ipFragGroup) {
+	if g.prev != nil {
+		g.prev.next = g.next
+	} else {
+		a.head = g.next
 	}
+	if g.next != nil {
+		g.next.prev = g.prev
+	} else {
+		a.tail = g.prev
+	}
+	g.prev = nil
+	g.next = nil
+	delete(a.groups, g.key)
 }
 
 func (a *ipFragAccumulator) addUDPFragment(frame *Frame, fragBytes []byte) (udpPayload []byte, srcPort, dstPort uint16, ok bool) {
@@ -226,12 +243,12 @@ func (a *ipFragAccumulator) addUDPFragment(frame *Frame, fragBytes []byte) (udpP
 	}
 	g, exists := a.groups[key]
 	if !exists {
-		if len(a.groups) >= MaxFragmentGroups {
-			a.evictOldest()
+		if len(a.groups) >= MaxFragmentGroups && a.head != nil {
+			a.removeGroup(a.head)
 		}
-		a.nextSeq++
-		g = &ipFragGroup{seq: a.nextSeq}
+		g = &ipFragGroup{key: key}
 		a.groups[key] = g
+		a.pushBack(g)
 	}
 	if g.done || len(g.frags) >= MaxFragmentsPerGroup {
 		return nil, 0, 0, false
@@ -269,7 +286,7 @@ func (a *ipFragAccumulator) addUDPFragment(frame *Frame, fragBytes []byte) (udpP
 	if err != nil || anomalies.TruncatedLayer || len(reassembled) < 8 {
 		return nil, 0, 0, false
 	}
-	delete(a.groups, key)
+	a.removeGroup(g)
 	srcPort = binary.BigEndian.Uint16(reassembled[0:2])
 	dstPort = binary.BigEndian.Uint16(reassembled[2:4])
 	return reassembled[8:], srcPort, dstPort, true
