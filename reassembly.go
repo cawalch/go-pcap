@@ -73,11 +73,11 @@ type normSegment struct {
 // it sets [StreamAnomalies.SequenceGap] and concatenates the available ranges
 // without zero-filling the gap.
 func ReassembleTCP(segments []TCPSegmentInput) (StreamBuffer, error) {
-	out, _, err := reassembleTCPWithBudget(segments, MaxFlowStreamBytes)
+	out, _, err := reassembleTCPWithBudget(segments, MaxFlowStreamBytes, nil)
 	return out, err
 }
 
-func reassembleTCPWithBudget(segments []TCPSegmentInput, remainingBudget int64) (StreamBuffer, int64, error) {
+func reassembleTCPWithBudget(segments []TCPSegmentInput, remainingBudget int64, written func(segment, end int, gap bool)) (StreamBuffer, int64, error) {
 	if len(segments) > MaxSegmentsPerFlow {
 		return StreamBuffer{}, 0, fmt.Errorf("%w: %d segments exceed %d", ErrReassemblyLimit, len(segments), MaxSegmentsPerFlow)
 	}
@@ -195,7 +195,8 @@ func reassembleTCPWithBudget(segments []TCPSegmentInput, remainingBudget int64) 
 
 	for i := range norm {
 		seg := &norm[i]
-		if seg.relStart > cursor {
+		gap := seg.relStart > cursor
+		if gap {
 			out.Anomalies.SequenceGap = true
 			out.GapCount++
 			out.GapBytes += uint64(seg.relStart - cursor)
@@ -236,6 +237,9 @@ func reassembleTCPWithBudget(segments []TCPSegmentInput, remainingBudget int64) 
 			out.Anomalies.Truncated = true
 		}
 		buf.Write(newPayload)
+		if written != nil {
+			written(seg.order, buf.Len(), gap)
+		}
 		cursor += int64(len(newPayload))
 		if out.Anomalies.Truncated {
 			break
@@ -323,13 +327,13 @@ func collectStreams(source ipFrameSource) ([]TCPStream, error) {
 
 	for i := range collected {
 		entry := &collected[i]
-		clientBuf, usedClient, err := reassembleTCPWithBudget(entry.client, remainingBudget)
+		clientBuf, usedClient, err := reassembleTCPWithBudget(entry.client, remainingBudget, nil)
 		if err != nil {
 			return nil, err
 		}
 		remainingBudget -= usedClient
 
-		serverBuf, usedServer, err := reassembleTCPWithBudget(entry.server, remainingBudget)
+		serverBuf, usedServer, err := reassembleTCPWithBudget(entry.server, remainingBudget, nil)
 		if err != nil {
 			return nil, err
 		}

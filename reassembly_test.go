@@ -73,7 +73,7 @@ func TestReassembleTCPLimits(t *testing.T) {
 		{Seq: 1, Flags: TCPFlagSYN},
 		{Seq: 2, Flags: TCPFlagACK, Payload: []byte("0123456789abcdef")},
 	}
-	buf, used, err := reassembleTCPWithBudget(segs, 6)
+	buf, used, err := reassembleTCPWithBudget(segs, 6, nil)
 	if err != nil {
 		t.Fatalf("reassembleTCPWithBudget() err = %v", err)
 	}
@@ -117,7 +117,7 @@ func TestReassemblyReservationWithGapsAndRetransmissions(t *testing.T) {
 		{Seq: 22, Payload: []byte("cd")},
 		{Seq: 1 << 28, Payload: []byte("efgh")},
 	}
-	buf, used, err := reassembleTCPWithBudget(segs, 6)
+	buf, used, err := reassembleTCPWithBudget(segs, 6, nil)
 	if err != nil || used != 6 || string(buf.Data) != "abcdef" || !buf.Anomalies.Truncated || !buf.Anomalies.SequenceGap || !buf.Anomalies.Retransmission || buf.Anomalies.OverlapConflict {
 		t.Fatalf("reassembly: %+v, %d bytes, %v", buf, used, err)
 	}

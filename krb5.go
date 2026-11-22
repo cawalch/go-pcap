@@ -1,6 +1,7 @@
 package pcap
 
 import (
+	"cmp"
 	"encoding/asn1"
 	"encoding/binary"
 	"fmt"
@@ -344,7 +345,7 @@ func (c *Capture) Kerberos(data []byte) ([]KRB5Record, error) {
 	r := SafeReader{data: data, size: int64(len(data))}
 	var table flowIndexTable
 	var records []KRB5Record
-	var hasTCP88 bool
+	var tcp tcpMessageCollector
 
 	err := c.walkPackets(&r, func(pkt PacketRecord) error {
 		payload, err := r.Slice(pkt.PayloadOffset, pkt.PayloadLength)
@@ -364,8 +365,7 @@ func (c *Capture) Kerberos(data []byte) ([]KRB5Record, error) {
 			return nil
 		}
 		if frame.IPProtocol == IPProtoTCP {
-			hasTCP88 = true
-			return nil
+			return tcp.add(pkt, frame, flowIdx, payload[frame.PayloadOffset:frame.PayloadOffset+frame.PayloadLength])
 		}
 		if frame.IPProtocol != IPProtoUDP || frame.PayloadLength == 0 || frame.Anomalies.IPFragment {
 			return nil
@@ -393,58 +393,22 @@ func (c *Capture) Kerberos(data []byte) ([]KRB5Record, error) {
 		return nil, err
 	}
 
-	if hasTCP88 {
-		streams, err := c.Streams(data)
+	err = tcp.walk(4, 8, MaxKRB5PacketBytes, func(dir *tcpMessageDirection, pkt messagePacket, data []byte) error {
+		msg, err := ParseKRB5(data)
 		if err != nil {
-			return nil, err
+			return nil
 		}
-		for i := range streams {
-			st := &streams[i]
-			if st.SrcPort != 88 && st.DstPort != 88 {
-				continue
-			}
-			if err := extractKRB5FromTCPStream(st.Client.Data, st.FlowIndex, st.SrcAddr, st.DstAddr, st.SrcPort, st.DstPort, &records); err != nil {
-				return nil, err
-			}
-			if err := extractKRB5FromTCPStream(st.Server.Data, st.FlowIndex, st.DstAddr, st.SrcAddr, st.DstPort, st.SrcPort, &records); err != nil {
-				return nil, err
-			}
-		}
-	}
-	return records, nil
-}
-
-func extractKRB5FromTCPStream(
-	stream []byte,
-	flowIndex int,
-	srcAddr, dstAddr netip.Addr,
-	srcPort, dstPort uint16,
-	records *[]KRB5Record,
-) error {
-	for off := 0; off+4 < len(stream); {
-		if (stream[off] & 0x80) != 0 {
-			break
-		}
-		recLen := int(binary.BigEndian.Uint32(stream[off:off+4]) & 0x7fffffff)
-		if recLen < 8 || recLen > MaxKRB5PacketBytes || off+4+recLen > len(stream) {
-			break
-		}
-		msg, err := ParseKRB5(stream[off : off+4+recLen])
-		off += 4 + recLen
-		if err != nil {
-			continue
-		}
-		if len(*records) >= MaxKRB5RecordsPerScan {
+		if len(records) >= MaxKRB5RecordsPerScan {
 			return fmt.Errorf("%w: exceeds %d Kerberos records", ErrKRB5Limit, MaxKRB5RecordsPerScan)
 		}
-		*records = append(*records, KRB5Record{
-			FlowIndex: flowIndex,
-			SrcAddr:   srcAddr,
-			DstAddr:   dstAddr,
-			SrcPort:   srcPort,
-			DstPort:   dstPort,
-			Message:   msg,
-		})
+		records = append(records, KRB5Record{PacketIndex: pkt.index, FlowIndex: dir.flowIndex, SrcAddr: dir.src.Addr(), DstAddr: dir.dst.Addr(), SrcPort: dir.src.Port(), DstPort: dir.dst.Port(), Message: msg})
+		return nil
+	})
+	if err != nil {
+		return nil, err
 	}
-	return nil
+	if len(tcp.directions) > 0 {
+		slices.SortStableFunc(records, func(a, b KRB5Record) int { return cmp.Compare(a.PacketIndex, b.PacketIndex) })
+	}
+	return records, nil
 }

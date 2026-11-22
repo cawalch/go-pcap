@@ -82,7 +82,7 @@ func TestParseKRB5AndCaptureKerberos(t *testing.T) {
 
 	f1 := buildEthernetIPv4UDPFrame([4]byte{10, 0, 0, 5}, [4]byte{10, 0, 0, 88}, 52000, 88, asReq)
 	f2 := buildEthernetIPv4TCPFrame([4]byte{10, 0, 0, 5}, [4]byte{10, 0, 0, 88}, 52001, 88, 1, 1, TCPFlagPSH|TCPFlagACK, tcpKRB)
-	raw := buildClassicPCAP(binary.LittleEndian, false, LinkTypeEthernet, 65535, [][]byte{f1, f2})
+	raw := buildClassicPCAP(binary.LittleEndian, false, LinkTypeEthernet, 65535, append([][]byte{buildEthernetIPv4TCPFrame([4]byte{1}, [4]byte{2}, 123, 443, 1, 0, TCPFlagACK, nil)}, f1, f2))
 
 	cap, err := New(raw)
 	if err != nil {
@@ -163,10 +163,10 @@ func TestKRB5UDPRecordMarkCollisionRepliesAndMultiSegmentTCP(t *testing.T) {
 		tcpStream = append(tcpStream, mark[:]...)
 		tcpStream = append(tcpStream, m...)
 	}
-	split := len(tcpStream) / 2
+	split := 2
 	f1 := buildEthernetIPv4TCPFrame([4]byte{10, 0, 0, 5}, [4]byte{10, 0, 0, 88}, 52002, 88, 1, 1, TCPFlagPSH|TCPFlagACK, tcpStream[:split])
 	f2 := buildEthernetIPv4TCPFrame([4]byte{10, 0, 0, 5}, [4]byte{10, 0, 0, 88}, 52002, 88, 1+uint32(split), 1, TCPFlagPSH|TCPFlagACK, tcpStream[split:])
-	raw := buildClassicPCAP(binary.LittleEndian, false, LinkTypeEthernet, 65535, [][]byte{f1, f2})
+	raw := buildClassicPCAP(binary.LittleEndian, false, LinkTypeEthernet, 65535, append([][]byte{buildEthernetIPv4TCPFrame([4]byte{1}, [4]byte{2}, 123, 443, 1, 0, TCPFlagACK, nil)}, f1, f2))
 
 	c, err := New(raw)
 	if err != nil {
@@ -175,6 +175,9 @@ func TestKRB5UDPRecordMarkCollisionRepliesAndMultiSegmentTCP(t *testing.T) {
 	recs, err := c.Kerberos(raw)
 	if err != nil || len(recs) != 2 {
 		t.Fatalf("Capture.Kerberos(multi-segment TCP) = (%d, %v), want 2", len(recs), err)
+	}
+	if recs[0].PacketIndex != 1 || recs[1].PacketIndex != 2 {
+		t.Fatalf("packet attribution: %v", recs)
 	}
 	if recs[0].Message.MsgType != KRB5MsgASReq || recs[1].Message.MsgType != KRB5MsgTGSRep || !recs[1].Message.HasRC4HMAC {
 		t.Fatalf("TCP Kerberos records = %+v", recs)
