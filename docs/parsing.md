@@ -65,6 +65,13 @@ The following limits bound parsing work and memory allocation on each call:
 | `MaxSSHKexPacketBytes` | 32 KiB | Bounds SSH `SSH_MSG_KEXINIT` packet length |
 | `MaxSMB2PacketBytes` | 64 KiB | Bounds NetBIOS-framed SMB2/3 message length |
 | `MaxNTLMTokenBytes` | 16 KiB | Bounds NTLMSSP token length |
+| `MaxReaderAtScanBytes` | 64 MiB | Bounds cumulative payload bytes read per `FromReaderAt` dissector call |
+| `MaxFragmentGroups` | 1,024 groups | Bounds concurrent IPv4/IPv6 fragment groups tracked per scan |
+| `MaxFragmentsPerGroup` | 16 fragments | Bounds IP fragments reassembled per fragmented packet |
+| `MaxReassembledIPPacketBytes` | 65,535 bytes | Bounds reassembled IPv4/IPv6 packet payload size |
+| `MaxHTTP2FramesPerStream` | 1,024 frames | Bounds HTTP/2 frames parsed per directional stream |
+| `MaxKRB5PacketBytes` | 64 KiB | Bounds Kerberos v5 message length |
+| `MaxRDPPacketBytes` | 16 KiB | Bounds RDP TPKT/X.224 negotiation PDU length |
 
 Use `errors.Is` with `ErrNotPCAP`, `ErrInvalidMagic`, `ErrInvalidHeader`,
 `ErrInvalidBlock`, `ErrInvalidPacket`, `ErrInvalidFrame`, `ErrInvalidDNS`,
@@ -239,19 +246,35 @@ or call `capture.HTTP(data)` to extract HTTP/1.x requests, responses, FoxIO
 `Transfer-Encoding: chunked`) from both cleartext TCP streams and DSB-decrypted
 TLS 1.2 and TLS 1.3 flows.
 
+For HTTP/2 (`h2c` cleartext or decrypted TLS `h2`), call
+`ParseHTTP2Frames(stream)` or `capture.HTTP2(data)` to parse the 24-byte HTTP/2
+client preface, `SETTINGS` parameter pairs and `SettingsFingerprint`
+(`id:val;id:val`), `WINDOW_UPDATE` increments, and reassembled per-stream `DATA`
+frame payloads (handling padded `DATA` frames under `MaxHTTPBodyBytes`).
+
 ## Parse SSH handshakes and HASSH
 
 Call `ParseSSHHandshake(clientStream, serverStream)` or `capture.SSH(data)` to
 extract SSH version banners, `SSH_MSG_KEXINIT` algorithm lists, `HASSH` /
 `HASSHServer` MD5 fingerprints, and FoxIO `JA4SSH` session fingerprints.
 
-## Parse SMB2 and NTLMSSP messages
+## Parse SMB2, NTLMSSP, Kerberos v5, and RDP messages
 
 Call `ParseSMB2Message(buf)`, `ParseNTLMSSP(token)`, or `capture.SMB(data)` to
 extract SMB2/3 `NEGOTIATE` and `SESSION_SETUP` metadata (dialect revision,
 signing flags, message/session IDs) and embedded NTLMSSP Type 1, Type 2, and
 Type 3 tokens (server challenge, target/domain/user/workstation strings, and
 NetBIOS/DNS computer and domain names from target info attribute-value pairs).
+
+Call `ParseKRB5(buf)` or `capture.Kerberos(data)` to decode ASN.1 DER Kerberos
+v5 `AS-REQ`, `AS-REP`, `TGS-REQ`, `TGS-REP`, and `KRB-ERROR` messages over UDP
+and TCP port 88, including client/service principal names, realm, requested
+encryption types, and weak `RC4-HMAC` (`etype 23`, Kerberoasting) indicators.
+
+Call `ParseRDPNegotiation(buf)` or `capture.RDP(data)` to decode TPKT / X.224
+Connection Request and Connection Confirm PDUs, `Cookie: mstshash=...` tokens,
+and `RDP_NEG_REQ` / `RDP_NEG_RSP` security protocol flags (`RDPProtoTLS`,
+`RDPProtoCredSSP`, `RDPProtoHybridEx`).
 
 ## Compute C2 beacon and flow statistics
 
@@ -272,4 +295,7 @@ blocks to any `io.Writer`.
 
 Use `OpenLive(ifaceName, opts)` to capture live packets from an OS network
 interface using standard-library `syscall` descriptors (`/dev/bpf*` on macOS,
-`AF_PACKET` on Linux) without `cgo` or `libpcap`.
+`AF_PACKET` on Linux, `SIO_RCVALL` raw sockets on Windows) without `cgo` or
+`libpcap`. Use `BPFFilterTCPPort`, `BPFFilterUDPPort`, `BPFFilterIPProtocol`,
+and `BPFFilterIPv4Host` to construct classic BPF filter programs, or `EvalBPF`
+to evaluate a classic BPF program in memory.

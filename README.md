@@ -32,12 +32,14 @@ design scope.
   and `SLL2`, BSD `Loopback`/`Null`, `Raw IP`, `IPv4`, `IPv6` with extension
   headers, `TCP`, `UDP`, and `ICMPv4`/`ICMPv6`) without heap allocations.
 - Aggregate deterministic 5-tuple flow summaries, compute FoxIO `JA4T`, `JA4TS`,
-  and `JA4L` (latency and hop-count distance) TCP fingerprints, and reassemble
-  bounded directional TCP byte streams with sequence-gap and overlap-conflict
-  anomaly detection.
-- Decode Domain Name System (DNS) messages over UDP and TCP with bounded RFC
-  1035 label compression pointer resolution, and compute per-domain DNS
-  tunneling metrics (`DNSLabelEntropy` and `Capture.DNSDomainStats`).
+  and `JA4L` (latency and hop-count distance) TCP fingerprints, reassemble
+  fragmented IPv4 and IPv6 datagrams (`DefragmentIP`), and reassemble bounded
+  directional TCP byte streams with sequence-gap and overlap-conflict anomaly
+  detection.
+- Decode Domain Name System (DNS) messages over UDP (including fragmented UDP
+  datagrams) and TCP with bounded RFC 1035 label compression pointer resolution,
+  and compute per-domain DNS tunneling metrics (`DNSLabelEntropy` and
+  `Capture.DNSDomainStats`).
 - Decode TLS 1.2 and TLS 1.3 handshakes and X.509 certificate chains (including
   encrypted TLS 1.3 server certificates when `SERVER_HANDSHAKE_TRAFFIC_SECRET` is
   present), and compute FoxIO `JA4`, `JA4S`, and `JA4X` fingerprints.
@@ -46,23 +48,28 @@ design scope.
   embedded TLS 1.3 `ClientHello` and `JA4` fingerprint.
 - Decrypt TLS 1.2 (`CLIENT_RANDOM` master secrets) and TLS 1.3 application
   streams offline using PcapNG DSBs or caller-supplied `SSLKEYLOGFILE` material.
-- Decode HTTP/1.x requests and responses across cleartext and decrypted TLS
-  streams, compute FoxIO `JA4H` fingerprints, and carve `Content-Length` or
-  `chunked` body payloads.
+- Decode HTTP/1.x requests and responses and HTTP/2 frames across cleartext and
+  decrypted TLS streams, compute FoxIO `JA4H` and HTTP/2 `SETTINGS` fingerprints,
+  and carve `Content-Length`, `chunked`, or HTTP/2 `DATA` stream payloads.
 - Decode Secure Shell (SSH) handshakes (`HASSH`, `HASSHServer`, and FoxIO
   `JA4SSH`), Server Message Block (SMB) v2/v3 and NT LAN Manager Security
-  Support Provider (NTLMSSP) negotiation tokens, and statistical
+  Support Provider (NTLMSSP) negotiation tokens, Kerberos v5 (`AS-REQ`,
+  `TGS-REQ`, and `KRB-ERROR` with RC4-HMAC `etype 23` detection), Remote Desktop
+  Protocol (RDP) TPKT/X.224 negotiation PDUs, and statistical
   Command-and-Control (C2) beacon periodicity and Producer-Consumer Ratio (PCR)
   metrics.
 
 The library doesn't perform active network probing, certificate revocation
 checks, or operating-system trust store validation. For large files, use
-`NewFromReaderAt`, `Capture.PacketsFromReaderAt`, and
-`Capture.PacketPayloadFromReaderAt` to read bounded container metadata and
-packet records from an `io.ReaderAt` without loading the entire capture into
-memory. To write PcapNG files or capture live packets from a local interface
-using standard-library system calls (`CGO_ENABLED=0`), use `NewPCAPNGWriter` and
-`OpenLive`.
+`NewFromReaderAt`, `Capture.PacketsFromReaderAt`,
+`Capture.PacketPayloadFromReaderAt`, `Capture.FlowsFromReaderAt`,
+`Capture.DNSFromReaderAt`, `Capture.TLSFromReaderAt`, and
+`Capture.QUICFromReaderAt` to read bounded container metadata, packet records,
+flows, and handshake records from an `io.ReaderAt` without loading the entire
+capture into memory. To write PcapNG files or capture live packets from a local
+interface using standard-library system calls (`CGO_ENABLED=0`), use
+`NewPCAPNGWriter` and `OpenLive` (with `BPFFilterTCPPort`, `BPFFilterUDPPort`,
+`BPFFilterIPProtocol`, `BPFFilterIPv4Host`, and `EvalBPF`).
 
 ## Install the library
 
@@ -179,19 +186,19 @@ types and methods.
 | --- | --- | --- |
 | Parse container metadata, interfaces, NRBs, ISBs, and DSB secrets | `New`, `NewWithLength`, `NewFromReaderAt`, `Open` | [Container parsing](docs/parsing.md#parse-capture-containers) |
 | Write PcapNG blocks, NRBs, ISBs, DSB secrets, and process-tagged packets | `NewPCAPNGWriter`, `PCAPNGWriter.WritePacket`, `PCAPNGWriter.WriteDecryptionSecrets`, `PCAPNGWriter.WriteNameResolution`, `PCAPNGWriter.WriteInterfaceStats` | [Write PcapNG](docs/parsing.md#write-pcapng-captures) |
-| Capture live interface packets without CGO or libpcap | `OpenLive`, `LiveCapture.ReadPacket`, `ParseBPFBuffer` | [Live capture](docs/parsing.md#capture-live-interface-traffic) |
+| Capture live interface packets without CGO or libpcap | `OpenLive`, `LiveCapture.ReadPacket`, `ParseBPFBuffer`, `BPFFilterTCPPort`, `BPFFilterUDPPort`, `BPFFilterIPProtocol`, `BPFFilterIPv4Host`, `EvalBPF` | [Live capture](docs/parsing.md#capture-live-interface-traffic) |
 | Check truncation, extents, and container anomalies | `Capture.DeclaredExtent`, `Capture.InputTruncated`, `Capture.Anomalies` | [Bounds and anomalies](docs/parsing.md#inspect-truncation-and-anomalies) |
 | Stream or enumerate bounded packet records and payload slices | `Capture.PacketSeq`, `Capture.Packets`, `Capture.PacketPayload`, `Capture.PacketsFromReaderAt` | [Packet records](docs/parsing.md#read-packet-records) |
-| Decode L2–L4 frames, tunnels, and JA4T/JA4L fingerprints | `DecodeFrame`, `Frame.JA4T`, `JA4T`, `JA4L` | [Frame decoding](docs/parsing.md#decode-l2-l4-frames-and-tunnels) |
-| Aggregate deterministic 5-tuple flows | `Capture.Flows` | [Flow aggregation](docs/parsing.md#aggregate-5-tuple-flows) |
+| Decode L2–L4 frames, tunnels, IP fragments, and JA4T/JA4L fingerprints | `DecodeFrame`, `DefragmentIP`, `Frame.JA4T`, `JA4T`, `JA4L` | [Frame decoding](docs/parsing.md#decode-l2-l4-frames-and-tunnels) |
+| Aggregate deterministic 5-tuple flows | `Capture.Flows`, `Capture.FlowsFromReaderAt` | [Flow aggregation](docs/parsing.md#aggregate-5-tuple-flows) |
 | Reassemble bounded TCP byte streams | `Capture.Streams`, `ReassembleTCP` | [TCP reassembly](docs/parsing.md#reassemble-tcp-streams) |
-| Parse DNS messages and compute DNS tunneling metrics | `Capture.DNS`, `Capture.HasDNSQuery`, `Capture.DNSDomainStats`, `ParseDNS`, `DNSLabelEntropy` | [DNS messages](docs/parsing.md#parse-dns-messages-and-tunneling-metrics) |
-| Parse TLS handshakes, X.509 certificates, and JA4/JA4S/JA4X | `Capture.TLS`, `Capture.TLSWithKeyLog`, `Capture.HasTLSJA4`, `Capture.HasTLSSNI`, `ParseTLSRecords`, `JA4XFromDER` | [TLS handshakes](docs/parsing.md#parse-tls-handshakes-and-ja4-fingerprints) |
-| Decrypt QUIC v1/v2 Initial packets and extract inner TLS 1.3 JA4 | `Capture.QUIC`, `Capture.HasQUICJA4`, `Capture.HasQUICSNI`, `DecryptQUICInitial`, `ParseQUICInitialPacket` | [QUIC Initial](docs/parsing.md#decrypt-quic-initial-packets) |
+| Parse DNS messages and compute DNS tunneling metrics | `Capture.DNS`, `Capture.DNSFromReaderAt`, `Capture.HasDNSQuery`, `Capture.DNSDomainStats`, `ParseDNS`, `DNSLabelEntropy` | [DNS messages](docs/parsing.md#parse-dns-messages-and-tunneling-metrics) |
+| Parse TLS handshakes, X.509 certificates, and JA4/JA4S/JA4X | `Capture.TLS`, `Capture.TLSFromReaderAt`, `Capture.TLSWithKeyLog`, `Capture.HasTLSJA4`, `Capture.HasTLSSNI`, `ParseTLSRecords`, `JA4XFromDER` | [TLS handshakes](docs/parsing.md#parse-tls-handshakes-and-ja4-fingerprints) |
+| Decrypt QUIC v1/v2 Initial packets and extract inner TLS 1.3 JA4 | `Capture.QUIC`, `Capture.QUICFromReaderAt`, `Capture.HasQUICJA4`, `Capture.HasQUICSNI`, `DecryptQUICInitial`, `ParseQUICInitialPacket` | [QUIC Initial](docs/parsing.md#decrypt-quic-initial-packets) |
 | Decrypt TLS 1.2 and TLS 1.3 streams offline via PcapNG DSB or keylog | `Capture.DecryptedTLSStreams`, `Capture.TLSKeyLog`, `DecryptTLS13Records`, `DecryptTLS12Records`, `ParseTLSKeyLog` | [TLS decryption](docs/parsing.md#decrypt-tls-12-and-tls-13-streams-offline) |
-| Parse HTTP/1.x, compute JA4H, and carve payloads | `Capture.HTTP`, `ParseHTTPRequest`, `ParseHTTPResponse` | [HTTP and carving](docs/parsing.md#parse-http-messages-and-carve-payloads) |
+| Parse HTTP/1.x and HTTP/2, compute JA4H and SETTINGS fingerprints, and carve payloads | `Capture.HTTP`, `Capture.HTTP2`, `ParseHTTPRequest`, `ParseHTTPResponse`, `ParseHTTP2Frames` | [HTTP and carving](docs/parsing.md#parse-http-messages-and-carve-payloads) |
 | Parse SSH handshakes and compute HASSH, HASSHServer, and JA4SSH | `Capture.SSH`, `ParseSSHHandshake`, `JA4SSH` | [SSH handshakes](docs/parsing.md#parse-ssh-handshakes-and-hassh) |
-| Parse SMB2/3 and NTLMSSP negotiation and challenge metadata | `Capture.SMB`, `ParseSMB2Message`, `ParseNTLMSSP` | [SMB2 and NTLM](docs/parsing.md#parse-smb2-and-ntlmssp-messages) |
+| Parse SMB2/3, NTLMSSP, Kerberos v5, and RDP negotiation metadata | `Capture.SMB`, `Capture.Kerberos`, `Capture.RDP`, `ParseSMB2Message`, `ParseNTLMSSP`, `ParseKRB5`, `ParseRDPNegotiation` | [SMB2, NTLM, Kerberos, and RDP](docs/parsing.md#parse-smb2-ntlmssp-kerberos-v5-and-rdp-messages) |
 | Compute C2 beacon timing regularity and flow PCR scores | `Capture.Beacons`, `ComputeBeaconStats` | [Beacon analytics](docs/parsing.md#compute-c2-beacon-and-flow-statistics) |
 
 ## Integrate with an application

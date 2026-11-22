@@ -88,6 +88,195 @@ func (c *Capture) PacketPayloadFromReaderAt(r io.ReaderAt, pkt PacketRecord) ([]
 	return buf, nil
 }
 
+// FlowsFromReaderAt aggregates deterministic 5-tuple flows from an [io.ReaderAt]
+// without loading the entire capture file into memory. It reads at most the
+// leading 256 bytes of each packet frame to decode L2–L4 headers under
+// [MaxReaderAtScanBytes].
+func (c *Capture) FlowsFromReaderAt(r io.ReaderAt) ([]FlowSummary, error) {
+	packets, err := c.PacketsFromReaderAt(r)
+	if err != nil {
+		return nil, err
+	}
+	if len(packets) == 0 {
+		return nil, nil
+	}
+
+	type tcpHandshakeTime struct {
+		synNs      int64
+		synAckNs   int64
+		hasSYN     bool
+		hasSYNACK  bool
+		hasClientL bool
+	}
+	var table flowIndexTable
+	var flows []FlowSummary
+	var hsTimes []tcpHandshakeTime
+	var hdrBuf [256]byte
+	var totalRead int64
+
+	for i := range packets {
+		pkt := &packets[i]
+		readLen := min(pkt.PayloadLength, int64(len(hdrBuf)))
+		if readLen <= 0 {
+			continue
+		}
+		if totalRead+readLen > MaxReaderAtScanBytes {
+			return nil, fmt.Errorf("%w: ReaderAt scan exceeds %d bytes", ErrPacketLimit, MaxReaderAtScanBytes)
+		}
+		if err := readExactAt(r, hdrBuf[:readLen], pkt.PayloadOffset, c.fileSize); err != nil {
+			return nil, err
+		}
+		totalRead += readLen
+
+		frame, err := DecodeFrame(hdrBuf[:readLen], pkt.LinkType)
+		if err != nil || frame.IPVersion == 0 {
+			continue
+		}
+		// Compute actual L4 payload length from full packet length when hdrBuf truncated the payload tail.
+		l4Len := uint64(frame.PayloadLength)
+		if pkt.PayloadLength > int64(frame.PayloadOffset) {
+			l4Len = uint64(pkt.PayloadLength - int64(frame.PayloadOffset))
+			frame.Anomalies.IPTotalLengthExceedsFrame = false
+		}
+
+		key, _ := makeCanonicalFlowKey(frame.IPProtocol, frame.SrcAddr, frame.SrcPort, frame.DstAddr, frame.DstPort)
+		idx, exists, err := table.lookupOrInsert(key)
+		if err != nil {
+			return nil, err
+		}
+		if !exists {
+			flows = append(flows, FlowSummary{
+				Protocol:         frame.IPProtocol,
+				SrcAddr:          frame.SrcAddr,
+				DstAddr:          frame.DstAddr,
+				SrcPort:          frame.SrcPort,
+				DstPort:          frame.DstPort,
+				FirstTimestampNs: pkt.TimestampNs,
+				LastTimestampNs:  pkt.TimestampNs,
+				ProcessID:        pkt.ProcessID,
+				UserID:           pkt.UserID,
+				ProcessName:      pkt.ProcessName,
+				ProcessArgs:      pkt.ProcessArgs,
+				ContainerID:      pkt.ContainerID,
+				HasProcessID:     pkt.HasProcessID,
+				HasUserID:        pkt.HasUserID,
+			})
+			hsTimes = append(hsTimes, tcpHandshakeTime{})
+		}
+
+		flow := &flows[idx]
+		hst := &hsTimes[idx]
+		flow.PacketCount++
+		if pkt.TimestampNs < flow.FirstTimestampNs {
+			flow.FirstTimestampNs = pkt.TimestampNs
+		}
+		if pkt.TimestampNs > flow.LastTimestampNs {
+			flow.LastTimestampNs = pkt.TimestampNs
+		}
+		if !flow.HasProcessID && pkt.HasProcessID {
+			flow.ProcessID = pkt.ProcessID
+			flow.HasProcessID = true
+		}
+		if !flow.HasUserID && pkt.HasUserID {
+			flow.UserID = pkt.UserID
+			flow.HasUserID = true
+		}
+		if flow.ProcessName == "" && pkt.ProcessName != "" {
+			flow.ProcessName = pkt.ProcessName
+		}
+		if flow.ProcessArgs == "" && pkt.ProcessArgs != "" {
+			flow.ProcessArgs = pkt.ProcessArgs
+		}
+		if flow.ContainerID == "" && pkt.ContainerID != "" {
+			flow.ContainerID = pkt.ContainerID
+		}
+		flow.TCPFlags |= frame.TCPFlags
+		flow.Anomalies = mergeFrameAnomalies(flow.Anomalies, frame.Anomalies)
+
+		if frame.SrcAddr == flow.SrcAddr && frame.SrcPort == flow.SrcPort {
+			flow.ClientPackets++
+			flow.ClientBytes += l4Len
+			if (frame.TCPFlags & (TCPFlagSYN | TCPFlagACK)) == TCPFlagSYN {
+				if flow.ClientJA4T == "" {
+					if fp, ok := frame.JA4T(hdrBuf[:readLen]); ok {
+						flow.ClientJA4T = fp
+					}
+				}
+				if !hst.hasSYN {
+					hst.synNs = pkt.TimestampNs
+					hst.hasSYN = true
+				}
+			} else if hst.hasSYNACK && !hst.hasClientL && (frame.TCPFlags&TCPFlagACK) != 0 {
+				flow.ClientJA4L = JA4L(pkt.TimestampNs-hst.synAckNs, frame.TTL)
+				hst.hasClientL = true
+			}
+		} else {
+			flow.ServerPackets++
+			flow.ServerBytes += l4Len
+			if (frame.TCPFlags & (TCPFlagSYN | TCPFlagACK)) == (TCPFlagSYN | TCPFlagACK) {
+				if flow.ServerJA4TS == "" {
+					if fp, ok := frame.JA4T(hdrBuf[:readLen]); ok {
+						flow.ServerJA4TS = fp
+					}
+				}
+				if hst.hasSYN && !hst.hasSYNACK {
+					hst.synAckNs = pkt.TimestampNs
+					hst.hasSYNACK = true
+					flow.ServerJA4L = JA4L(pkt.TimestampNs-hst.synNs, frame.TTL)
+				}
+			}
+		}
+	}
+	return flows, nil
+}
+
+// DNSFromReaderAt extracts and parses DNS records from an [io.ReaderAt] under
+// [MaxReaderAtScanBytes].
+func (c *Capture) DNSFromReaderAt(r io.ReaderAt) ([]DNSRecord, error) {
+	raw, err := c.readBoundedCaptureBytes(r)
+	if err != nil {
+		return nil, err
+	}
+	return c.DNS(raw)
+}
+
+// TLSFromReaderAt extracts and parses TLS handshakes and JA4/JA4S/JA4X
+// fingerprints from an [io.ReaderAt] under [MaxReaderAtScanBytes].
+func (c *Capture) TLSFromReaderAt(r io.ReaderAt) ([]TLSRecord, error) {
+	raw, err := c.readBoundedCaptureBytes(r)
+	if err != nil {
+		return nil, err
+	}
+	return c.TLS(raw)
+}
+
+// QUICFromReaderAt decrypts and parses QUIC v1/v2 Initial packets and JA4
+// fingerprints from an [io.ReaderAt] under [MaxReaderAtScanBytes].
+func (c *Capture) QUICFromReaderAt(r io.ReaderAt) ([]QUICRecord, error) {
+	raw, err := c.readBoundedCaptureBytes(r)
+	if err != nil {
+		return nil, err
+	}
+	return c.QUIC(raw)
+}
+
+func (c *Capture) readBoundedCaptureBytes(r io.ReaderAt) ([]byte, error) {
+	if err := c.validateContainer(); err != nil {
+		return nil, err
+	}
+	if r == nil {
+		return nil, fmt.Errorf("%w: nil ReaderAt", ErrInvalidHeader)
+	}
+	if c.fileSize < 0 || c.fileSize > MaxReaderAtScanBytes {
+		return nil, fmt.Errorf("%w: capture size %d exceeds ReaderAt scan limit %d", ErrPacketLimit, c.fileSize, MaxReaderAtScanBytes)
+	}
+	buf := make([]byte, c.fileSize)
+	if err := readExactAt(r, buf, 0, c.fileSize); err != nil {
+		return nil, err
+	}
+	return buf, nil
+}
+
 func readExactAt(r io.ReaderAt, buf []byte, offset, totalSize int64) error {
 	if offset < 0 || int64(len(buf)) < 0 {
 		return ErrOutOfBounds

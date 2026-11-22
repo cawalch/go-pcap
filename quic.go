@@ -489,6 +489,7 @@ func (c *Capture) QUIC(data []byte) ([]QUICRecord, error) {
 
 	r := SafeReader{data: data, size: int64(len(data))}
 	var table flowIndexTable
+	var defrag ipFragAccumulator
 	slotByFlow := make(map[int]int)
 	var flows []quicFlowBuf
 
@@ -502,15 +503,28 @@ func (c *Capture) QUIC(data []byte) ([]QUICRecord, error) {
 			return nil
 		}
 
+		var udpPayload []byte
+		if frame.Anomalies.IPFragment && frame.IPProtocol == IPProtoUDP {
+			var srcPort, dstPort uint16
+			var ok bool
+			udpPayload, srcPort, dstPort, ok = defrag.addUDPFragment(&frame, payload)
+			if !ok {
+				return nil
+			}
+			frame.SrcPort = srcPort
+			frame.DstPort = dstPort
+		} else if frame.IPProtocol == IPProtoUDP && frame.PayloadLength >= 7 {
+			udpPayload = payload[frame.PayloadOffset : frame.PayloadOffset+frame.PayloadLength]
+		}
+
 		key, _ := makeCanonicalFlowKey(frame.IPProtocol, frame.SrcAddr, frame.SrcPort, frame.DstAddr, frame.DstPort)
 		flowIdx, _, err := table.lookupOrInsert(key)
 		if err != nil {
 			return err
 		}
-		if frame.IPProtocol != IPProtoUDP || frame.PayloadLength < 7 {
+		if frame.IPProtocol != IPProtoUDP || len(udpPayload) < 7 {
 			return nil
 		}
-		udpPayload := payload[frame.PayloadOffset : frame.PayloadOffset+frame.PayloadLength]
 		if (udpPayload[0] & 0xc0) != 0xc0 {
 			return nil
 		}

@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/binary"
 	"errors"
+	"net/netip"
 	"testing"
 )
 
@@ -51,5 +52,54 @@ func TestLiveCaptureBounds(t *testing.T) {
 	}
 	if _, err := OpenLive("lo0", LiveOptions{SnapLen: MaxSnapLen + 1}); !errors.Is(err, ErrInvalidHeader) {
 		t.Fatalf("OpenLive(oversize snaplen) err = %v, want ErrInvalidHeader", err)
+	}
+}
+
+func TestBPFFilterBuildersAndEvalBPF(t *testing.T) {
+	tcp443 := buildEthernetIPv4TCPFrame([4]byte{192, 0, 2, 10}, [4]byte{198, 51, 100, 20}, 51234, 443, 1, 0, TCPFlagSYN, nil)
+	udp53 := buildEthernetIPv4UDPFrame([4]byte{192, 0, 2, 10}, [4]byte{8, 8, 8, 8}, 51234, 53, []byte("dns"))
+
+	// 1. BPFFilterTCPPort(443)
+	progTCP443 := BPFFilterTCPPort(443)
+	if snap, ok := EvalBPF(progTCP443, tcp443); !ok || snap == 0 {
+		t.Fatalf("EvalBPF(BPFFilterTCPPort(443), tcp443) = (%d, %v), want accept", snap, ok)
+	}
+	if _, ok := EvalBPF(progTCP443, udp53); ok {
+		t.Fatal("EvalBPF(BPFFilterTCPPort(443), udp53) accepted UDP packet")
+	}
+
+	// 2. BPFFilterUDPPort(53)
+	progUDP53 := BPFFilterUDPPort(53)
+	if _, ok := EvalBPF(progUDP53, udp53); !ok {
+		t.Fatal("EvalBPF(BPFFilterUDPPort(53), udp53) rejected UDP port 53")
+	}
+	if _, ok := EvalBPF(progUDP53, tcp443); ok {
+		t.Fatal("EvalBPF(BPFFilterUDPPort(53), tcp443) accepted TCP packet")
+	}
+
+	// 3. BPFFilterIPProtocol
+	if _, ok := EvalBPF(BPFFilterIPProtocol(IPProtoTCP), tcp443); !ok {
+		t.Fatal("BPFFilterIPProtocol(TCP) rejected TCP frame")
+	}
+	if _, ok := EvalBPF(BPFFilterIPProtocol(IPProtoUDP), tcp443); ok {
+		t.Fatal("BPFFilterIPProtocol(UDP) accepted TCP frame")
+	}
+
+	// 4. BPFFilterIPv4Host
+	hostFilter := BPFFilterIPv4Host(netip.MustParseAddr("198.51.100.20"))
+	if _, ok := EvalBPF(hostFilter, tcp443); !ok {
+		t.Fatal("BPFFilterIPv4Host rejected matching dst IPv4")
+	}
+	if _, ok := EvalBPF(hostFilter, udp53); ok {
+		t.Fatal("BPFFilterIPv4Host accepted non-matching IPv4")
+	}
+
+	// 5. EvalBPF safety: division by zero and out-of-bounds packet load return (0, false).
+	divZero := []BPFInstruction{
+		{Code: bpfClassALU | 0x30 | bpfSrcK, K: 0},
+		{Code: bpfClassRET | bpfSrcK, K: 65535},
+	}
+	if _, ok := EvalBPF(divZero, tcp443); ok {
+		t.Fatal("EvalBPF(divZero) should fail safely")
 	}
 }

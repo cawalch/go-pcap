@@ -296,10 +296,52 @@ const (
 	MaxNTLMAvPairs       = 32
 	MaxSMBRecordsPerScan = 16_384
 
-	// Live capture limits.
+	// Live capture and ReaderAt scan limits.
 	MaxBPFFilterInstructions = 4096
 	DefaultLiveSnapLen       = 65535
 	DefaultLiveBufferSize    = 256 << 10
+	MaxReaderAtScanBytes     = 64 << 20 // 64 MiB per-call ReaderAt payload I/O budget
+
+	// IPv4 / IPv6 defragmentation limits.
+	MaxFragmentGroups           = 1024
+	MaxFragmentsPerGroup        = 16
+	MaxReassembledIPPacketBytes = 65535
+
+	// HTTP/2 parser limits.
+	MaxHTTP2FramesPerStream = 1024
+	MaxHTTP2Settings        = 64
+	MaxHTTP2FramePayload    = 1 << 20
+
+	// Kerberos v5 and RDP parser limits.
+	MaxKRB5PacketBytes    = 64 << 10
+	MaxKRB5PrincipalParts = 16
+	MaxKRB5ETypes         = 32
+	MaxKRB5RecordsPerScan = 16_384
+	MaxRDPPacketBytes     = 16 << 10
+	MaxRDPCookieBytes     = 512
+	MaxRDPRecordsPerScan  = 16_384
+)
+
+// Kerberos v5 message types and encryption types (RFC 4120).
+const (
+	KRB5MsgASReq  uint8 = 10
+	KRB5MsgASRep  uint8 = 11
+	KRB5MsgTGSReq uint8 = 12
+	KRB5MsgTGSRep uint8 = 13
+	KRB5MsgError  uint8 = 30
+
+	KRB5ETypeAES128CTS int32 = 17
+	KRB5ETypeAES256CTS int32 = 18
+	KRB5ETypeRC4HMAC   int32 = 23
+)
+
+// RDP negotiation protocol flags (MS-RDPBCGR §2.2.1.1.1).
+const (
+	RDPProtoStandard uint32 = 0x00000000
+	RDPProtoTLS      uint32 = 0x00000001
+	RDPProtoCredSSP  uint32 = 0x00000002
+	RDPProtoRDSTLS   uint32 = 0x00000004
+	RDPProtoHybridEx uint32 = 0x00000008
 )
 
 // SMB2 command codes and NTLM message types.
@@ -414,6 +456,10 @@ var (
 	ErrInvalidSSH = errors.New("invalid SSH handshake")
 	// ErrInvalidSMB indicates a malformed SMB2 header or NTLMSSP token.
 	ErrInvalidSMB = errors.New("invalid SMB2 or NTLM message")
+	// ErrInvalidKRB5 indicates a malformed Kerberos v5 ASN.1 message.
+	ErrInvalidKRB5 = errors.New("invalid Kerberos v5 message")
+	// ErrInvalidRDP indicates a malformed TPKT/X.224 RDP negotiation PDU.
+	ErrInvalidRDP = errors.New("invalid RDP negotiation packet")
 	// ErrLiveCaptureUnsupported indicates live interface capture is not supported on the target OS.
 	ErrLiveCaptureUnsupported = errors.New("live capture unsupported on this platform")
 	// ErrInterfaceLimit indicates the capture exceeds [MaxInterfaces].
@@ -428,6 +474,8 @@ var (
 	ErrOptionLimit = errors.New("PcapNG block options exceed limit")
 	// ErrReassemblyLimit indicates TCP stream reassembly exceeds segment or byte limits.
 	ErrReassemblyLimit = errors.New("TCP stream reassembly exceeds limit")
+	// ErrFragmentLimit indicates IPv4/IPv6 packet defragmentation exceeds group, fragment, or byte limits.
+	ErrFragmentLimit = errors.New("IP fragment reassembly exceeds limit")
 	// ErrDNSLimit indicates a DNS message or capture exceeds DNS count or compression limits.
 	ErrDNSLimit = errors.New("DNS record or jump count exceeds limit")
 	// ErrTLSLimit indicates a TLS handshake or capture exceeds TLS size or item limits.
@@ -440,4 +488,8 @@ var (
 	ErrSSHLimit = errors.New("SSH handshake exceeds limit")
 	// ErrSMBLimit indicates an SMB2 or NTLM message exceeds size or attribute limits.
 	ErrSMBLimit = errors.New("SMB2 or NTLM message exceeds limit")
+	// ErrKRB5Limit indicates a Kerberos v5 message or capture exceeds limits.
+	ErrKRB5Limit = errors.New("Kerberos v5 message exceeds limit")
+	// ErrRDPLimit indicates an RDP negotiation message or capture exceeds limits.
+	ErrRDPLimit = errors.New("RDP negotiation message exceeds limit")
 )

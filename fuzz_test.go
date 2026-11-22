@@ -209,3 +209,65 @@ func FuzzParseBPFBuffer(f *testing.F) {
 		}
 	})
 }
+
+func FuzzDefragmentIP(f *testing.F) {
+	f.Add(uint16(0), true, []byte("01234567"), uint16(8), false, []byte("89ABCDEF"))
+
+	f.Fuzz(func(t *testing.T, off1 uint16, mf1 bool, p1 []byte, off2 uint16, mf2 bool, p2 []byte) {
+		frags := []IPFragmentInput{
+			{FragmentOffset: int(off1 & 0xfff8), MoreFragments: mf1, Payload: p1},
+			{FragmentOffset: int(off2 & 0xfff8), MoreFragments: mf2, Payload: p2},
+		}
+		out, _, err := DefragmentIP(frags)
+		if err != nil {
+			return
+		}
+		if len(out) > MaxReassembledIPPacketBytes {
+			t.Fatalf("DefragmentIP len %d exceeds %d", len(out), MaxReassembledIPPacketBytes)
+		}
+	})
+}
+
+func FuzzParseHTTP2Frames(f *testing.F) {
+	f.Add(append(append([]byte{}, HTTP2ClientPreface...), buildHTTP2Frame(HTTP2FrameSettings, 0, 0, make([]byte, 6))...))
+
+	f.Fuzz(func(t *testing.T, data []byte) {
+		sum, err := ParseHTTP2Frames(data)
+		if err != nil {
+			return
+		}
+		for _, s := range sum.Streams {
+			if len(s.Data) > MaxHTTPBodyBytes {
+				t.Fatalf("HTTP/2 stream data %d exceeds %d", len(s.Data), MaxHTTPBodyBytes)
+			}
+		}
+	})
+}
+
+func FuzzEvalBPF(f *testing.F) {
+	f.Add(uint16(bpfClassLD|bpfSizeH|bpfModeABS), uint8(0), uint8(0), uint32(12), []byte{0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 0x08, 0x00})
+
+	f.Fuzz(func(t *testing.T, code uint16, jt, jf uint8, k uint32, frame []byte) {
+		insns := []BPFInstruction{
+			{Code: code, JT: jt, JF: jf, K: k},
+			{Code: bpfClassRET | bpfRetA},
+		}
+		_, _ = EvalBPF(insns, frame)
+	})
+}
+
+func FuzzParseKRB5(f *testing.F) {
+	f.Add(buildKRB5ASReqFixture("EXAMPLE.COM", "alice", []string{"krbtgt", "EXAMPLE.COM"}, []int{18, 23}))
+
+	f.Fuzz(func(t *testing.T, data []byte) {
+		_, _ = ParseKRB5(data)
+	})
+}
+
+func FuzzParseRDPNegotiation(f *testing.F) {
+	f.Add(buildRDPConnReqPDU("mstshash=USER", RDPProtoCredSSP))
+
+	f.Fuzz(func(t *testing.T, data []byte) {
+		_, _ = ParseRDPNegotiation(data)
+	})
+}

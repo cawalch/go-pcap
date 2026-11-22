@@ -19,6 +19,7 @@ type FrameAnomalies struct {
 	InvalidIPHeaderLength     bool
 	IPTotalLengthExceedsFrame bool
 	IPFragment                bool
+	IPFragmentOverlapConflict bool
 	InvalidTCPDataOffset      bool
 	VLANDepthExceeded         bool
 	MPLSDepthExceeded         bool
@@ -31,6 +32,7 @@ func (a FrameAnomalies) Any() bool {
 		a.InvalidIPHeaderLength ||
 		a.IPTotalLengthExceedsFrame ||
 		a.IPFragment ||
+		a.IPFragmentOverlapConflict ||
 		a.InvalidTCPDataOffset ||
 		a.VLANDepthExceeded ||
 		a.MPLSDepthExceeded ||
@@ -49,11 +51,14 @@ type Frame struct {
 	Layers     [MaxFrameLayers]LayerSpan
 
 	// Network layer (IPv4 / IPv6).
-	IPVersion  uint8
-	IPProtocol uint8
-	TTL        uint8
-	SrcAddr    netip.Addr
-	DstAddr    netip.Addr
+	IPVersion       uint8
+	IPProtocol      uint8
+	TTL             uint8
+	IPID            uint32
+	IPFragOffset    uint16 // Fragment offset in bytes (8-byte units * 8)
+	IPMoreFragments bool
+	SrcAddr         netip.Addr
+	DstAddr         netip.Addr
 
 	// Transport layer (TCP / UDP / ICMP).
 	SrcPort          uint16
@@ -310,11 +315,15 @@ func decodeIPv4(r *SafeReader, offset int64, f *Frame) {
 		f.Anomalies.IPTotalLengthExceedsFrame = true
 	}
 
+	ipID, _ := r.ReadUint16BE(offset + 4)
 	fragWord, _ := r.ReadUint16BE(offset + 6)
 	moreFragments := (fragWord & 0x2000) != 0
-	fragOffset := fragWord & 0x1fff
+	fragOffset := (fragWord & 0x1fff) * 8
 
 	f.IPVersion = 4
+	f.IPID = uint32(ipID)
+	f.IPFragOffset = fragOffset
+	f.IPMoreFragments = moreFragments
 	f.TTL = r.data[offset+8]
 	f.IPProtocol = r.data[offset+9]
 	f.SrcAddr = netip.AddrFrom4([4]byte(r.data[offset+12 : offset+16]))
@@ -383,6 +392,9 @@ func decodeIPv6(r *SafeReader, offset int64, f *Frame) {
 		case IPProtoIPv6Frag:
 			extLen = 8
 			fragWord := binary.BigEndian.Uint16(r.data[cur+2 : cur+4])
+			f.IPFragOffset = fragWord & 0xfff8
+			f.IPMoreFragments = (fragWord & 0x0001) != 0
+			f.IPID = binary.BigEndian.Uint32(r.data[cur+4 : cur+8])
 			if (fragWord & 0xfff9) != 0 {
 				f.Anomalies.IPFragment = true
 			}
@@ -831,6 +843,7 @@ func mergeFrameAnomalies(a, b FrameAnomalies) FrameAnomalies {
 		InvalidIPHeaderLength:     a.InvalidIPHeaderLength || b.InvalidIPHeaderLength,
 		IPTotalLengthExceedsFrame: a.IPTotalLengthExceedsFrame || b.IPTotalLengthExceedsFrame,
 		IPFragment:                a.IPFragment || b.IPFragment,
+		IPFragmentOverlapConflict: a.IPFragmentOverlapConflict || b.IPFragmentOverlapConflict,
 		InvalidTCPDataOffset:      a.InvalidTCPDataOffset || b.InvalidTCPDataOffset,
 		VLANDepthExceeded:         a.VLANDepthExceeded || b.VLANDepthExceeded,
 		MPLSDepthExceeded:         a.MPLSDepthExceeded || b.MPLSDepthExceeded,

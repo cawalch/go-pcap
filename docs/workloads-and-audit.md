@@ -37,6 +37,11 @@ caches. Every entry point enforces explicit count and byte limits:
 | `ParseHTTPRequest` / `ParseHTTPResponse` / `Capture.HTTP` | `MaxHTTPHeaders = 128`, `MaxHTTPHeaderLineBytes = 8,192`, `MaxHTTPCookies = 64`, `MaxHTTPBodyBytes = 4 MiB`, `MaxHTTPMessagesPerScan = 16,384` | Bounds individual header lines to `8 KiB`, header count to `128`, and carved `Content-Length` or `chunked` bodies to `4 MiB`. Computes FoxIO `JA4H` across wire-order header names and sorted cookies. |
 | `ParseSSHHandshake` / `Capture.SSH` | `MaxSSHBannerBytes = 255`, `MaxSSHKexPacketBytes = 32 KiB`, `MaxSSHNameListBytes = 16 KiB`, `MaxSSHHandshakesPerScan = 16,384` | Bounds SSH version banners and `SSH_MSG_KEXINIT` name-lists before computing `HASSH` and `HASSHServer` MD5 digests. |
 | `ParseSMB2Message` / `ParseNTLMSSP` / `Capture.SMB` | `MaxSMB2PacketBytes = 64 KiB`, `MaxNTLMTokenBytes = 16 KiB`, `MaxNTLMAvPairs = 32`, `MaxSMBRecordsPerScan = 16,384` | Validates NetBIOS framing, 64-byte SMB2 headers, NTLMSSP security buffer offsets, and UTF-16LE `TargetInfo` attribute-value pairs. |
+| `DefragmentIP` (and fragmented UDP in `Capture.DNS` / `Capture.QUIC`) | `MaxFragmentGroups = 1,024`, `MaxFragmentsPerGroup = 16`, `MaxReassembledIPPacketBytes = 65,535` | Reassembles out-of-order IPv4 and IPv6 fragments using a first-seen-wins policy and sets `FrameAnomalies.IPFragmentOverlapConflict` on conflicting overlapping bytes. |
+| `ParseHTTP2Frames` / `Capture.HTTP2` | `MaxHTTP2FramesPerStream = 1,024`, `MaxHTTP2Settings = 64`, `MaxHTTP2FramePayload = 1 MiB`, `MaxHTTPBodyBytes = 4 MiB` | Validates the 24-byte HTTP/2 client preface or initial `SETTINGS` frame, formats `SettingsFingerprint` on a 128-byte stack buffer, and reassembles `DATA` frames under `MaxHTTPBodyBytes`. |
+| `ParseKRB5` / `Capture.Kerberos` / `ParseRDPNegotiation` / `Capture.RDP` | `MaxKRB5PacketBytes = 64 KiB`, `MaxKRB5PrincipalParts = 16`, `MaxKRB5ETypes = 32`, `MaxRDPPacketBytes = 16 KiB`, `MaxRDPCookieBytes = 512` | Bounds ASN.1 DER Kerberos v5 `AS-REQ`/`TGS-REQ`/`KRB-ERROR` structures and TPKT/X.224 RDP negotiation PDUs. |
+| `EvalBPF` / `BPFFilter*` | `MaxBPFFilterInstructions = 4,096` | Executes classic BPF instructions in a strictly forward program counter loop (rejecting backward jumps, out-of-bounds frame loads, and division by zero). |
+| `Capture.*FromReaderAt` | `MaxReaderAtScanBytes = 64 MiB`, `MaxPackets = 1,048,576`, `MaxFlows = 65,536` | Enforces a cumulative `64 MiB` payload I/O read budget per `FlowsFromReaderAt`, `DNSFromReaderAt`, `TLSFromReaderAt`, or `QUICFromReaderAt` call. |
 | `ComputeBeaconStats` / `Capture.Beacons` | `MaxFlows = 65,536`, `MaxPackets = 1,048,576` | Computes median inter-arrival interval, Median Absolute Deviation (MAD), Bowley quartile skewness periodicity, payload uniformity, and Producer-Consumer Ratio (PCR) in $O(P \log P)$ per flow. |
 
 ## Adversarial input threat model
@@ -81,3 +86,16 @@ Measured on Apple M3 Max (`darwin/arm64`, Go 1.27.4):
 | `BenchmarkParseHTTPRequestJA4H-14` | `192.13 MB/s` | `879.6 ns/op` | `952 B/op` | `28 allocs/op` |
 | `BenchmarkDecryptQUICInitial-14` | `67.07 MB/s` | `2,520 ns/op` | `5,624 B/op` | `69 allocs/op` |
 | `BenchmarkFlows-14` (64 packets, single flow) | `1,509 MB/s` | `3,494 ns/op` | `208 B/op` | `3 allocs/op` |
+
+## Head-to-head comparison against `gopacket`
+
+Measured via the isolated `benchmarks/gopacket` submodule (`go-pcap` vs
+`github.com/gopacket/gopacket v1.3.1` on Apple M3 Max, `darwin/arm64`, Go
+1.27.4):
+
+| Workload | `go-pcap` | `gopacket` | Result |
+| --- | --- | --- | --- |
+| Ethernet + IPv4 + TCP frame decode (`DecodeFrame` vs `gopacket.NewPacket`) | `31.5 ns/op`, `0 B/op`, `0 allocs/op` (`2,251 MB/s`) | `258.5 ns/op`, `1,354 B/op`, `6 allocs/op` (`275 MB/s`) | **8.2x faster**, **0 allocs** vs 6 allocs |
+| Ethernet + IPv4 + TCP frame decode (`DecodeFrame` vs `DecodingLayerParser`) | `31.5 ns/op`, `0 B/op`, `0 allocs/op` (`2,251 MB/s`) | `35.0 ns/op`, `0 B/op`, `0 allocs/op` (`2,027 MB/s`) | **1.11x faster**, zero caller layer setup |
+| PcapNG 64-packet parse + walk (`New` + `PacketSeq` vs `pcapgo.NewNgReader`) | `3,992 ns/op`, `416 B/op`, `3 allocs/op` | `3,383 ns/op`, `13,088 B/op`, `70 allocs/op` | **31.5x less memory**, **23.3x fewer allocs** |
+| 64-packet 8-flow TCP stream reassembly (`Capture.Streams` vs `tcpassembly`) | `8,165 ns/op`, `18,192 B/op`, `77 allocs/op` (`991 MB/s`) | `83,283 ns/op`, `2,343,675 B/op`, `101 allocs/op` (`97 MB/s`) | **10.2x faster**, **128.8x less memory** (`18 KiB` vs `2.34 MiB`) |

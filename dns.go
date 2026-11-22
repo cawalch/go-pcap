@@ -372,6 +372,7 @@ func (c *Capture) DNS(data []byte) ([]DNSRecord, error) {
 
 	r := SafeReader{data: data, size: int64(len(data))}
 	var table flowIndexTable
+	var defrag ipFragAccumulator
 	var records []DNSRecord
 
 	err := c.walkPackets(&r, func(pkt PacketRecord) error {
@@ -381,6 +382,41 @@ func (c *Capture) DNS(data []byte) ([]DNSRecord, error) {
 		}
 		frame, err := DecodeFrame(payload, pkt.LinkType)
 		if err != nil || frame.IPVersion == 0 {
+			return nil
+		}
+
+		if frame.Anomalies.IPFragment && frame.IPProtocol == IPProtoUDP {
+			udpPayload, srcPort, dstPort, ok := defrag.addUDPFragment(&frame, payload)
+			if !ok {
+				return nil
+			}
+			frame.SrcPort = srcPort
+			frame.DstPort = dstPort
+			key, _ := makeCanonicalFlowKey(frame.IPProtocol, frame.SrcAddr, frame.SrcPort, frame.DstAddr, frame.DstPort)
+			flowIdx, _, err := table.lookupOrInsert(key)
+			if err != nil {
+				return err
+			}
+			if !isDNSPort(srcPort) && !isDNSPort(dstPort) {
+				return nil
+			}
+			msg, err := ParseDNS(udpPayload)
+			if err != nil {
+				return nil
+			}
+			if len(records) >= MaxDNSMessagesPerScan {
+				return fmt.Errorf("%w: exceeds %d messages", ErrDNSLimit, MaxDNSMessagesPerScan)
+			}
+			records = append(records, DNSRecord{
+				PacketIndex: pkt.Index,
+				FlowIndex:   flowIdx,
+				SrcAddr:     frame.SrcAddr,
+				DstAddr:     frame.DstAddr,
+				SrcPort:     srcPort,
+				DstPort:     dstPort,
+				TimestampNs: pkt.TimestampNs,
+				Message:     msg,
+			})
 			return nil
 		}
 
@@ -461,6 +497,7 @@ func (c *Capture) HasDNSQuery(data []byte, qname string) (bool, error) {
 	}
 	target := strings.TrimSuffix(qname, ".")
 	r := SafeReader{data: data, size: int64(len(data))}
+	var defrag ipFragAccumulator
 	found := false
 
 	err := c.walkPackets(&r, func(pkt PacketRecord) error {
@@ -470,6 +507,17 @@ func (c *Capture) HasDNSQuery(data []byte, qname string) (bool, error) {
 		}
 		frame, err := DecodeFrame(payload, pkt.LinkType)
 		if err != nil || frame.IPVersion == 0 || frame.PayloadLength == 0 {
+			return nil
+		}
+		if frame.Anomalies.IPFragment && frame.IPProtocol == IPProtoUDP {
+			udpPayload, srcPort, dstPort, ok := defrag.addUDPFragment(&frame, payload)
+			if !ok || (!isDNSPort(srcPort) && !isDNSPort(dstPort)) {
+				return nil
+			}
+			if dnsPayloadHasQuery(udpPayload, target) {
+				found = true
+				return errStopWalk
+			}
 			return nil
 		}
 		if !isDNSPort(frame.SrcPort) && !isDNSPort(frame.DstPort) {

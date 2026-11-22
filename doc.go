@@ -5,13 +5,17 @@
 //
 // Use [New] to parse a byte slice, [Open] to read a file, [NewWithLength]
 // to parse a leading stream prefix with a known total stream length, or
-// [NewFromReaderAt] (with [Capture.PacketsFromReaderAt] and
-// [Capture.PacketPayloadFromReaderAt]) to read bounded container metadata and
-// packet headers from an [io.ReaderAt] without loading large captures into
-// memory. Use [NewPCAPNGWriter] to write PcapNG containers, Decryption Secrets
-// Blocks (DSBs), Name Resolution Blocks (NRBs), Interface Statistics Blocks
-// (ISBs), and Enhanced Packet Blocks (EPBs), or [OpenLive] to capture live
-// packets from a network interface using OS-native standard-library syscalls.
+// [NewFromReaderAt] (with [Capture.PacketsFromReaderAt],
+// [Capture.PacketPayloadFromReaderAt], [Capture.FlowsFromReaderAt],
+// [Capture.DNSFromReaderAt], [Capture.TLSFromReaderAt], and
+// [Capture.QUICFromReaderAt]) to read bounded container metadata, packet
+// headers, flows, and handshake records from an [io.ReaderAt] without loading
+// large captures into memory. Use [NewPCAPNGWriter] to write PcapNG containers,
+// Decryption Secrets Blocks (DSBs), Name Resolution Blocks (NRBs), Interface
+// Statistics Blocks (ISBs), and Enhanced Packet Blocks (EPBs), or [OpenLive]
+// (with [BPFFilterTCPPort], [BPFFilterUDPPort], [BPFFilterIPProtocol],
+// [BPFFilterIPv4Host], and [EvalBPF]) to capture live packets from a network
+// interface using OS-native standard-library syscalls.
 // These functions return a container snapshot ([Capture]) that retains no
 // reference to the input. Inspect [Capture.FileSize], [Capture.DeclaredExtent],
 // [Capture.InputTruncated], and [Capture.Anomalies] to check whether the
@@ -36,13 +40,16 @@
 // anomaly flags under bounded flow and packet limits.
 //
 // Use [JA4T], [Frame.JA4T], [JA4L], and [JA4SSH] to compute FoxIO TCP SYN,
-// passive distance/latency, and SSH session fingerprints. Use [ReassembleTCP]
-// or [Capture.Streams] to reassemble bounded, ordered TCP streams with
-// sequence-gap and overlap-conflict anomaly detection.
+// passive distance/latency, and SSH session fingerprints. Use [DefragmentIP]
+// to reassemble fragmented IPv4 and IPv6 packet payloads with overlap-conflict
+// anomaly detection, and [ReassembleTCP] or [Capture.Streams] to reassemble
+// bounded, ordered TCP streams with sequence-gap and overlap-conflict anomaly
+// detection.
 //
 // Use [ParseDNS], [Capture.DNS], [Capture.HasDNSQuery], [DNSLabelEntropy], and
-// [Capture.DNSDomainStats] to decode DNS queries, resource records, RFC 1035
-// compressed domain names, and per-domain DNS tunneling entropy metrics.
+// [Capture.DNSDomainStats] to decode DNS queries (including fragmented UDP DNS
+// packets), resource records, RFC 1035 compressed domain names, and per-domain
+// DNS tunneling entropy metrics.
 //
 // Use [ParseTLSRecords], [ParseTLSClientHello], [ParseTLSServerHello],
 // [JA4XFromDER], [JA4XFromCert], [Capture.TLS], [Capture.TLSWithKeyLog],
@@ -61,18 +68,21 @@
 // and TLS 1.3 traffic offline using embedded PcapNG Decryption Secrets Blocks
 // (DSB) or external SSLKEYLOGFILE material.
 //
-// Use [ParseHTTPRequest], [ParseHTTPResponse], and [Capture.HTTP] to parse
-// HTTP/1.x traffic (including automatically decrypted TLS 1.2 and TLS 1.3
-// flows), compute FoxIO JA4H fingerprints, and carve request/response body
-// payloads.
+// Use [ParseHTTPRequest], [ParseHTTPResponse], [Capture.HTTP],
+// [ParseHTTP2Frames], and [Capture.HTTP2] to parse HTTP/1.x and HTTP/2 traffic
+// (including automatically decrypted TLS 1.2 and TLS 1.3 flows), compute FoxIO
+// JA4H and HTTP/2 SETTINGS fingerprints, and carve request/response body and
+// DATA frame payloads.
 //
 // Use [ParseSSHHandshake] and [Capture.SSH] to parse SSH version banners and
 // SSH_MSG_KEXINIT key-exchange algorithms and compute HASSH, HASSHServer, and
 // JA4SSH fingerprints.
 //
-// Use [ParseSMB2Message], [ParseNTLMSSP], and [Capture.SMB] to decode SMB2/3
-// Negotiate and Session Setup packets and extract NTLMSSP challenge, domain,
-// host, and user metadata.
+// Use [ParseSMB2Message], [ParseNTLMSSP], [Capture.SMB], [ParseKRB5],
+// [Capture.Kerberos], [ParseRDPNegotiation], and [Capture.RDP] to decode
+// SMB2/3 Negotiate and Session Setup packets, NTLMSSP challenge/authenticate
+// tokens, Kerberos v5 AS-REQ/TGS-REQ/KRB-ERROR messages (including RC4-HMAC
+// encryption type detection), and RDP TPKT/X.224 connection negotiation PDUs.
 //
 // Use [ComputeBeaconStats] and [Capture.Beacons] to compute C2 beacon timing
 // periodicity, payload size uniformity, and directional Producer-Consumer Ratio

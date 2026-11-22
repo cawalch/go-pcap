@@ -180,3 +180,45 @@ func TestPCAPNGNRBISBAndProcessExtensionsRoundTrip(t *testing.T) {
 		t.Fatalf("FlowSummary process metadata = %+v", f)
 	}
 }
+
+func TestReaderAtDissectorsParity(t *testing.T) {
+	dnsMsg := buildDNSQueryResponsePacket()
+	dnsFrame := buildEthernetIPv4UDPFrame([4]byte{10, 0, 0, 1}, [4]byte{8, 8, 8, 8}, 55123, 53, dnsMsg)
+
+	tlsCH := buildTLS13ClientHelloRecord("readerat.example.com", "h2")
+	tlsSyn := buildEthernetIPv4TCPFrame([4]byte{10, 0, 0, 1}, [4]byte{10, 0, 0, 2}, 49152, 443, 100, 0, TCPFlagSYN, nil)
+	tlsPsh := buildEthernetIPv4TCPFrame([4]byte{10, 0, 0, 1}, [4]byte{10, 0, 0, 2}, 49152, 443, 101, 1, TCPFlagPSH|TCPFlagACK, tlsCH)
+
+	quicCH := buildTLS13ClientHelloRecord("quic-readerat.example.com", "h3")
+	quicDgram := buildEncryptedQUICInitialDatagram(t, QUICVersion1, []byte{1, 2, 3, 4, 5, 6, 7, 8}, []byte{9, 10, 11, 12}, nil, 1, 0, quicCH[5:])
+	quicFrame := buildEthernetIPv4UDPFrame([4]byte{10, 0, 0, 1}, [4]byte{10, 0, 0, 3}, 55124, 443, quicDgram)
+
+	raw := buildClassicPCAP(binary.LittleEndian, false, LinkTypeEthernet, 65535, [][]byte{
+		dnsFrame, tlsSyn, tlsPsh, quicFrame,
+	})
+	ra := bytes.NewReader(raw)
+	cap, err := NewFromReaderAt(ra, int64(len(raw)))
+	if err != nil {
+		t.Fatalf("NewFromReaderAt() error = %v", err)
+	}
+
+	flows, err := cap.FlowsFromReaderAt(ra)
+	if err != nil || len(flows) != 3 {
+		t.Fatalf("FlowsFromReaderAt() = (%d, %v), want 3", len(flows), err)
+	}
+
+	dnsRecs, err := cap.DNSFromReaderAt(ra)
+	if err != nil || len(dnsRecs) != 1 || len(dnsRecs[0].Message.Questions) != 1 {
+		t.Fatalf("DNSFromReaderAt() = (%+v, %v)", dnsRecs, err)
+	}
+
+	tlsRecs, err := cap.TLSFromReaderAt(ra)
+	if err != nil || len(tlsRecs) != 1 || tlsRecs[0].Handshake.ClientHello.SNI != "readerat.example.com" {
+		t.Fatalf("TLSFromReaderAt() = (%+v, %v)", tlsRecs, err)
+	}
+
+	quicRecs, err := cap.QUICFromReaderAt(ra)
+	if err != nil || len(quicRecs) != 1 || quicRecs[0].Handshake.ClientHello.SNI != "quic-readerat.example.com" {
+		t.Fatalf("QUICFromReaderAt() = (%+v, %v)", quicRecs, err)
+	}
+}
