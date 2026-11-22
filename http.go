@@ -183,8 +183,12 @@ func ParseHTTPResponse(stream []byte) (HTTPResponse, int, error) {
 		}
 	}
 
-	bodyless := (code >= 100 && code < 200) || code == 204 || code == 304
-	body, bodyOff, bodyLen, consumed := extractHTTPBody(stream, bodyStart, contentLen, chunked, bodyless)
+	if (code >= 100 && code < 200) || code == 204 || code == 304 {
+		resp.BodyOffset = bodyStart
+		return resp, bodyStart, nil
+	}
+
+	body, bodyOff, bodyLen, consumed := extractHTTPBody(stream, bodyStart, contentLen, chunked, false)
 	resp.Body = body
 	resp.BodyOffset = bodyOff
 	resp.BodyLength = bodyLen
