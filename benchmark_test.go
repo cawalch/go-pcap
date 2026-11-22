@@ -264,3 +264,65 @@ func BenchmarkCaptureStreams(b *testing.B) {
 		})
 	}
 }
+
+type measuredReaderAt struct {
+	*bytes.Reader
+	calls, bytesRead int64
+}
+
+func (r *measuredReaderAt) ReadAt(p []byte, off int64) (int, error) {
+	n, err := r.Reader.ReadAt(p, off)
+	r.calls++
+	r.bytesRead += int64(n)
+	return n, err
+}
+
+func BenchmarkReaderAtScan(b *testing.B) {
+	frame := buildEthernetIPv4TCPFrame([4]byte{10, 0, 0, 1}, [4]byte{10, 0, 0, 2}, 12345, 443, 1, 0, TCPFlagACK, make([]byte, 1440))
+	frames := make([][]byte, 512)
+	for i := range frames {
+		frames[i] = frame
+	}
+	for _, format := range []string{"PCAP", "PcapNG"} {
+		var raw []byte
+		if format == "PCAP" {
+			raw = buildClassicPCAP(binary.LittleEndian, false, LinkTypeEthernet, 65535, frames)
+		} else {
+			raw = buildPCAPNGFixture(binary.LittleEndian, nil, frames)
+		}
+		for _, op := range []string{"open", "packets", "flows", "iterate", "first"} {
+			b.Run(format+"/"+op, func(b *testing.B) {
+				c, err := New(raw)
+				if err != nil {
+					b.Fatal(err)
+				}
+				r := &measuredReaderAt{Reader: bytes.NewReader(raw)}
+				b.ReportAllocs()
+				for b.Loop() {
+					switch op {
+					case "open":
+						_, err = NewFromReaderAt(r, int64(len(raw)))
+					case "packets":
+						_, err = c.PacketsFromReaderAt(r)
+					case "iterate", "first":
+						for _, packetErr := range c.PacketSeqFromReaderAt(r) {
+							if packetErr != nil {
+								b.Fatal(packetErr)
+							}
+							if op == "first" {
+								break
+							}
+						}
+					case "flows":
+						_, err = c.FlowsFromReaderAt(r)
+					}
+					if err != nil {
+						b.Fatal(err)
+					}
+				}
+				b.ReportMetric(float64(r.calls)/float64(b.N), "reads/op")
+				b.ReportMetric(float64(r.bytesRead)/float64(b.N), "read-B/op")
+			})
+		}
+	}
+}

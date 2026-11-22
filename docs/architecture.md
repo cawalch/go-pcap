@@ -46,8 +46,9 @@ behavior require separate verification on a host with capture permissions.
 
 ### After v0.1.0 — large captures and repeated analysis
 
-Measure ReaderAt request counts, bytes read and allocations while implementing
-[packet iteration](https://github.com/cawalch/go-pcap/issues/20). Track
+ReaderAt packet iteration skips frame bytes in both formats. Use
+`BenchmarkReaderAtScan` to compare read counts, bytes read and allocations
+for metadata scans, packet collection and flows. Track
 [bounded DNS, TLS and QUIC reads](https://github.com/cawalch/go-pcap/issues/61)
 separately. Measure the benefit of [reusing TCP streams in HTTP and HTTP/2](https://github.com/cawalch/go-pcap/issues/41)
 on captures with and without decryption keys before changing segment storage.

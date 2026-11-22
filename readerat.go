@@ -5,11 +5,11 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"iter"
 )
 
 // NewFromReaderAt parses a classic PCAP or PcapNG container from an [io.ReaderAt]
-// of total byte length size. The classic PCAP scan skips packet payloads.
-// The PcapNG scan reads complete blocks, including their packet data.
+// of total byte length size. Both formats skip captured frame bytes.
 func NewFromReaderAt(r io.ReaderAt, size int64) (*Capture, error) {
 	if r == nil {
 		return nil, fmt.Errorf("%w: nil ReaderAt", ErrInvalidHeader)
@@ -38,29 +38,56 @@ func NewFromReaderAt(r io.ReaderAt, size int64) (*Capture, error) {
 	}
 }
 
-// PacketsFromReaderAt enumerates bounded packet records from an [io.ReaderAt]
-// in capture order. PcapNG enumeration reads complete blocks.
+// PacketSeqFromReaderAt yields packet metadata in capture order without reading
+// frame bytes. Breaking the loop stops the scan. A read or parse error is
+// yielded once, after any preceding complete records.
+func (c *Capture) PacketSeqFromReaderAt(r io.ReaderAt) iter.Seq2[PacketRecord, error] {
+	return func(yield func(PacketRecord, error) bool) {
+		err := c.walkPacketsFromReaderAt(r, func(pkt PacketRecord) error {
+			if !yield(pkt, nil) {
+				return errStopWalk
+			}
+			return nil
+		})
+		if err != nil && !errors.Is(err, errStopWalk) {
+			yield(PacketRecord{}, err)
+		}
+	}
+}
+
+// PacketsFromReaderAt collects the records from [Capture.PacketSeqFromReaderAt].
 func (c *Capture) PacketsFromReaderAt(r io.ReaderAt) ([]PacketRecord, error) {
-	if err := c.validateContainer(); err != nil {
+	var packets []PacketRecord
+	err := c.walkPacketsFromReaderAt(r, func(pkt PacketRecord) error {
+		if packets == nil && c.PacketCount > 0 {
+			packets = make([]PacketRecord, 0, min(c.PacketCount, MaxPackets))
+		}
+		packets = append(packets, pkt)
+		return nil
+	})
+	if err != nil {
 		return nil, err
 	}
-	if r == nil {
-		return nil, fmt.Errorf("%w: nil ReaderAt", ErrInvalidHeader)
+	return packets, nil
+}
+
+func (c *Capture) walkPacketsFromReaderAt(r io.ReaderAt, cb func(PacketRecord) error) error {
+	if err := c.validateContainer(); err != nil {
+		return err
 	}
-	switch c.Format {
-	case FormatPCAP:
+	if r == nil {
+		return fmt.Errorf("%w: nil ReaderAt", ErrInvalidHeader)
+	}
+	if c.Format == FormatPCAP {
 		order := binary.ByteOrder(binary.LittleEndian)
 		if c.BigEndian {
 			order = binary.BigEndian
 		}
-		_, packets, err := scanClassicPCAPReaderAt(r, c.fileSize, c.SnapLen, c.LinkType, order, c.NanoTimestamp, true, c.PacketCount)
-		return packets, err
-	case FormatPCAPNG:
-		_, packets, err := scanPCAPNGReaderAt(r, c.fileSize, true, c.PacketCount)
-		return packets, err
-	default:
-		return nil, ErrInvalidHeader
+		_, err := scanClassicPCAPReaderAt(r, c.fileSize, c.SnapLen, c.LinkType, order, c.NanoTimestamp, cb)
+		return err
 	}
+	_, err := scanPCAPNGReaderAt(r, c.fileSize, cb)
+	return err
 }
 
 // PacketPayloadFromReaderAt reads and returns a newly allocated slice containing
@@ -93,14 +120,6 @@ func (c *Capture) PacketPayloadFromReaderAt(r io.ReaderAt, pkt PacketRecord) ([]
 // using a 256-byte prefix for common transport headers. When the prefix is
 // insufficient it extends the read under [MaxReaderAtScanBytes].
 func (c *Capture) FlowsFromReaderAt(r io.ReaderAt) ([]FlowSummary, error) {
-	packets, err := c.PacketsFromReaderAt(r)
-	if err != nil {
-		return nil, err
-	}
-	if len(packets) == 0 {
-		return nil, nil
-	}
-
 	type tcpHandshakeTime struct {
 		synNs      int64
 		synAckNs   int64
@@ -115,8 +134,10 @@ func (c *Capture) FlowsFromReaderAt(r io.ReaderAt) ([]FlowSummary, error) {
 	var scratch []byte
 	var totalRead int64
 
-	for i := range packets {
-		pkt := &packets[i]
+	for pkt, err := range c.PacketSeqFromReaderAt(r) {
+		if err != nil {
+			return nil, err
+		}
 		readLen := min(pkt.PayloadLength, int64(len(hdrBuf)))
 		if readLen <= 0 {
 			continue
@@ -382,32 +403,22 @@ func parseClassicPCAPFromReaderAt(r io.ReaderAt, size int64, order binary.ByteOr
 	}
 	linkType := LinkType(order.Uint32(hdr[20:24]) & 0xffff)
 
-	meta, _, err := scanClassicPCAPReaderAt(r, size, snapLen, linkType, order, nano, false, 0)
+	meta, err := scanClassicPCAPReaderAt(r, size, snapLen, linkType, order, nano, nil)
 	if err != nil {
 		return nil, err
 	}
 	if !isKnownLinkType(linkType) {
 		meta.anomalies.UnknownLinkType = true
 	}
-	scaleNs := uint64(1_000)
-	if nano {
-		scaleNs = 1
-	}
-
 	return &Capture{
-		Format:        FormatPCAP,
-		BigEndian:     order == binary.BigEndian,
-		NanoTimestamp: nano,
-		VersionMajor:  vMajor,
-		VersionMinor:  vMinor,
-		SnapLen:       snapLen,
-		LinkType:      linkType,
-		Interfaces: []InterfaceDescriptor{{
-			ID:               0,
-			LinkType:         linkType,
-			SnapLen:          snapLen,
-			TimestampScaleNs: scaleNs,
-		}},
+		Format:         FormatPCAP,
+		BigEndian:      order == binary.BigEndian,
+		NanoTimestamp:  nano,
+		VersionMajor:   vMajor,
+		VersionMinor:   vMinor,
+		SnapLen:        snapLen,
+		LinkType:       linkType,
+		Interfaces:     []InterfaceDescriptor{classicInterface(linkType, snapLen, nano)},
 		PacketCount:    meta.packetCount,
 		fileSize:       size,
 		declaredExtent: meta.declaredExtent,
@@ -422,14 +433,9 @@ func scanClassicPCAPReaderAt(
 	linkType LinkType,
 	order binary.ByteOrder,
 	nano bool,
-	collect bool,
-	hintCount int,
-) (scanSummary, []PacketRecord, error) {
+	cb func(PacketRecord) error,
+) (scanSummary, error) {
 	summary := scanSummary{declaredExtent: pcapGlobalHeaderSize}
-	var packets []PacketRecord
-	if collect && hintCount > 0 {
-		packets = make([]PacketRecord, 0, min(hintCount, MaxPackets))
-	}
 	var hdr [pcapPacketHeaderSize]byte
 	offset := int64(pcapGlobalHeaderSize)
 
@@ -441,7 +447,7 @@ func scanClassicPCAPReaderAt(
 			break
 		}
 		if err := readExactAt(r, hdr[:], offset, size); err != nil {
-			return scanSummary{}, nil, err
+			return scanSummary{}, err
 		}
 		tsSec := order.Uint32(hdr[0:4])
 		tsSub := order.Uint32(hdr[4:8])
@@ -449,7 +455,7 @@ func scanClassicPCAPReaderAt(
 		origLen := order.Uint32(hdr[12:16])
 
 		if capLen > MaxSnapLen {
-			return scanSummary{}, nil, fmt.Errorf("%w: packet capture length %d exceeds %d", ErrInvalidPacket, capLen, MaxSnapLen)
+			return scanSummary{}, fmt.Errorf("%w: packet capture length %d exceeds %d", ErrInvalidPacket, capLen, MaxSnapLen)
 		}
 		if capLen > origLen {
 			summary.anomalies.CaptureLenExceedsOriginal = true
@@ -466,16 +472,16 @@ func scanClassicPCAPReaderAt(
 			break
 		}
 		if summary.packetCount >= MaxPackets {
-			return scanSummary{}, nil, fmt.Errorf("%w: exceeds %d", ErrPacketLimit, MaxPackets)
+			return scanSummary{}, fmt.Errorf("%w: exceeds %d", ErrPacketLimit, MaxPackets)
 		}
 		summary.packetCount++
 
-		if collect {
+		if cb != nil {
 			subNs := int64(tsSub) * 1_000
 			if nano {
 				subNs = int64(tsSub)
 			}
-			packets = append(packets, PacketRecord{
+			if err := cb(PacketRecord{
 				Index:         summary.packetCount - 1,
 				InterfaceID:   0,
 				LinkType:      linkType,
@@ -484,15 +490,17 @@ func scanClassicPCAPReaderAt(
 				OriginalLen:   origLen,
 				PayloadOffset: payloadOffset,
 				PayloadLength: int64(capLen),
-			})
+			}); err != nil {
+				return scanSummary{}, err
+			}
 		}
 		offset = int64(recordEnd)
 	}
-	return summary, packets, nil
+	return summary, nil
 }
 
 func parsePCAPNGFromReaderAt(r io.ReaderAt, size int64) (*Capture, error) {
-	meta, _, err := scanPCAPNGReaderAt(r, size, false, 0)
+	meta, err := scanPCAPNGReaderAt(r, size, nil)
 	if err != nil {
 		return nil, err
 	}
@@ -524,16 +532,13 @@ func parsePCAPNGFromReaderAt(r io.ReaderAt, size int64) (*Capture, error) {
 	}, nil
 }
 
-func scanPCAPNGReaderAt(r io.ReaderAt, size int64, collectPackets bool, hintCount int) (scanSummary, []PacketRecord, error) {
+func scanPCAPNGReaderAt(r io.ReaderAt, size int64, cb func(PacketRecord) error) (scanSummary, error) {
 	if size < pcapngSHBMinSize {
-		return scanSummary{}, nil, fmt.Errorf("%w: PcapNG section header block shorter than %d bytes", ErrInvalidHeader, pcapngSHBMinSize)
+		return scanSummary{}, fmt.Errorf("%w: PcapNG section header block shorter than %d bytes", ErrInvalidHeader, pcapngSHBMinSize)
 	}
 
 	var summary scanSummary
-	var packets []PacketRecord
-	if collectPackets && hintCount > 0 {
-		packets = make([]PacketRecord, 0, min(hintCount, MaxPackets))
-	}
+	var scratch []byte
 	var totalSecretBytes int64
 	order := binary.ByteOrder(binary.LittleEndian)
 	haveSection := false
@@ -544,23 +549,22 @@ func scanPCAPNGReaderAt(r io.ReaderAt, size int64, collectPackets bool, hintCoun
 		remaining := size - offset
 		if remaining < pcapngMinBlockSize {
 			if !haveSection {
-				return scanSummary{}, nil, fmt.Errorf("%w: missing PcapNG section header", ErrInvalidHeader)
+				return scanSummary{}, fmt.Errorf("%w: missing PcapNG section header", ErrInvalidHeader)
 			}
 			summary.anomalies.TrailingBytes = true
 			summary.declaredExtent = max(summary.declaredExtent, uint64(offset+pcapngMinBlockSize))
 			break
 		}
 
-		readLen := min(remaining, int64(len(headerBuf)))
-		if err := readExactAt(r, headerBuf[:readLen], offset, size); err != nil {
-			return scanSummary{}, nil, err
+		if err := readExactAt(r, headerBuf[:12], offset, size); err != nil {
+			return scanSummary{}, err
 		}
 
 		rawTypeLE := binary.LittleEndian.Uint32(headerBuf[0:4])
 		if rawTypeLE == BlockTypeSectionHeader {
 			if remaining < pcapngSHBMinSize {
 				if !haveSection {
-					return scanSummary{}, nil, fmt.Errorf("%w: truncated PcapNG section header", ErrInvalidHeader)
+					return scanSummary{}, fmt.Errorf("%w: truncated PcapNG section header", ErrInvalidHeader)
 				}
 				summary.anomalies.TruncatedPacketBlock = true
 				summary.declaredExtent = max(summary.declaredExtent, uint64(offset+pcapngSHBMinSize))
@@ -573,16 +577,16 @@ func scanPCAPNGReaderAt(r io.ReaderAt, size int64, collectPackets bool, hintCoun
 			case 0x4d3c2b1a:
 				order = binary.BigEndian
 			default:
-				return scanSummary{}, nil, fmt.Errorf("%w: %w", ErrInvalidHeader, ErrInvalidMagic)
+				return scanSummary{}, fmt.Errorf("%w: %w", ErrInvalidHeader, ErrInvalidMagic)
 			}
 		} else if !haveSection {
-			return scanSummary{}, nil, fmt.Errorf("%w: PcapNG must start with a Section Header Block", ErrInvalidHeader)
+			return scanSummary{}, fmt.Errorf("%w: PcapNG must start with a Section Header Block", ErrInvalidHeader)
 		}
 
 		blockType := order.Uint32(headerBuf[0:4])
 		blockLen := order.Uint32(headerBuf[4:8])
-		if blockLen < pcapngMinBlockSize || blockLen > MaxSnapLen+4096 {
-			return scanSummary{}, nil, fmt.Errorf("%w: invalid block length %d", ErrInvalidBlock, blockLen)
+		if blockLen < pcapngMinBlockSize {
+			return scanSummary{}, fmt.Errorf("%w: invalid block length %d", ErrInvalidBlock, blockLen)
 		}
 		if blockLen%4 != 0 {
 			summary.anomalies.UnalignedBlockLength = true
@@ -597,78 +601,101 @@ func scanPCAPNGReaderAt(r io.ReaderAt, size int64, collectPackets bool, hintCoun
 
 		if blockEnd > uint64(size) {
 			if !haveSection {
-				return scanSummary{}, nil, fmt.Errorf("%w: first PcapNG Section Header Block is truncated", ErrInvalidHeader)
+				return scanSummary{}, fmt.Errorf("%w: first PcapNG Section Header Block is truncated", ErrInvalidHeader)
 			}
 			summary.anomalies.TruncatedPacketBlock = true
 			break
 		}
 
-		var trailBuf [4]byte
-		if err := readExactAt(r, trailBuf[:], int64(blockEnd)-4, size); err != nil {
-			return scanSummary{}, nil, err
-		}
-		if order.Uint32(trailBuf[:]) != blockLen {
-			return scanSummary{}, nil, fmt.Errorf("%w: trailing block length mismatch", ErrInvalidBlock)
-		}
-
-		// For metadata blocks (SHB, IDB, DSB) or EPB/SPB headers+options, read only the bounded block or non-payload metadata.
-		blockBytes := make([]byte, paddedLen)
-		if err := readExactAt(r, blockBytes, offset, size); err != nil {
-			return scanSummary{}, nil, err
-		}
-		sr := SafeReader{data: blockBytes, size: int64(len(blockBytes))}
-		bodyStart := int64(8)
-		bodyEnd := int64(paddedLen) - 4
-
+		bodyEnd := int64(blockEnd) - 4
+		tailOffset := bodyEnd
+		var rec PacketRecord
+		var packetErr error
 		switch blockType {
-		case BlockTypeSectionHeader:
-			if err := decodeSHB(&sr, bodyStart, bodyEnd, order, &summary, &haveSection); err != nil {
-				return scanSummary{}, nil, err
-			}
-		case BlockTypeInterfaceDesc:
-			if err := decodeIDB(&sr, bodyStart, bodyEnd, order, &summary); err != nil {
-				return scanSummary{}, nil, err
-			}
 		case BlockTypeEnhancedPacket:
-			prevLen := len(packets)
-			if err := decodeEPB(&sr, bodyStart, bodyEnd, order, collectPackets, &summary, &packets); err != nil {
-				return scanSummary{}, nil, err
+			header := headerBuf[8:12]
+			if bodyEnd-offset >= 28 {
+				if err := readExactAt(r, headerBuf[12:28], offset+12, size); err != nil {
+					return scanSummary{}, err
+				}
+				header = headerBuf[8:28]
 			}
-			if collectPackets && len(packets) > prevLen {
-				packets[len(packets)-1].PayloadOffset += offset
+			var options int64
+			rec, options, packetErr = decodeEPBHeader(header, offset+28, bodyEnd, order, &summary)
+			if packetErr == nil {
+				tailOffset = options
 			}
 		case BlockTypeSimplePacket:
-			prevLen := len(packets)
-			if err := decodeSPB(&sr, bodyStart, bodyEnd, order, collectPackets, &summary, &packets); err != nil {
-				return scanSummary{}, nil, err
+			header := headerBuf[8:min(int64(12), bodyEnd-offset)]
+			rec, packetErr = decodeSPBHeader(header, offset+12, bodyEnd, order, &summary)
+		case BlockTypeSectionHeader, BlockTypeInterfaceDesc, BlockTypeDecryptionSecrets, BlockTypeNameResolution, BlockTypeInterfaceStats, BlockTypeDarwinProcessEvent:
+			tailOffset = offset + 8
+		}
+
+		// The tail contains the trailer and any metadata following the skipped frame.
+		n := int64(blockEnd) - tailOffset
+		if n > MaxSnapLen+4096 {
+			return scanSummary{}, fmt.Errorf("%w: metadata read length %d exceeds limit", ErrInvalidBlock, n)
+		}
+		if int64(cap(scratch)) < n {
+			scratch = make([]byte, n)
+		}
+		tail := scratch[:n]
+		if err := readExactAt(r, tail, tailOffset, size); err != nil {
+			return scanSummary{}, err
+		}
+		if order.Uint32(tail[n-4:]) != blockLen {
+			return scanSummary{}, fmt.Errorf("%w: trailing block length mismatch", ErrInvalidBlock)
+		}
+		if packetErr != nil {
+			return scanSummary{}, packetErr
+		}
+		body := tail[:n-4]
+		sr := SafeReader{data: body, size: int64(len(body))}
+		switch blockType {
+		case BlockTypeSectionHeader:
+			if err := decodeSHB(&sr, 0, sr.size, order, &summary, &haveSection); err != nil {
+				return scanSummary{}, err
 			}
-			if collectPackets && len(packets) > prevLen {
-				packets[len(packets)-1].PayloadOffset += offset
+		case BlockTypeInterfaceDesc:
+			if err := decodeIDB(&sr, 0, sr.size, order, &summary); err != nil {
+				return scanSummary{}, err
+			}
+		case BlockTypeEnhancedPacket, BlockTypeSimplePacket:
+			if len(body) > 0 {
+				if err := decodeEPBOptions(body, order, &summary, &rec); err != nil {
+					return scanSummary{}, err
+				}
+			}
+			if cb != nil {
+				if err := cb(rec); err != nil {
+					return scanSummary{}, err
+				}
 			}
 		case BlockTypeDecryptionSecrets:
 			prevLen := len(summary.secrets)
-			if err := decodeDSB(&sr, bodyStart, bodyEnd, order, &totalSecretBytes, &summary); err != nil {
-				return scanSummary{}, nil, err
+			if err := decodeDSB(&sr, 0, sr.size, order, &totalSecretBytes, &summary); err != nil {
+				return scanSummary{}, err
 			}
 			if len(summary.secrets) > prevLen {
-				summary.secrets[len(summary.secrets)-1].PayloadOffset += offset
+				summary.secrets[len(summary.secrets)-1].PayloadOffset += tailOffset
 			}
 		case BlockTypeNameResolution:
-			if err := decodeNRB(&sr, bodyStart, bodyEnd, order, &summary); err != nil {
-				return scanSummary{}, nil, err
+			if err := decodeNRB(&sr, 0, sr.size, order, &summary); err != nil {
+				return scanSummary{}, err
 			}
 		case BlockTypeInterfaceStats:
-			if err := decodeISB(&sr, bodyStart, bodyEnd, order, &summary); err != nil {
-				return scanSummary{}, nil, err
+			if err := decodeISB(&sr, 0, sr.size, order, &summary); err != nil {
+				return scanSummary{}, err
 			}
 		case BlockTypeDarwinProcessEvent:
-			if err := decodeDPEB(&sr, bodyStart, bodyEnd, order, &summary); err != nil {
-				return scanSummary{}, nil, err
+			if err := decodeDPEB(&sr, 0, sr.size, order, &summary); err != nil {
+				return scanSummary{}, err
 			}
 		}
 
 		offset = int64(blockEnd)
 	}
 
-	return summary, packets, nil
+	return summary, nil
 }

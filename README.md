@@ -62,7 +62,8 @@ design scope.
 The library doesn't perform active network probing, certificate revocation
 checks, or operating-system trust store validation. For large files, use `NewFromReaderAt` for container
 metadata and `Capture.PacketPayloadFromReaderAt` for individual payloads.
-The PcapNG scanner reads one complete block at a time. `FlowsFromReaderAt`
+Use `Capture.PacketSeqFromReaderAt` to iterate packet records in either format
+without reading frame bytes. `FlowsFromReaderAt`
 collects packet records and reads frame prefixes. The DNS, TLS and QUIC
 ReaderAt methods read the entire file into memory and accept files up to
 64 MiB. See the [parsing guide](docs/parsing.md#parse-capture-containers). To write PcapNG files or capture live packets from a local
@@ -187,7 +188,7 @@ types and methods.
 | Write PcapNG blocks, NRBs, ISBs, DSB secrets, and process-tagged packets | `NewPCAPNGWriter`, `PCAPNGWriter.WritePacket`, `PCAPNGWriter.WriteDecryptionSecrets`, `PCAPNGWriter.WriteNameResolution`, `PCAPNGWriter.WriteInterfaceStats` | [Write PcapNG](docs/parsing.md#write-pcapng-captures) |
 | Capture live interface packets without CGO or libpcap | `OpenLive`, `LiveCapture.ReadPacket`, `ParseBPFBuffer`, `BPFFilterTCPPort`, `BPFFilterUDPPort`, `BPFFilterIPProtocol`, `BPFFilterIPv4Host`, `EvalBPF` | [Live capture](docs/parsing.md#capture-live-interface-traffic) |
 | Check truncation, extents, and container anomalies | `Capture.DeclaredExtent`, `Capture.InputTruncated`, `Capture.Anomalies` | [Bounds and anomalies](docs/parsing.md#inspect-truncation-and-anomalies) |
-| Stream or enumerate bounded packet records and payload slices | `Capture.PacketSeq`, `Capture.Packets`, `Capture.PacketPayload`, `Capture.PacketsFromReaderAt` | [Packet records](docs/parsing.md#read-packet-records) |
+| Stream or enumerate bounded packet records and payload slices | `Capture.PacketSeq`, `Capture.Packets`, `Capture.PacketPayload`, `Capture.PacketSeqFromReaderAt`, `Capture.PacketsFromReaderAt` | [Packet records](docs/parsing.md#read-packet-records) |
 | Decode L2–L4 frames, tunnels, IP fragments, and JA4T/JA4L fingerprints | `DecodeFrame`, `DefragmentIP`, `Frame.JA4T`, `JA4T`, `JA4L` | [Frame decoding](docs/parsing.md#decode-l2-l4-frames-and-tunnels) |
 | Aggregate deterministic 5-tuple flows | `Capture.Flows`, `Capture.FlowsFromReaderAt` | [Flow aggregation](docs/parsing.md#aggregate-5-tuple-flows) |
 | Reassemble bounded TCP byte streams | `Capture.Streams`, `ReassembleTCP` | [TCP reassembly](docs/parsing.md#reassemble-tcp-streams) |

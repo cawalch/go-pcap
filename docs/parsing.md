@@ -23,8 +23,10 @@ declared trailing record end, and marks `Capture.InputTruncated() == true`.
 If only a leading stream prefix is buffered while the total stream length is
 known, call `NewWithLength(data, streamLength)`. For large files on disk, call
 `NewFromReaderAt(r, size)` to parse container metadata without reading the
-entire capture into a single byte slice. For PcapNG, the scanner reads each
-complete block, including packet bodies. `PacketsFromReaderAt` collects a
+entire capture into a single byte slice. Both formats skip frame bytes. The PcapNG scanner reads packet headers,
+options and block trailers. Each buffered PcapNG metadata read is limited to
+`MaxSnapLen + 4096` bytes. Use `PacketSeqFromReaderAt` to process records
+in order and break when you have enough. `PacketsFromReaderAt` collects a
 packet record slice. `FlowsFromReaderAt` starts with a 256-byte prefix or the
 whole frame when shorter. It reads additional bytes into a reusable buffer
 when needed to resolve flow headers and lengths. All frame reads count toward

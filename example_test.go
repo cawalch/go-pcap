@@ -85,12 +85,13 @@ func ExampleNewFromReaderAt() {
 	if err != nil {
 		log.Fatal(err)
 	}
-	packets, err := capture.PacketsFromReaderAt(r)
-	if err != nil {
-		log.Fatal(err)
+	for pkt, err := range capture.PacketSeqFromReaderAt(r) {
+		if err != nil {
+			log.Fatal(err)
+		}
+		fmt.Printf("format=%s packets=%d pid=%d\n", capture.Format, capture.PacketCount, pkt.ProcessID)
+		break
 	}
-	fmt.Printf("format=%s packets=%d pid=%d\n",
-		capture.Format, len(packets), packets[0].ProcessID)
 	// Output:
 	// format=pcapng packets=1 pid=4242
 }
