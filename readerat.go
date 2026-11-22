@@ -337,6 +337,9 @@ func (c *Capture) FlowsFromReaderAt(r io.ReaderAt) ([]FlowSummary, error) {
 		if flow.ContainerID == "" && pkt.ContainerID != "" {
 			flow.ContainerID = pkt.ContainerID
 		}
+		if frame.TCPFlags&TCPFlagSYN != 0 && frame.TCPOptionsLength != 0 {
+			flow.observeTCPTimestamp(&frame, payload)
+		}
 		flow.TCPFlags |= frame.TCPFlags
 		flow.Anomalies = mergeFrameAnomalies(flow.Anomalies, frame.Anomalies)
 
