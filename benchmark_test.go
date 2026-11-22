@@ -504,3 +504,53 @@ func BenchmarkCaptureFingerprints(b *testing.B) {
 		})
 	}
 }
+
+// BenchmarkPacketFingerprints opens a capture, walks every record, decodes the
+// Ethernet frame and computes a JA4T for each SYN with MSS and window scale.
+func BenchmarkPacketFingerprints(b *testing.B) {
+	var frames [][]byte
+	for i := range 256 {
+		options := []byte{2, 4, 5, 180, 1, 3, 3, 7}
+		frame := buildEthernetIPv4TCPFrame([4]byte{192, 0, 2, 1}, [4]byte{192, 0, 2, 2}, uint16(10000+i), 443, 1, 0, TCPFlagSYN, options)
+		frame[14+20+12] = 7 << 4 // Include the options in the TCP header.
+		frames = append(frames, frame)
+	}
+	for _, tc := range []struct {
+		name string
+		raw  []byte
+	}{
+		{"Classic", buildClassicPCAP(binary.LittleEndian, false, LinkTypeEthernet, 65535, frames)},
+		{"PcapNG", buildPCAPNGFixture(binary.LittleEndian, nil, frames)},
+	} {
+		b.Run(tc.name, func(b *testing.B) {
+			b.ReportAllocs()
+			for b.Loop() {
+				c, err := New(tc.raw)
+				if err != nil {
+					b.Fatal(err)
+				}
+				count := 0
+				for pkt, err := range c.PacketSeq(tc.raw) {
+					if err != nil {
+						b.Fatal(err)
+					}
+					data, err := c.PacketPayload(tc.raw, pkt)
+					if err != nil {
+						b.Fatal(err)
+					}
+					f, err := DecodeFrame(data, pkt.LinkType)
+					if err != nil {
+						b.Fatal(err)
+					}
+					if fp, ok := f.JA4T(data); !ok || fp != "65535_2-1-3_1460_7" {
+						b.Fatal(fp, ok)
+					}
+					count++
+				}
+				if count != len(frames) {
+					b.Fatal(count)
+				}
+			}
+		})
+	}
+}

@@ -519,10 +519,9 @@ func scanClassicPCAPPacketsWithCallback(
 			summary.declaredExtent = max(summary.declaredExtent, uint64(offset+pcapPacketHeaderSize))
 			break
 		}
-		tsSec, _ := r.ReadUint32Order(offset, order)
-		tsSub, _ := r.ReadUint32Order(offset+4, order)
-		capLen, _ := r.ReadUint32Order(offset+8, order)
-		origLen, _ := r.ReadUint32Order(offset+12, order)
+		header := r.data[offset : offset+pcapPacketHeaderSize]
+		capLen := order.Uint32(header[8:12])
+		origLen := order.Uint32(header[12:16])
 
 		if capLen > MaxSnapLen {
 			return scanSummary{}, nil, fmt.Errorf("%w: packet capture length %d exceeds %d", ErrInvalidPacket, capLen, MaxSnapLen)
@@ -549,6 +548,8 @@ func scanClassicPCAPPacketsWithCallback(
 		summary.packetCount++
 
 		if collect || cb != nil {
+			tsSec := order.Uint32(header[0:4])
+			tsSub := order.Uint32(header[4:8])
 			subNs := int64(tsSub) * 1_000
 			if nano {
 				subNs = int64(tsSub)
@@ -645,7 +646,8 @@ func scanPCAPNGBlocksWithCallback(r *SafeReader, collectPackets bool, hintCount 
 		}
 
 		// For a Section Header Block, determine endianness from the byte-order magic at offset+8.
-		rawTypeLE, _ := r.ReadUint32(offset)
+		header := r.data[offset : offset+pcapngMinBlockSize]
+		rawTypeLE := binary.LittleEndian.Uint32(header[:4])
 		if rawTypeLE == BlockTypeSectionHeader {
 			if remaining < pcapngSHBMinSize {
 				if !haveSection {
@@ -655,7 +657,7 @@ func scanPCAPNGBlocksWithCallback(r *SafeReader, collectPackets bool, hintCount 
 				summary.declaredExtent = max(summary.declaredExtent, uint64(offset+pcapngSHBMinSize))
 				break
 			}
-			boMagicLE, _ := r.ReadUint32(offset + 8)
+			boMagicLE := binary.LittleEndian.Uint32(header[8:12])
 			switch boMagicLE {
 			case PCAPNGByteOrderMagic:
 				order = binary.LittleEndian
@@ -668,8 +670,8 @@ func scanPCAPNGBlocksWithCallback(r *SafeReader, collectPackets bool, hintCount 
 			return scanSummary{}, nil, fmt.Errorf("%w: PcapNG must start with a Section Header Block", ErrInvalidHeader)
 		}
 
-		blockType, _ := r.ReadUint32Order(offset, order)
-		blockLen, _ := r.ReadUint32Order(offset+4, order)
+		blockType := order.Uint32(header[:4])
+		blockLen := order.Uint32(header[4:8])
 		if blockLen < pcapngMinBlockSize {
 			return scanSummary{}, nil, fmt.Errorf("%w: block length %d smaller than minimum %d", ErrInvalidBlock, blockLen, pcapngMinBlockSize)
 		}
