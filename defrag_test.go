@@ -59,6 +59,84 @@ func TestDefragmentIPOutOfOrderAndOverlap(t *testing.T) {
 	if _, _, err := DefragmentIP(tooMany); !errors.Is(err, ErrFragmentLimit) {
 		t.Fatalf("DefragmentIP(tooMany) err = %v, want ErrFragmentLimit", err)
 	}
+
+	// Overlap conflict after a gap must still be detected and offsets preserved.
+	gapConflict := []IPFragmentInput{
+		{SrcAddr: src, DstAddr: dst, Protocol: IPProtoUDP, Identification: 101, FragmentOffset: 8, MoreFragments: true, Payload: []byte("AAAAAAAA")},
+		{SrcAddr: src, DstAddr: dst, Protocol: IPProtoUDP, Identification: 101, FragmentOffset: 8, MoreFragments: false, Payload: []byte("BBBBBBBB")},
+	}
+	outGap, anomGap, err := DefragmentIP(gapConflict)
+	if err != nil {
+		t.Fatalf("DefragmentIP(gapConflict) err = %v", err)
+	}
+	if !anomGap.TruncatedLayer || !anomGap.IPFragmentOverlapConflict {
+		t.Fatalf("gapConflict anomalies = %+v, want TruncatedLayer and IPFragmentOverlapConflict", anomGap)
+	}
+	if len(outGap) != 16 || string(outGap[8:16]) != "AAAAAAAA" {
+		t.Fatalf("gapConflict out = %q (len=%d), want 8 zero bytes + AAAAAAAA", outGap, len(outGap))
+	}
+
+	// Zero-length terminal fragment contiguous with received data should not set TruncatedLayer.
+	zeroTerm := []IPFragmentInput{
+		{SrcAddr: src, DstAddr: dst, Protocol: IPProtoUDP, Identification: 102, FragmentOffset: 0, MoreFragments: true, Payload: []byte("01234567")},
+		{SrcAddr: src, DstAddr: dst, Protocol: IPProtoUDP, Identification: 102, FragmentOffset: 8, MoreFragments: false, Payload: nil},
+	}
+	outZeroTerm, anomZeroTerm, err := DefragmentIP(zeroTerm)
+	if err != nil || anomZeroTerm.TruncatedLayer || string(outZeroTerm) != "01234567" {
+		t.Fatalf("DefragmentIP(zeroTerm) = (%q, %+v, %v)", outZeroTerm, anomZeroTerm, err)
+	}
+
+	// Zero-length terminal fragment beyond a missing tail must set TruncatedLayer.
+	gappedZeroTerm := []IPFragmentInput{
+		{SrcAddr: src, DstAddr: dst, Protocol: IPProtoUDP, Identification: 102, FragmentOffset: 0, MoreFragments: true, Payload: []byte("01234567")},
+		{SrcAddr: src, DstAddr: dst, Protocol: IPProtoUDP, Identification: 102, FragmentOffset: 16, MoreFragments: false, Payload: nil},
+	}
+	_, anomGappedZeroTerm, err := DefragmentIP(gappedZeroTerm)
+	if err != nil || !anomGappedZeroTerm.TruncatedLayer {
+		t.Fatalf("DefragmentIP(gappedZeroTerm) = (%+v, %v), want TruncatedLayer", anomGappedZeroTerm, err)
+	}
+
+	// Fragment extending past an earlier terminal fragment sets TruncatedLayer.
+	pastTerm := []IPFragmentInput{
+		{SrcAddr: src, DstAddr: dst, Protocol: IPProtoUDP, Identification: 103, FragmentOffset: 0, MoreFragments: false, Payload: []byte("01234567")},
+		{SrcAddr: src, DstAddr: dst, Protocol: IPProtoUDP, Identification: 103, FragmentOffset: 8, MoreFragments: true, Payload: []byte("89ABCDEF")},
+	}
+	_, anomPast, err := DefragmentIP(pastTerm)
+	if err != nil || !anomPast.TruncatedLayer {
+		t.Fatalf("DefragmentIP(pastTerm) = (%+v, %v), want TruncatedLayer", anomPast, err)
+	}
+
+	// ipFragAccumulator must sustain turnover at MaxFragmentGroups capacity (incomplete groups)
+	// and evict completed groups so reused IPIDs succeed.
+	var acc ipFragAccumulator
+	udp := make([]byte, 16)
+	binary.BigEndian.PutUint16(udp[0:2], 53)
+	binary.BigEndian.PutUint16(udp[2:4], 12345)
+	binary.BigEndian.PutUint16(udp[4:6], 16)
+	copy(udp[8:], []byte("12345678"))
+	// Fill to capacity with incomplete groups, then churn past capacity.
+	for i := range MaxFragmentGroups * 2 {
+		f1 := Frame{IPVersion: 4, IPProtocol: IPProtoUDP, SrcAddr: src, DstAddr: dst, IPID: uint32(10000 + i), IPFragOffset: 0, IPMoreFragments: true, PayloadLength: 8}
+		if _, _, _, ok := acc.addUDPFragment(&f1, udp[:8]); ok {
+			t.Fatalf("incomplete iter %d unexpectedly completed", i)
+		}
+		if len(acc.groups) > MaxFragmentGroups {
+			t.Fatalf("groups len = %d, exceeds MaxFragmentGroups %d", len(acc.groups), MaxFragmentGroups)
+		}
+	}
+	// While at capacity, new complete datagrams (including reused IPIDs) must still reassemble.
+	for i := range MaxFragmentGroups + 10 {
+		ipID := uint32(i % 64)
+		f1 := Frame{IPVersion: 4, IPProtocol: IPProtoUDP, SrcAddr: src, DstAddr: dst, IPID: ipID, IPFragOffset: 0, IPMoreFragments: true, PayloadLength: 8}
+		f2 := Frame{IPVersion: 4, IPProtocol: IPProtoUDP, SrcAddr: src, DstAddr: dst, IPID: ipID, IPFragOffset: 8, IPMoreFragments: false, PayloadLength: 8}
+		if _, _, _, ok := acc.addUDPFragment(&f1, udp[:8]); ok {
+			t.Fatalf("iter %d: first fragment unexpectedly completed", i)
+		}
+		payload, sp, dp, ok := acc.addUDPFragment(&f2, udp[8:])
+		if !ok || sp != 53 || dp != 12345 || string(payload) != "12345678" {
+			t.Fatalf("iter %d: addUDPFragment = (%q, %d, %d, %v)", i, payload, sp, dp, ok)
+		}
+	}
 }
 
 func TestFragmentedUDPDNSAndQUIC(t *testing.T) {

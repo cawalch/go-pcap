@@ -274,7 +274,7 @@ func collectStreams(source ipFrameSource) ([]TCPStream, error) {
 		if err != nil {
 			return err
 		}
-		if frame.IPProtocol != IPProtoTCP {
+		if frame.IPProtocol != IPProtoTCP || !frame.hasPorts || frame.Anomalies.IPFragment || frame.Anomalies.TruncatedLayer || frame.Anomalies.InvalidTCPDataOffset {
 			return nil
 		}
 

@@ -52,6 +52,8 @@ func DefragmentIP(fragments []IPFragmentInput) ([]byte, FrameAnomalies, error) {
 	norm := storage[:0]
 	ipv6 := fragments[0].SrcAddr.Is6()
 	seenTerminal := false
+	terminalEnd := -1
+	maxEnd := 0
 
 	for i := range fragments {
 		frag := &fragments[i]
@@ -59,15 +61,33 @@ func DefragmentIP(fragments []IPFragmentInput) ([]byte, FrameAnomalies, error) {
 			anomalies.TruncatedLayer = true
 			return nil, anomalies, nil
 		}
-		if frag.FragmentOffset < 0 || len(frag.Payload) == 0 {
+		if frag.FragmentOffset < 0 {
+			continue
+		}
+		if len(frag.Payload) == 0 {
+			if !frag.MoreFragments {
+				if frag.FragmentOffset > MaxReassembledIPPacketBytes {
+					return nil, anomalies, fmt.Errorf("%w: fragment at %d exceeds %d", ErrFragmentLimit, frag.FragmentOffset, MaxReassembledIPPacketBytes)
+				}
+				seenTerminal = true
+				if frag.FragmentOffset > terminalEnd {
+					terminalEnd = frag.FragmentOffset
+				}
+			}
 			continue
 		}
 		if frag.FragmentOffset > MaxReassembledIPPacketBytes-len(frag.Payload) {
 			return nil, anomalies, fmt.Errorf("%w: fragment at %d exceeds %d", ErrFragmentLimit, frag.FragmentOffset, MaxReassembledIPPacketBytes)
 		}
 		end := frag.FragmentOffset + len(frag.Payload)
+		if end > maxEnd {
+			maxEnd = end
+		}
 		if !frag.MoreFragments {
 			seenTerminal = true
+			if end > terminalEnd {
+				terminalEnd = end
+			}
 		}
 		norm = append(norm, normIPFrag{
 			start:   frag.FragmentOffset,
@@ -78,9 +98,12 @@ func DefragmentIP(fragments []IPFragmentInput) ([]byte, FrameAnomalies, error) {
 	}
 
 	if len(norm) == 0 {
+		if seenTerminal && terminalEnd > 0 {
+			anomalies.TruncatedLayer = true
+		}
 		return nil, anomalies, nil
 	}
-	if !seenTerminal {
+	if !seenTerminal || maxEnd != terminalEnd {
 		anomalies.TruncatedLayer = true
 	}
 
@@ -113,7 +136,7 @@ func DefragmentIP(fragments []IPFragmentInput) ([]byte, FrameAnomalies, error) {
 		return out, anomalies, nil
 	}
 
-	var buf bytes.Buffer
+	out := make([]byte, maxEnd)
 	cursor := 0
 	for i := range norm {
 		f := &norm[i]
@@ -124,24 +147,21 @@ func DefragmentIP(fragments []IPFragmentInput) ([]byte, FrameAnomalies, error) {
 		if f.start < cursor {
 			overlapEnd := min(f.end, cursor)
 			overlapLen := overlapEnd - f.start
-			written := buf.Bytes()
-			if len(written) >= cursor && f.start >= 0 && overlapEnd <= len(written) {
-				if !bytes.Equal(written[f.start:overlapEnd], f.payload[:overlapLen]) {
-					anomalies.IPFragmentOverlapConflict = true
-				}
+			if !bytes.Equal(out[f.start:overlapEnd], f.payload[:overlapLen]) {
+				anomalies.IPFragmentOverlapConflict = true
 			}
 			if f.end <= cursor {
 				continue
 			}
-			buf.Write(f.payload[cursor-f.start:])
+			copy(out[cursor:f.end], f.payload[cursor-f.start:])
 			cursor = f.end
 		} else {
-			buf.Write(f.payload)
+			copy(out[f.start:f.end], f.payload)
 			cursor = f.end
 		}
 	}
 
-	return buf.Bytes(), anomalies, nil
+	return out, anomalies, nil
 }
 
 // A fragmented IPv6 datagram must carry the complete transport header
@@ -165,14 +185,46 @@ type ipFragKey struct {
 }
 
 type ipFragGroup struct {
+	key         ipFragKey
 	frags       []IPFragmentInput
 	hasZero     bool
 	hasTerminal bool
 	done        bool
+	prev        *ipFragGroup
+	next        *ipFragGroup
 }
 
 type ipFragAccumulator struct {
 	groups map[ipFragKey]*ipFragGroup
+	head   *ipFragGroup
+	tail   *ipFragGroup
+}
+
+func (a *ipFragAccumulator) pushBack(g *ipFragGroup) {
+	g.prev = a.tail
+	g.next = nil
+	if a.tail != nil {
+		a.tail.next = g
+	} else {
+		a.head = g
+	}
+	a.tail = g
+}
+
+func (a *ipFragAccumulator) removeGroup(g *ipFragGroup) {
+	if g.prev != nil {
+		g.prev.next = g.next
+	} else {
+		a.head = g.next
+	}
+	if g.next != nil {
+		g.next.prev = g.prev
+	} else {
+		a.tail = g.prev
+	}
+	g.prev = nil
+	g.next = nil
+	delete(a.groups, g.key)
 }
 
 func (a *ipFragAccumulator) addUDPFragment(frame *Frame, fragBytes []byte) (udpPayload []byte, srcPort, dstPort uint16, ok bool) {
@@ -191,11 +243,12 @@ func (a *ipFragAccumulator) addUDPFragment(frame *Frame, fragBytes []byte) (udpP
 	}
 	g, exists := a.groups[key]
 	if !exists {
-		if len(a.groups) >= MaxFragmentGroups {
-			return nil, 0, 0, false
+		if len(a.groups) >= MaxFragmentGroups && a.head != nil {
+			a.removeGroup(a.head)
 		}
-		g = &ipFragGroup{}
+		g = &ipFragGroup{key: key}
 		a.groups[key] = g
+		a.pushBack(g)
 	}
 	if g.done || len(g.frags) >= MaxFragmentsPerGroup {
 		return nil, 0, 0, false
@@ -233,8 +286,7 @@ func (a *ipFragAccumulator) addUDPFragment(frame *Frame, fragBytes []byte) (udpP
 	if err != nil || anomalies.TruncatedLayer || len(reassembled) < 8 {
 		return nil, 0, 0, false
 	}
-	g.done = true
-	g.frags = nil
+	a.removeGroup(g)
 	srcPort = binary.BigEndian.Uint16(reassembled[0:2])
 	dstPort = binary.BigEndian.Uint16(reassembled[2:4])
 	return reassembled[8:], srcPort, dstPort, true
