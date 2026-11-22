@@ -24,12 +24,15 @@ type PCAPNGWriterOptions struct {
 // Secrets, and Enhanced Packet blocks to an [io.Writer].
 type PCAPNGWriter struct {
 	captureOutput
-	interfaceCount uint32
+	interfaceSnapLens []uint32
 }
 
 // NewPCAPNGWriter writes a PcapNG Section Header Block (SHB) and Interface
 // Description Block (IDB, interface ID 0 with nanosecond timestamp resolution)
-// to w and returns a [PCAPNGWriter].
+// to w and returns a [PCAPNGWriter]. A zero LinkType defaults to
+// [LinkTypeEthernet] unless InterfaceName is "lo0" (use [PCAPNGWriter.AddInterface]
+// to register [LinkTypeNull] verbatim). A zero SnapLen defaults to
+// [DefaultLiveSnapLen].
 func NewPCAPNGWriter(w io.Writer, opts PCAPNGWriterOptions) (*PCAPNGWriter, error) {
 	if opts.LinkType == 0 && opts.InterfaceName != "lo0" {
 		opts.LinkType = LinkTypeEthernet
@@ -79,7 +82,10 @@ func newPCAPNGWriter(w io.Writer, opts PCAPNGWriterOptions) (*PCAPNGWriter, erro
 	if err := appendInterfaceBlock(&buf, opts); err != nil {
 		return nil, err
 	}
-	pw := &PCAPNGWriter{captureOutput: captureOutput{w: w}, interfaceCount: 1}
+	pw := &PCAPNGWriter{
+		captureOutput:     captureOutput{w: w},
+		interfaceSnapLens: []uint32{opts.SnapLen},
+	}
 	if err := pw.write(buf.Bytes()); err != nil {
 		return nil, err
 	}
@@ -93,7 +99,7 @@ func (pw *PCAPNGWriter) AddInterface(opts PCAPNGWriterOptions) (uint32, error) {
 	if pw == nil || pw.w == nil {
 		return 0, ErrInvalidHeader
 	}
-	if pw.interfaceCount >= MaxInterfaces {
+	if len(pw.interfaceSnapLens) >= MaxInterfaces {
 		return 0, ErrInterfaceLimit
 	}
 	if opts.SnapLen == 0 {
@@ -106,8 +112,8 @@ func (pw *PCAPNGWriter) AddInterface(opts PCAPNGWriterOptions) (uint32, error) {
 	if err := pw.write(buf.Bytes()); err != nil {
 		return 0, err
 	}
-	id := pw.interfaceCount
-	pw.interfaceCount++
+	id := uint32(len(pw.interfaceSnapLens))
+	pw.interfaceSnapLens = append(pw.interfaceSnapLens, opts.SnapLen)
 	return id, nil
 }
 
@@ -165,21 +171,28 @@ func (pw *PCAPNGWriter) WritePacket(pkt PacketRecord, payload []byte) error {
 	if pw == nil || pw.w == nil {
 		return ErrInvalidHeader
 	}
-	if pkt.InterfaceID >= pw.interfaceCount {
+	if uint64(pkt.InterfaceID) >= uint64(len(pw.interfaceSnapLens)) {
 		return fmt.Errorf("%w: undeclared interface %d", ErrInvalidPacket, pkt.InterfaceID)
+	}
+	if pkt.TimestampNs < 0 {
+		return fmt.Errorf("%w: negative timestamp %d", ErrInvalidPacket, pkt.TimestampNs)
 	}
 	if len(payload) > MaxSnapLen {
 		return fmt.Errorf("%w: packet payload %d exceeds %d", ErrInvalidPacket, len(payload), MaxSnapLen)
 	}
-	capLen := uint32(len(payload))
+	if len(pkt.ProcessName) > MaxOptionStringBytes || len(pkt.ProcessArgs) > MaxOptionStringBytes || len(pkt.ContainerID) > MaxOptionStringBytes {
+		return ErrOptionLimit
+	}
 	origLen := pkt.OriginalLen
-	if origLen < capLen {
-		origLen = capLen
+	if origLen < uint32(len(payload)) {
+		origLen = uint32(len(payload))
 	}
-	var ts uint64
-	if pkt.TimestampNs > 0 {
-		ts = uint64(pkt.TimestampNs)
+	snapLen := pw.interfaceSnapLens[pkt.InterfaceID]
+	if snapLen > 0 && uint32(len(payload)) > snapLen {
+		payload = payload[:snapLen]
 	}
+	capLen := uint32(len(payload))
+	ts := uint64(pkt.TimestampNs)
 
 	var body bytes.Buffer
 	var fixed [20]byte
@@ -272,12 +285,17 @@ func (pw *PCAPNGWriter) WriteNameResolution(records []NameResolutionRecord) erro
 			a16 := rec.Addr.As16()
 			val.Write(a16[:])
 		}
+		wroteName := false
 		for _, name := range rec.Names {
 			if name == "" {
 				continue
 			}
 			val.WriteString(name)
 			val.WriteByte(0)
+			wroteName = true
+		}
+		if !wroteName {
+			continue
 		}
 		if val.Len() > MaxOptionStringBytes {
 			return fmt.Errorf("%w: NRB record length %d exceeds %d", ErrOptionLimit, val.Len(), MaxOptionStringBytes)
@@ -297,15 +315,15 @@ func (pw *PCAPNGWriter) WriteInterfaceStats(stat InterfaceStatistics) error {
 	if pw == nil || pw.w == nil {
 		return ErrInvalidHeader
 	}
-	if stat.InterfaceID >= pw.interfaceCount {
+	if uint64(stat.InterfaceID) >= uint64(len(pw.interfaceSnapLens)) {
 		return fmt.Errorf("%w: undeclared interface %d", ErrInvalidBlock, stat.InterfaceID)
+	}
+	if stat.TimestampNs < 0 || (stat.HasStartTime && stat.StartTimeNs < 0) || (stat.HasEndTime && stat.EndTimeNs < 0) {
+		return fmt.Errorf("%w: negative timestamp", ErrInvalidBlock)
 	}
 	var body bytes.Buffer
 	var fixed [12]byte
-	var ts uint64
-	if stat.TimestampNs > 0 {
-		ts = uint64(stat.TimestampNs)
-	}
+	ts := uint64(stat.TimestampNs)
 	binary.LittleEndian.PutUint32(fixed[0:4], stat.InterfaceID)
 	binary.LittleEndian.PutUint32(fixed[4:8], uint32(ts>>32))
 	binary.LittleEndian.PutUint32(fixed[8:12], uint32(ts&0xffffffff))
@@ -313,10 +331,7 @@ func (pw *PCAPNGWriter) WriteInterfaceStats(stat InterfaceStatistics) error {
 
 	hasOpts := false
 	writeTSOpt := func(code uint16, ns int64) {
-		var u uint64
-		if ns > 0 {
-			u = uint64(ns)
-		}
+		u := uint64(ns)
 		var b [8]byte
 		binary.LittleEndian.PutUint32(b[0:4], uint32(u>>32))
 		binary.LittleEndian.PutUint32(b[4:8], uint32(u&0xffffffff))
