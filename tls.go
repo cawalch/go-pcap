@@ -54,6 +54,8 @@ type TLSClientHello struct {
 	SignatureSchemes   []uint16
 	SupportedGroups    []uint16 // Advertised non-GREASE groups in wire order.
 	KeyShareGroups     []uint16 // Offered non-GREASE groups in wire order, capped at MaxTLSExtensions.
+	HasSessionTicket   bool     // The session_ticket extension was offered.
+	HasPSK             bool     // The pre_shared_key extension was offered.
 	HasECH             bool     // A nonempty encrypted_client_hello extension was observed.
 	JA4                string
 	Anomalies          TLSAnomalies
@@ -72,6 +74,8 @@ type TLSServerHello struct {
 	Extensions          []uint16
 	ALPN                string
 	SelectedGroup       uint16 // Server key-share group, or the requested group in a HelloRetryRequest.
+	HasSessionTicket    bool   // The server included the session_ticket extension.
+	HasPSK              bool   // The server supplied a two-byte pre_shared_key identity selection.
 	IsHelloRetryRequest bool   // The random matches the RFC 8446 retry marker.
 	SupportedVersion    uint16
 	JA4S                string
@@ -103,10 +107,13 @@ type TLSCertificate struct {
 type TLSHandshake struct {
 	HasClientHello bool
 	HasServerHello bool
-	ClientHello    TLSClientHello
-	ServerHello    TLSServerHello
-	Certificates   []TLSCertificate
-	Anomalies      TLSAnomalies
+	// IsResumed reports an observed TLS 1.2 session ID echo without a certificate,
+	// or a TLS 1.3 ServerHello selecting a PSK (possibly externally provisioned).
+	IsResumed    bool
+	ClientHello  TLSClientHello
+	ServerHello  TLSServerHello
+	Certificates []TLSCertificate
+	Anomalies    TLSAnomalies
 }
 
 // TLSRecord associates a parsed [TLSHandshake] with its 5-tuple flow metadata
@@ -140,6 +147,7 @@ func ParseTLSRecords(stream []byte) (TLSHandshake, error) {
 	var hsBuf bytes.Buffer
 	var firstRecordVersion uint16
 	var out TLSHandshake
+	var sawCCS, encryptedHandshakes bool
 	offset := 0
 
 	for offset+5 <= len(stream) {
@@ -167,7 +175,13 @@ func ParseTLSRecords(stream []byte) (TLSHandshake, error) {
 			out.Anomalies.TruncatedRecord = true
 			bodyEnd = len(stream)
 		}
-		if contentType == TLSRecordHandshake {
+		if contentType == TLSRecordChangeCipherSpec && !sawCCS {
+			// TLS 1.2 subsequent handshake records are ciphertext. TLS 1.3
+			// allows a compatibility CCS between a retry and the final hello.
+			sawCCS = true
+			encryptedHandshakes = bodyEnd-bodyStart != 1 || stream[bodyStart] != 1 || !containsHelloRetry(hsBuf.Bytes())
+		}
+		if contentType == TLSRecordHandshake && !encryptedHandshakes {
 			if hsBuf.Len()+(bodyEnd-bodyStart) > MaxTLSHandshakeBytes {
 				return TLSHandshake{}, fmt.Errorf("%w: coalesced TLS handshake exceeds %d bytes", ErrTLSLimit, MaxTLSHandshakeBytes)
 			}
@@ -186,6 +200,7 @@ func ParseTLSRecords(stream []byte) (TLSHandshake, error) {
 
 	hsOffset := 0
 	parsedAny := false
+	var checkedRetryFollowup bool
 	for hsOffset+4 <= len(hsData) {
 		msgType := hsData[hsOffset]
 		msgLen := int(hsData[hsOffset+1])<<16 | int(hsData[hsOffset+2])<<8 | int(hsData[hsOffset+3])
@@ -216,7 +231,8 @@ func ParseTLSRecords(stream []byte) (TLSHandshake, error) {
 				parsedAny = true
 			}
 		case TLSHandshakeServerHello:
-			if !out.HasServerHello {
+			if !out.HasServerHello || (out.ServerHello.IsHelloRetryRequest && !checkedRetryFollowup) {
+				checkedRetryFollowup = out.HasServerHello
 				sh, err := parseTLSServerHelloWithRecordVersion(body, firstRecordVersion, false)
 				if err != nil {
 					if !parsedAny {
@@ -224,8 +240,13 @@ func ParseTLSRecords(stream []byte) (TLSHandshake, error) {
 					}
 					break
 				}
-				out.ServerHello = sh
-				out.HasServerHello = true
+				if !out.HasServerHello {
+					out.ServerHello = sh // Preserve the first hello and its JA4S.
+					out.HasServerHello = true
+				}
+				if !sh.IsHelloRetryRequest {
+					out.IsResumed = sh.NegotiatedVersion == TLSVersion13 && sh.HasPSK
+				}
 				out.Anomalies = mergeTLSAnomalies(out.Anomalies, sh.Anomalies)
 				parsedAny = true
 			}
@@ -246,7 +267,29 @@ func ParseTLSRecords(stream []byte) (TLSHandshake, error) {
 	if !parsedAny {
 		return TLSHandshake{}, fmt.Errorf("%w: no complete TLS handshake message found", ErrInvalidTLS)
 	}
+	out.IsResumed = out.IsResumed || out.hasResumedSessionID()
 	return out, nil
+}
+
+// containsHelloRetry examines complete handshake messages preceding a CCS.
+func containsHelloRetry(data []byte) bool {
+	for len(data) >= 4 {
+		n := int(data[1])<<16 | int(data[2])<<8 | int(data[3])
+		if n > len(data)-4 {
+			return false
+		}
+		if data[0] == TLSHandshakeServerHello {
+			return n >= 34 && bytes.Equal(data[6:38], helloRetryRandom[:])
+		}
+		data = data[4+n:]
+	}
+	return false
+}
+
+func (hs *TLSHandshake) hasResumedSessionID() bool {
+	return hs.HasServerHello && hs.ServerHello.NegotiatedVersion == TLSVersion12 &&
+		!hs.ServerHello.IsHelloRetryRequest && hs.HasClientHello && len(hs.Certificates) == 0 &&
+		len(hs.ClientHello.SessionID) != 0 && bytes.Equal(hs.ClientHello.SessionID, hs.ServerHello.SessionID)
 }
 
 // ParseTLSClientHello parses a raw TLS ClientHello handshake body (excluding the
@@ -343,6 +386,10 @@ func parseTLSClientHelloWithRecordVersion(body []byte, recordVer uint16, isQUIC 
 			}
 
 			switch extType {
+			case TLSExtSessionTicket:
+				ch.HasSessionTicket = true
+			case TLSExtPreSharedKey:
+				ch.HasPSK = true
 			case TLSExtServerName:
 				parseSNIExtension(extData, &ch)
 			case TLSExtALPN:
@@ -565,6 +612,10 @@ func parseTLSServerHelloWithRecordVersion(body []byte, recordVer uint16, isQUIC 
 
 			sh.Extensions = append(sh.Extensions, extType)
 			switch extType {
+			case TLSExtSessionTicket:
+				sh.HasSessionTicket = true
+			case TLSExtPreSharedKey:
+				sh.HasPSK = len(extData) == 2
 			case TLSExtKeyShare:
 				if sh.IsHelloRetryRequest {
 					if len(extData) == 2 {
@@ -996,6 +1047,7 @@ func (c *Capture) tlsFromStreams(streams []TCPStream, extraKeyLog []byte) ([]TLS
 		if tlsOff := findTLSHandshakeStart(st.Server.Data); tlsOff >= 0 {
 			if hs, err := ParseTLSRecords(st.Server.Data[tlsOff:]); err == nil {
 				if hs.HasServerHello {
+					merged.IsResumed = hs.IsResumed && hs.ServerHello.NegotiatedVersion == TLSVersion13
 					merged.ServerHello = hs.ServerHello
 					merged.HasServerHello = true
 					found = true
@@ -1019,6 +1071,7 @@ func (c *Capture) tlsFromStreams(streams []TCPStream, extraKeyLog []byte) ([]TLS
 		}
 
 		if found {
+			merged.IsResumed = merged.IsResumed || merged.hasResumedSessionID()
 			if len(records) >= MaxTLSHandshakesPerScan {
 				return nil, fmt.Errorf("%w: exceeds %d TLS handshakes", ErrTLSLimit, MaxTLSHandshakesPerScan)
 			}

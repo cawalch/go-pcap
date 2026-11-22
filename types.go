@@ -432,6 +432,8 @@ const (
 	TLSExtECPointFormats      uint16 = 0x000b
 	TLSExtSignatureAlgorithms uint16 = 0x000d
 	TLSExtALPN                uint16 = 0x0010
+	TLSExtSessionTicket       uint16 = 0x0023
+	TLSExtPreSharedKey        uint16 = 0x0029
 	TLSExtSupportedVersions   uint16 = 0x002b
 	TLSExtKeyShare            uint16 = 0x0033
 	TLSExtECH                 uint16 = 0xfe0d

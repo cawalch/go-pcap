@@ -296,6 +296,15 @@ and `Certificate` handshake messages:
   the group is the one requested for the next ClientHello. For example,
   `!sh.IsHelloRetryRequest && sh.SelectedGroup == pcap.TLSGroupX25519MLKEM768`
   identifies an observed ServerHello selecting that hybrid group.
+- Both hellos expose the bounded, copied `SessionID`, `HasSessionTicket`,
+  and `HasPSK`. For TLS 1.2, `hs.IsResumed` indicates a nonempty session ID
+  echoed by the server with no certificate in the parsed handshake. Missing
+  capture data can affect this inference. For TLS 1.3 it indicates a server
+  PSK selection, which can also use an externally provisioned key. A client
+  offer alone is insufficient. After a HelloRetryRequest the parser checks
+  the next ServerHello for selection and retains the first hello for JA4S.
+  For example, `hs.ClientHello.HasPSK && !hs.IsResumed` identifies a captured
+  offer without observed acceptance.
 - Each certificate in the chain exposes DNS SANs in `DNSNames` and IPv4/IPv6
   SANs in `IPAddresses` as `netip.Addr` values. For example,
   `record.Handshake.Certificates[0].IPAddresses` gives the leaf's addresses
