@@ -303,11 +303,15 @@ func (c *Capture) FlowsFromReaderAt(r io.ReaderAt) ([]FlowSummary, error) {
 				ContainerID:      pkt.ContainerID,
 				HasProcessID:     pkt.HasProcessID,
 				HasUserID:        pkt.HasUserID,
+				PortsUnavailable: !frame.hasPorts,
 			})
 			hsTimes = append(hsTimes, tcpHandshakeTime{})
 		}
 
 		flow := &flows[idx]
+		if flow.PortsUnavailable && frame.hasPorts {
+			flow.PortsUnavailable = false
+		}
 		hst := &hsTimes[idx]
 		flow.PacketCount++
 		if pkt.TimestampNs < flow.FirstTimestampNs {

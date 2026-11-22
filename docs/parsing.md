@@ -209,6 +209,13 @@ increment `ServerPackets` and `ServerBytes`. For TCP flows, `Flows` records:
 - First-seen process attribution (`ProcessID`, `UserID`, `ProcessName`,
   `ProcessArgs`, and `ContainerID`).
 
+Call `flow.CommunityID(seed)` on a summary from `Flows` or `FlowsFromReaderAt`
+to correlate IPv4 or IPv6 TCP and UDP traffic with other tools. Both directions
+produce the same ID. Match the seed across tools (the default is zero).
+The method computes the ID only when called and returns an empty string for
+unsupported protocols, invalid or mixed-family addresses, or a summary with
+`PortsUnavailable` set. A decoded port value of zero is valid.
+
 ## Reassemble TCP streams
 
 Call `capture.Streams(data)` to reassemble ordered directional TCP byte streams
