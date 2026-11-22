@@ -21,7 +21,6 @@ func (c *Capture) ExtractFlowPCAPNG(data []byte, w io.Writer, flowIndex int) err
 	}
 
 	var table flowIndexTable
-	var target flowKey
 	var found bool
 	var classic *PCAPNGWriter
 	var used [MaxInterfaces]bool
@@ -37,18 +36,14 @@ func (c *Capture) ExtractFlowPCAPNG(data []byte, w io.Writer, flowIndex int) err
 			return nil
 		}
 		key, _ := makeCanonicalFlowKey(frame.IPProtocol, frame.SrcAddr, frame.SrcPort, frame.DstAddr, frame.DstPort)
-		if !found {
-			idx, _, err := table.lookupOrInsert(key)
-			if err != nil {
-				return err
-			}
-			if idx != flowIndex {
-				return nil
-			}
-			target, found = key, true
-		} else if key != target {
+		idx, _, err := table.lookupOrInsert(key)
+		if err != nil {
+			return err
+		}
+		if idx != flowIndex {
 			return nil
 		}
+		found = true
 		if c.Format == FormatPCAP {
 			if classic == nil {
 				classic, err = newPCAPNGWriter(w, PCAPNGWriterOptions{LinkType: c.LinkType, SnapLen: c.SnapLen})
