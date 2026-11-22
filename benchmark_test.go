@@ -404,3 +404,37 @@ func benchmarkReaderAtProtocols(b *testing.B, file bool) {
 		}
 	}
 }
+
+// Measure capture parsing, flow grouping and both directions of Initial
+// decryption with the RFC 9001 and RFC 9369 example packets.
+func BenchmarkCaptureQUICInitials(b *testing.B) {
+	client, server := [4]byte{192, 0, 2, 1}, [4]byte{192, 0, 2, 2}
+	var frames [][]byte
+	for group, rfc := range []string{"rfc9001", "rfc9369"} {
+		read := func(side string) []byte {
+			data, err := os.ReadFile("testdata/" + rfc + "-" + side + ".bin")
+			if err != nil {
+				b.Fatal(err)
+			}
+			return data
+		}
+		ch, sh := read("client"), read("server")
+		for i := range 32 {
+			port := uint16(10000 + group*32 + i)
+			frames = append(frames, buildEthernetIPv4UDPFrame(client, server, port, 443, ch), buildEthernetIPv4UDPFrame(server, client, 443, port, sh))
+		}
+	}
+	raw := buildPCAPNGFixture(binary.LittleEndian, nil, frames)
+	c, err := New(raw)
+	if err != nil {
+		b.Fatal(err)
+	}
+	b.ReportAllocs()
+	b.SetBytes(int64(len(raw)))
+	for b.Loop() {
+		records, err := c.QUIC(raw)
+		if err != nil || len(records) != 64 || !records[63].Handshake.HasServerHello {
+			b.Fatalf("got %d records, err %v", len(records), err)
+		}
+	}
+}
