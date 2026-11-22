@@ -1,7 +1,10 @@
 package pcap
 
 import (
+	"bytes"
+	"compress/gzip"
 	"encoding/binary"
+	"net/netip"
 	"testing"
 )
 
@@ -152,14 +155,15 @@ func FuzzParseTLSRecords(f *testing.F) {
 }
 
 func FuzzDecryptQUICInitial(f *testing.F) {
-	f.Add([]byte{0xc0, 0x00, 0x00, 0x00, 0x01, 0x08, 1, 2, 3, 4, 5, 6, 7, 8, 0x00, 0x00, 0x14})
+	seed := []byte{0xc0, 0x00, 0x00, 0x00, 0x01, 0x08, 1, 2, 3, 4, 5, 6, 7, 8, 0x00, 0x00, 0x14}
+	f.Add(seed, seed)
 
-	f.Fuzz(func(t *testing.T, data []byte) {
-		hdr, err := ParseQUICInitialPacket(data)
-		if err == nil && (hdr.PayloadOffset <= 0 || hdr.PacketLength > len(data) || hdr.PayloadLength < 20 || hdr.PacketLength-hdr.PayloadOffset != hdr.PayloadLength) {
-			t.Fatalf("invalid decoded packet bounds: %+v (input %d)", hdr, len(data))
+	f.Fuzz(func(t *testing.T, d1, d2 []byte) {
+		hdr, err := ParseQUICInitialPacket(d1)
+		if err == nil && (hdr.PayloadOffset <= 0 || hdr.PacketLength > len(d1) || hdr.PayloadLength < 20 || hdr.PacketLength-hdr.PayloadOffset != hdr.PayloadLength) {
+			t.Fatalf("invalid decoded packet bounds: %+v (input %d)", hdr, len(d1))
 		}
-		_, _ = DecryptQUICInitial([][]byte{data})
+		_, _ = DecryptQUICInitial([][]byte{d1, d2})
 	})
 }
 
@@ -221,12 +225,20 @@ func FuzzParseBPFBuffer(f *testing.F) {
 }
 
 func FuzzDefragmentIP(f *testing.F) {
-	f.Add(uint16(0), true, []byte("01234567"), uint16(8), false, []byte("89ABCDEF"))
+	f.Add(false, int16(0), true, []byte("01234567"), int16(8), false, []byte("89ABCDEF"), int16(0), true, []byte{})
+	f.Add(true, int16(0), true, []byte("01234567"), int16(8), false, []byte("89ABCDEF"), int16(4), true, []byte("xxxx"))
 
-	f.Fuzz(func(t *testing.T, off1 uint16, mf1 bool, p1 []byte, off2 uint16, mf2 bool, p2 []byte) {
+	f.Fuzz(func(t *testing.T, ipv6 bool, off1 int16, mf1 bool, p1 []byte, off2 int16, mf2 bool, p2 []byte, off3 int16, mf3 bool, p3 []byte) {
+		src := netip.AddrFrom4([4]byte{10, 0, 0, 1})
+		dst := netip.AddrFrom4([4]byte{10, 0, 0, 2})
+		if ipv6 {
+			src = netip.AddrFrom16([16]byte{0x20, 0x01, 0x0d, 0xb8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1})
+			dst = netip.AddrFrom16([16]byte{0x20, 0x01, 0x0d, 0xb8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 2})
+		}
 		frags := []IPFragmentInput{
-			{FragmentOffset: int(off1 & 0xfff8), MoreFragments: mf1, Payload: p1},
-			{FragmentOffset: int(off2 & 0xfff8), MoreFragments: mf2, Payload: p2},
+			{SrcAddr: src, DstAddr: dst, Protocol: IPProtoUDP, FragmentOffset: int(off1), MoreFragments: mf1, Payload: p1},
+			{SrcAddr: src, DstAddr: dst, Protocol: IPProtoUDP, FragmentOffset: int(off2), MoreFragments: mf2, Payload: p2},
+			{SrcAddr: src, DstAddr: dst, Protocol: IPProtoUDP, FragmentOffset: int(off3), MoreFragments: mf3, Payload: p3},
 		}
 		out, _, err := DefragmentIP(frags)
 		if err != nil {
@@ -255,12 +267,23 @@ func FuzzParseHTTP2Frames(f *testing.F) {
 }
 
 func FuzzEvalBPF(f *testing.F) {
-	f.Add(uint16(bpfClassLD|bpfSizeH|bpfModeABS), uint8(0), uint8(0), uint32(12), []byte{0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 0x08, 0x00})
+	var prog [16]byte
+	binary.LittleEndian.PutUint16(prog[0:2], bpfClassLD|bpfSizeH|bpfModeABS)
+	binary.LittleEndian.PutUint32(prog[4:8], 12)
+	binary.LittleEndian.PutUint16(prog[8:10], bpfClassRET|bpfRetA)
+	f.Add(prog[:], []byte{0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 0x08, 0x00})
 
-	f.Fuzz(func(t *testing.T, code uint16, jt, jf uint8, k uint32, frame []byte) {
-		insns := []BPFInstruction{
-			{Code: code, JT: jt, JF: jf, K: k},
-			{Code: bpfClassRET | bpfRetA},
+	f.Fuzz(func(t *testing.T, rawProg, frame []byte) {
+		count := min(len(rawProg)/8, 64)
+		insns := make([]BPFInstruction, count)
+		for i := range count {
+			b := rawProg[i*8 : i*8+8]
+			insns[i] = BPFInstruction{
+				Code: binary.LittleEndian.Uint16(b[0:2]),
+				JT:   b[2],
+				JF:   b[3],
+				K:    binary.LittleEndian.Uint32(b[4:8]),
+			}
 		}
 		_, _ = EvalBPF(insns, frame)
 	})
@@ -279,5 +302,73 @@ func FuzzParseRDPNegotiation(f *testing.F) {
 
 	f.Fuzz(func(t *testing.T, data []byte) {
 		_, _ = ParseRDPNegotiation(data)
+	})
+}
+
+func FuzzReaderAt(f *testing.F) {
+	frame := buildEthernetIPv4TCPFrame([4]byte{10, 0, 0, 1}, [4]byte{10, 0, 0, 2}, 12345, 443, 1, 1, TCPFlagSYN, []byte("payload"))
+	f.Add(buildClassicPCAP(binary.LittleEndian, false, LinkTypeEthernet, 65535, [][]byte{frame}))
+	f.Add(buildPCAPNGFixture(binary.LittleEndian, []byte("CLIENT_RANDOM deadbeef cafebabe\n"), [][]byte{frame}))
+
+	f.Fuzz(func(t *testing.T, data []byte) {
+		r := bytes.NewReader(data)
+		c, err := NewFromReaderAt(r, int64(len(data)))
+		if err != nil {
+			return
+		}
+		for _, e := range c.PacketSeqFromReaderAt(r) {
+			if e != nil {
+				break
+			}
+		}
+		_, _ = c.PacketsFromReaderAt(r)
+		_, _ = c.FlowsFromReaderAt(r)
+		_, _ = c.DNSFromReaderAt(r)
+		_, _ = c.TLSFromReaderAt(r)
+		_, _ = c.QUICFromReaderAt(r)
+	})
+}
+
+func FuzzTLSDecrypt(f *testing.F) {
+	f.Add([]byte("CLIENT_RANDOM 00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff 0102030405060708090a0b0c0d0e0f10\n"), []byte{0x17, 0x03, 0x03, 0x00, 0x15, 1, 2, 3, 4, 5}, uint16(TLS_AES_128_GCM_SHA256))
+
+	f.Fuzz(func(t *testing.T, keylog, records []byte, suite uint16) {
+		kl, err := ParseTLSKeyLog(keylog)
+		if err == nil && len(kl.Entries) > MaxTLSKeyLogEntries {
+			t.Fatalf("keylog entries %d exceeds %d", len(kl.Entries), MaxTLSKeyLogEntries)
+		}
+		var secret, crand [32]byte
+		var master [48]byte
+		copy(secret[:], keylog)
+		copy(master[:], keylog)
+		copy(crand[:], records)
+		_, _, _ = DecryptTLS13Records(records, suite, secret[:], secret[:])
+		_, _ = DecryptTLS12Records(records, suite, master[:], crand, crand, true)
+	})
+}
+
+func FuzzDecompressCapture(f *testing.F) {
+	var gz bytes.Buffer
+	zw := gzip.NewWriter(&gz)
+	_, _ = zw.Write(buildClassicPCAP(binary.LittleEndian, false, LinkTypeEthernet, 65535, nil))
+	_ = zw.Close()
+	f.Add(gz.Bytes())
+
+	f.Fuzz(func(t *testing.T, data []byte) {
+		out, err := DecompressCapture(data)
+		if err != nil {
+			return
+		}
+		if len(out) > MaxDecompressedCaptureBytes {
+			t.Fatalf("DecompressCapture len %d exceeds %d", len(out), MaxDecompressedCaptureBytes)
+		}
+	})
+}
+
+func FuzzJA4XFromDER(f *testing.F) {
+	f.Add([]byte{0x30, 0x06, 0x30, 0x00, 0x30, 0x00})
+
+	f.Fuzz(func(t *testing.T, der []byte) {
+		_, _ = JA4XFromDER(der)
 	})
 }
