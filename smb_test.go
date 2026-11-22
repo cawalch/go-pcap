@@ -107,4 +107,18 @@ func TestSMB2AndNTLMBounds(t *testing.T) {
 	if _, err := ParseNTLMSSP([]byte("NOT_NTLM_12345")); !errors.Is(err, ErrInvalidSMB) {
 		t.Fatalf("ParseNTLMSSP(bad sig) err = %v, want ErrInvalidSMB", err)
 	}
+
+	// Security buffer offset near MaxInt32 must not wrap on 32-bit targets.
+	overflowToken := make([]byte, 56)
+	copy(overflowToken[0:8], ntlmsspSig)
+	binary.LittleEndian.PutUint32(overflowToken[8:12], NTLMChallengeMessage)
+	binary.LittleEndian.PutUint16(overflowToken[12:14], 0x20)
+	binary.LittleEndian.PutUint32(overflowToken[16:20], 0x7ffffff0)
+	info, err := ParseNTLMSSP(overflowToken)
+	if err != nil {
+		t.Fatalf("ParseNTLMSSP(overflow offset) err = %v", err)
+	}
+	if info.TargetName != "" {
+		t.Fatalf("ParseNTLMSSP(overflow offset) TargetName = %q, want empty", info.TargetName)
+	}
 }

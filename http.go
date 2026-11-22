@@ -283,19 +283,21 @@ func decodeChunkedBody(raw []byte) ([]byte, int) {
 			}
 			break
 		}
-		if offset+int(chunkSize) > len(raw) {
-			take := min(len(raw)-offset, MaxHTTPBodyBytes-out.Len())
+		rem := len(raw) - offset
+		if chunkSize > int64(rem) {
+			take := min(rem, MaxHTTPBodyBytes-out.Len())
 			if take > 0 {
 				out.Write(raw[offset : offset+take])
 			}
 			offset = len(raw)
 			break
 		}
-		take := min(int(chunkSize), MaxHTTPBodyBytes-out.Len())
+		chunkLen := int(chunkSize)
+		take := min(chunkLen, MaxHTTPBodyBytes-out.Len())
 		if take > 0 {
 			out.Write(raw[offset : offset+take])
 		}
-		offset += int(chunkSize)
+		offset += chunkLen
 		if offset+2 <= len(raw) && raw[offset] == '\r' && raw[offset+1] == '\n' {
 			offset += 2
 		}

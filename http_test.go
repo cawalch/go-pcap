@@ -73,6 +73,16 @@ func TestHTTPBoundsAndLimits(t *testing.T) {
 	if _, _, err := ParseHTTPResponse([]byte("HTTP/1.1 999 Bad\r\n\r\n")); !errors.Is(err, ErrInvalidHTTP) {
 		t.Fatalf("ParseHTTPResponse(status 999) err = %v, want ErrInvalidHTTP", err)
 	}
+
+	// Chunk size near MaxInt32 must not wrap offset+chunkSize on 32-bit targets.
+	chunkOverflow := []byte("HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n7fffffff\r\nabcd")
+	resp, _, err := ParseHTTPResponse(chunkOverflow)
+	if err != nil {
+		t.Fatalf("ParseHTTPResponse(max chunk size) err = %v", err)
+	}
+	if string(resp.Body) != "abcd" {
+		t.Fatalf("ParseHTTPResponse(max chunk size) Body = %q, want %q", resp.Body, "abcd")
+	}
 }
 
 func TestJA4HLargeCookieParity(t *testing.T) {

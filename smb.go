@@ -283,15 +283,15 @@ func ParseNTLMSSP(token []byte) (NTLMInfo, error) {
 }
 
 func readNTLMSecBufSlice(token []byte, descOffset int) ([]byte, bool) {
-	if descOffset+8 > len(token) {
+	if descOffset < 0 || len(token)-descOffset < 8 {
 		return nil, false
 	}
-	length := int(binary.LittleEndian.Uint16(token[descOffset : descOffset+2]))
-	offset := int(binary.LittleEndian.Uint32(token[descOffset+4 : descOffset+8]))
-	if length <= 0 || offset < 12 || offset+length > len(token) {
+	length := uint64(binary.LittleEndian.Uint16(token[descOffset : descOffset+2]))
+	offset := uint64(binary.LittleEndian.Uint32(token[descOffset+4 : descOffset+8]))
+	if length == 0 || offset < 12 || offset > uint64(len(token)) || length > uint64(len(token))-offset {
 		return nil, false
 	}
-	return token[offset : offset+length], true
+	return token[int(offset):int(offset+length)], true
 }
 
 func readNTLMSecBufString(token []byte, descOffset int, unicode bool) string {
