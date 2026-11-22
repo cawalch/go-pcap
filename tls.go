@@ -147,7 +147,7 @@ func ParseTLSRecords(stream []byte) (TLSHandshake, error) {
 	var hsBuf bytes.Buffer
 	var firstRecordVersion uint16
 	var out TLSHandshake
-	var passedRetryCCS bool
+	var sawCCS, encryptedHandshakes bool
 	offset := 0
 
 	for offset+5 <= len(stream) {
@@ -175,15 +175,13 @@ func ParseTLSRecords(stream []byte) (TLSHandshake, error) {
 			out.Anomalies.TruncatedRecord = true
 			bodyEnd = len(stream)
 		}
-		if contentType == TLSRecordChangeCipherSpec {
+		if contentType == TLSRecordChangeCipherSpec && !sawCCS {
 			// TLS 1.2 subsequent handshake records are ciphertext. TLS 1.3
 			// allows a compatibility CCS between a retry and the final hello.
-			if passedRetryCCS || bodyEnd-bodyStart != 1 || stream[bodyStart] != 1 || !containsHelloRetry(hsBuf.Bytes()) {
-				break
-			}
-			passedRetryCCS = true
+			sawCCS = true
+			encryptedHandshakes = bodyEnd-bodyStart != 1 || stream[bodyStart] != 1 || !containsHelloRetry(hsBuf.Bytes())
 		}
-		if contentType == TLSRecordHandshake {
+		if contentType == TLSRecordHandshake && !encryptedHandshakes {
 			if hsBuf.Len()+(bodyEnd-bodyStart) > MaxTLSHandshakeBytes {
 				return TLSHandshake{}, fmt.Errorf("%w: coalesced TLS handshake exceeds %d bytes", ErrTLSLimit, MaxTLSHandshakeBytes)
 			}

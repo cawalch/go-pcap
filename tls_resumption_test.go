@@ -25,6 +25,12 @@ func TestTLSResumption(t *testing.T) {
 	ccs := []byte{TLSRecordChangeCipherSpec, 3, 3, 0, 1, 1}
 	encrypted := append(bytes.Clone(ccs), []byte{TLSRecordHandshake, 3, 3, 0, 4, 0xff, 0xff, 0xff, 0xff}...)
 	certs := buildTLSServerHelloAndCertRecords(t)[len(buildTLSServerHelloRecord()):]
+	// Record framing still reports truncation after the plaintext epoch.
+	short := append(bytes.Clone(server12), encrypted[:len(encrypted)-1]...)
+	parsed, err := ParseTLSRecords(short)
+	if err != nil || !parsed.Anomalies.TruncatedRecord {
+		t.Fatalf("truncated encrypted record: %+v, %v", parsed.Anomalies, err)
+	}
 	for _, tc := range []struct {
 		name           string
 		client, server []byte
