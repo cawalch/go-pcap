@@ -1,0 +1,211 @@
+package pcap
+
+import (
+	"encoding/binary"
+	"testing"
+)
+
+func FuzzSafeReader(f *testing.F) {
+	f.Add([]byte{}, int64(0), int64(0))
+	f.Add([]byte("hello\x00world"), int64(0), int64(6))
+	f.Add([]byte{1, 2, 3, 4, 5, 6, 7, 8}, int64(2), int64(4))
+
+	f.Fuzz(func(t *testing.T, data []byte, offset, length int64) {
+		r := NewSafeReader(data)
+		_, _ = r.Slice(offset, length)
+		_, _ = r.ReadUint8(offset)
+		_, _ = r.ReadUint16(offset)
+		_, _ = r.ReadUint16BE(offset)
+		_, _ = r.ReadUint32(offset)
+		_, _ = r.ReadUint32BE(offset)
+		_, _ = r.ReadUint64(offset)
+		_, _ = r.ReadUint64BE(offset)
+		_, _ = r.ReadASCIIZ(offset, length)
+		_ = r.CheckBounds(offset, length)
+	})
+}
+
+func FuzzNew(f *testing.F) {
+	frame := buildEthernetIPv4TCPFrame([4]byte{10, 0, 0, 1}, [4]byte{10, 0, 0, 2}, 12345, 443, 1, 1, TCPFlagSYN, []byte("tls"))
+	f.Add(buildClassicPCAP(binary.LittleEndian, false, LinkTypeEthernet, 65535, [][]byte{frame}))
+	f.Add(buildClassicPCAP(binary.BigEndian, true, LinkTypeEthernet, 65535, [][]byte{frame}))
+	f.Add(buildPCAPNGFixture(binary.LittleEndian, []byte("CLIENT_RANDOM deadbeef cafebabe\n"), [][]byte{frame}))
+
+	f.Fuzz(func(t *testing.T, data []byte) {
+		cap, err := New(data)
+		if err != nil {
+			return
+		}
+		if cap.FileSize() != int64(len(data)) {
+			t.Fatalf("FileSize() = %d, want %d", cap.FileSize(), len(data))
+		}
+		_, _ = cap.DeclaredExtent()
+		_ = cap.InputTruncated()
+		_ = cap.Anomalies()
+	})
+}
+
+func FuzzPackets(f *testing.F) {
+	frame := buildEthernetIPv4TCPFrame([4]byte{10, 0, 0, 1}, [4]byte{10, 0, 0, 2}, 12345, 443, 1, 1, TCPFlagSYN, []byte("payload"))
+	f.Add(buildClassicPCAP(binary.LittleEndian, false, LinkTypeEthernet, 65535, [][]byte{frame}))
+	f.Add(buildPCAPNGFixture(binary.LittleEndian, []byte("KEYLOG"), [][]byte{frame}))
+
+	f.Fuzz(func(t *testing.T, data []byte) {
+		cap, err := New(data)
+		if err != nil {
+			return
+		}
+		packets, err := cap.Packets(data)
+		if err != nil {
+			return
+		}
+		for _, pkt := range packets {
+			payload, err := cap.PacketPayload(data, pkt)
+			if err != nil {
+				t.Fatalf("PacketPayload failed for valid PacketRecord: %v", err)
+			}
+			_, _ = DecodeFrame(payload, pkt.LinkType)
+		}
+		_, _ = cap.Flows(data)
+	})
+}
+
+func FuzzDecodeFrame(f *testing.F) {
+	frame := buildEthernetIPv4TCPFrame([4]byte{10, 0, 0, 1}, [4]byte{10, 0, 0, 2}, 12345, 443, 1, 1, TCPFlagSYN, []byte("payload"))
+	f.Add(frame, uint16(LinkTypeEthernet))
+	f.Add(frame[14:], uint16(LinkTypeRaw))
+
+	f.Fuzz(func(t *testing.T, data []byte, rawLinkType uint16) {
+		decoded, err := DecodeFrame(data, LinkType(rawLinkType))
+		if err != nil {
+			return
+		}
+		if int(decoded.PayloadOffset)+int(decoded.PayloadLength) > len(data) {
+			t.Fatalf("Payload span (%d + %d) exceeds data length %d",
+				decoded.PayloadOffset, decoded.PayloadLength, len(data))
+		}
+		for _, layer := range decoded.LayerSlices() {
+			if int(layer.Offset)+int(layer.Length) > len(data) {
+				t.Fatalf("Layer %s span (%d + %d) exceeds data length %d",
+					layer.Proto, layer.Offset, layer.Length, len(data))
+			}
+		}
+		_, _ = decoded.JA4T(data)
+	})
+}
+
+func FuzzReassembleTCP(f *testing.F) {
+	f.Add(uint32(100), uint8(TCPFlagSYN), []byte{}, uint32(101), uint8(TCPFlagACK), []byte("hello"), uint32(106), uint8(TCPFlagACK), []byte("world"))
+
+	f.Fuzz(func(t *testing.T, seq1 uint32, flags1 uint8, p1 []byte, seq2 uint32, flags2 uint8, p2 []byte, seq3 uint32, flags3 uint8, p3 []byte) {
+		segs := []TCPSegmentInput{
+			{Seq: seq1, Flags: flags1, Payload: p1},
+			{Seq: seq2, Flags: flags2, Payload: p2},
+			{Seq: seq3, Flags: flags3, Payload: p3},
+		}
+		buf, err := ReassembleTCP(segs)
+		if err != nil {
+			return
+		}
+		if len(buf.Data) > MaxFlowStreamBytes {
+			t.Fatalf("Reassembled stream length %d exceeds MaxFlowStreamBytes %d", len(buf.Data), MaxFlowStreamBytes)
+		}
+	})
+}
+
+func FuzzParseDNS(f *testing.F) {
+	f.Add(buildDNSQueryResponsePacket())
+
+	f.Fuzz(func(t *testing.T, data []byte) {
+		msg, err := ParseDNS(data)
+		if err != nil {
+			return
+		}
+		if len(msg.Questions) > MaxDNSQuestions {
+			t.Fatalf("Questions len %d exceeds %d", len(msg.Questions), MaxDNSQuestions)
+		}
+		if len(msg.Answers)+len(msg.Authorities)+len(msg.Additionals) > MaxDNSResourceRecords {
+			t.Fatalf("Total resource records exceed %d", MaxDNSResourceRecords)
+		}
+	})
+}
+
+func FuzzParseTLSRecords(f *testing.F) {
+	f.Add(buildTLS13ClientHelloRecord("c2.example.com", "h2"))
+
+	f.Fuzz(func(t *testing.T, data []byte) {
+		hs, err := ParseTLSRecords(data)
+		if err != nil {
+			return
+		}
+		if hs.HasClientHello && len(hs.ClientHello.JA4) != 36 {
+			t.Fatalf("Invalid JA4 length %d (%q)", len(hs.ClientHello.JA4), hs.ClientHello.JA4)
+		}
+		if hs.HasServerHello && len(hs.ServerHello.JA4S) != 25 {
+			t.Fatalf("Invalid JA4S length %d (%q)", len(hs.ServerHello.JA4S), hs.ServerHello.JA4S)
+		}
+	})
+}
+
+func FuzzDecryptQUICInitial(f *testing.F) {
+	f.Add([]byte{0xc0, 0x00, 0x00, 0x00, 0x01, 0x08, 1, 2, 3, 4, 5, 6, 7, 8, 0x00, 0x00, 0x14})
+
+	f.Fuzz(func(t *testing.T, data []byte) {
+		_, _ = ParseQUICInitialPacket(data)
+		_, _ = DecryptQUICInitial([][]byte{data})
+	})
+}
+
+func FuzzParseHTTP(f *testing.F) {
+	f.Add([]byte("GET /index.html HTTP/1.1\r\nHost: example.com\r\nCookie: a=1; b=2\r\n\r\n"))
+	f.Add([]byte("HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n4\r\ntest\r\n0\r\n\r\n"))
+
+	f.Fuzz(func(t *testing.T, data []byte) {
+		if req, _, err := ParseHTTPRequest(data); err == nil {
+			if len(req.Body) > MaxHTTPBodyBytes {
+				t.Fatalf("HTTP request body %d exceeds %d", len(req.Body), MaxHTTPBodyBytes)
+			}
+		}
+		if resp, _, err := ParseHTTPResponse(data); err == nil {
+			if len(resp.Body) > MaxHTTPBodyBytes {
+				t.Fatalf("HTTP response body %d exceeds %d", len(resp.Body), MaxHTTPBodyBytes)
+			}
+		}
+	})
+}
+
+func FuzzParseSSHHandshake(f *testing.F) {
+	f.Add(
+		buildSSHKexStream("SSH-2.0-OpenSSH_9.6", "curve25519-sha256", "ssh-ed25519", "chacha20-poly1305@openssh.com", "umac-128-etm@openssh.com", "none"),
+		buildSSHKexStream("SSH-2.0-OpenSSH_9.6p1", "curve25519-sha256", "ssh-ed25519", "aes128-gcm@openssh.com", "umac-128-etm@openssh.com", "none"),
+	)
+
+	f.Fuzz(func(t *testing.T, client, server []byte) {
+		_, _ = ParseSSHHandshake(client, server)
+	})
+}
+
+func FuzzParseSMB2AndNTLM(f *testing.F) {
+	f.Add(buildSMB2SessionSetupNTLMChallenge())
+
+	f.Fuzz(func(t *testing.T, data []byte) {
+		_, _ = ParseSMB2Message(data)
+		_, _ = ParseNTLMSSP(data)
+	})
+}
+
+func FuzzParseBPFBuffer(f *testing.F) {
+	f.Add(make([]byte, 32))
+
+	f.Fuzz(func(t *testing.T, data []byte) {
+		records, err := ParseBPFBuffer(data, LinkTypeEthernet)
+		if err != nil {
+			return
+		}
+		for _, r := range records {
+			if r.PayloadOffset+r.PayloadLength > int64(len(data)) {
+				t.Fatalf("BPF record span (%d + %d) exceeds %d", r.PayloadOffset, r.PayloadLength, len(data))
+			}
+		}
+	})
+}

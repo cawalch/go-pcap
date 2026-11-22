@@ -1,0 +1,1005 @@
+package pcap
+
+import (
+	"bytes"
+	"cmp"
+	"crypto/sha256"
+	"crypto/x509"
+	"encoding/asn1"
+	"encoding/binary"
+	"encoding/hex"
+	"fmt"
+	"net/netip"
+	"slices"
+	"strconv"
+	"strings"
+)
+
+// TLSAnomalies reports structural or security anomalies in a TLS handshake.
+type TLSAnomalies struct {
+	TruncatedRecord       bool
+	SNIIPLiteral          bool
+	EmptySNI              bool
+	DuplicateExtension    bool
+	ALPNTransportMismatch bool
+	SelfSignedCertificate bool
+	InvalidCertificateDER bool
+}
+
+// Any reports whether any TLS anomaly was detected.
+func (a TLSAnomalies) Any() bool {
+	return a.TruncatedRecord ||
+		a.SNIIPLiteral ||
+		a.EmptySNI ||
+		a.DuplicateExtension ||
+		a.ALPNTransportMismatch ||
+		a.SelfSignedCertificate ||
+		a.InvalidCertificateDER
+}
+
+// TLSClientHello contains the parsed fields and JA4 fingerprint of a TLS
+// ClientHello handshake message.
+type TLSClientHello struct {
+	RecordVersion      uint16
+	HandshakeVersion   uint16
+	NegotiatedVersion  uint16
+	Random             [32]byte
+	SessionID          []byte
+	CipherSuites       []uint16
+	CompressionMethods []uint8
+	Extensions         []uint16
+	SNI                string
+	ALPNs              []string
+	SupportedVersions  []uint16
+	SignatureSchemes   []uint16
+	SupportedGroups    []uint16
+	JA4                string
+	Anomalies          TLSAnomalies
+}
+
+// TLSServerHello contains the parsed fields and JA4S fingerprint of a TLS
+// ServerHello handshake message.
+type TLSServerHello struct {
+	RecordVersion     uint16
+	HandshakeVersion  uint16
+	NegotiatedVersion uint16
+	Random            [32]byte
+	SessionID         []byte
+	CipherSuite       uint16
+	CompressionMethod uint8
+	Extensions        []uint16
+	ALPN              string
+	SupportedVersion  uint16
+	JA4S              string
+	Anomalies         TLSAnomalies
+}
+
+// TLSCertificate contains metadata and the JA4X structural fingerprint of a
+// parsed X.509 certificate from a TLS Certificate handshake message.
+type TLSCertificate struct {
+	Version    int
+	Serial     string
+	Subject    string
+	Issuer     string
+	NotBefore  int64
+	NotAfter   int64
+	DNSNames   []string
+	SelfSigned bool
+	JA4X       string
+	RawDER     []byte
+}
+
+// TLSHandshake aggregates the ClientHello, ServerHello, and X.509 certificates
+// decoded from a TLS record stream.
+type TLSHandshake struct {
+	HasClientHello bool
+	HasServerHello bool
+	ClientHello    TLSClientHello
+	ServerHello    TLSServerHello
+	Certificates   []TLSCertificate
+	Anomalies      TLSAnomalies
+}
+
+// TLSRecord associates a parsed [TLSHandshake] with its 5-tuple flow metadata
+// in a [Capture].
+type TLSRecord struct {
+	FlowIndex int
+	SrcAddr   netip.Addr
+	DstAddr   netip.Addr
+	SrcPort   uint16
+	DstPort   uint16
+	Handshake TLSHandshake
+}
+
+// IsGREASE reports whether v is a RFC 8701 TLS GREASE value ((v & 0x0f0f) == 0x0a0a
+// where high and low bytes are equal).
+func IsGREASE(v uint16) bool {
+	return (v&0x0f0f) == 0x0a0a && (v>>8) == (v&0xff)
+}
+
+// ParseTLSRecords parses one or more TLS handshake records from stream (such as
+// a TCP payload or reassembled directional TCP stream) and extracts ClientHello,
+// ServerHello, Certificate chains, JA4, JA4S, and JA4X fingerprints.
+func ParseTLSRecords(stream []byte) (TLSHandshake, error) {
+	if len(stream) < 5 {
+		return TLSHandshake{}, fmt.Errorf("%w: buffer shorter than 5-byte TLS record header", ErrInvalidTLS)
+	}
+	if stream[0] != TLSRecordHandshake {
+		return TLSHandshake{}, fmt.Errorf("%w: record content type %d is not Handshake (22)", ErrInvalidTLS, stream[0])
+	}
+
+	var hsBuf bytes.Buffer
+	var firstRecordVersion uint16
+	var out TLSHandshake
+	offset := 0
+
+	for offset+5 <= len(stream) {
+		contentType := stream[offset]
+		recVer := binary.BigEndian.Uint16(stream[offset+1 : offset+3])
+		if recVer < TLSVersionSSL30 || recVer > TLSVersion13 {
+			if offset == 0 {
+				return TLSHandshake{}, fmt.Errorf("%w: unsupported TLS record version %#04x", ErrInvalidTLS, recVer)
+			}
+			break
+		}
+		recLen := int(binary.BigEndian.Uint16(stream[offset+3 : offset+5]))
+		if recLen > MaxTLSRecordBytes {
+			if offset == 0 {
+				return TLSHandshake{}, fmt.Errorf("%w: TLS record length %d exceeds %d", ErrTLSLimit, recLen, MaxTLSRecordBytes)
+			}
+			break
+		}
+		if firstRecordVersion == 0 {
+			firstRecordVersion = recVer
+		}
+		bodyStart := offset + 5
+		bodyEnd := bodyStart + recLen
+		if bodyEnd > len(stream) {
+			out.Anomalies.TruncatedRecord = true
+			bodyEnd = len(stream)
+		}
+		if contentType == TLSRecordHandshake {
+			if hsBuf.Len()+(bodyEnd-bodyStart) > MaxTLSHandshakeBytes {
+				return TLSHandshake{}, fmt.Errorf("%w: coalesced TLS handshake exceeds %d bytes", ErrTLSLimit, MaxTLSHandshakeBytes)
+			}
+			hsBuf.Write(stream[bodyStart:bodyEnd])
+		}
+		offset = bodyEnd
+		if out.Anomalies.TruncatedRecord {
+			break
+		}
+	}
+
+	hsData := hsBuf.Bytes()
+	if len(hsData) < 4 {
+		return TLSHandshake{}, fmt.Errorf("%w: TLS handshake payload shorter than 4 bytes", ErrInvalidTLS)
+	}
+
+	hsOffset := 0
+	parsedAny := false
+	for hsOffset+4 <= len(hsData) {
+		msgType := hsData[hsOffset]
+		msgLen := int(hsData[hsOffset+1])<<16 | int(hsData[hsOffset+2])<<8 | int(hsData[hsOffset+3])
+		if msgLen > MaxTLSHandshakeBytes {
+			return TLSHandshake{}, fmt.Errorf("%w: handshake message length %d exceeds %d", ErrTLSLimit, msgLen, MaxTLSHandshakeBytes)
+		}
+		msgStart := hsOffset + 4
+		msgEnd := msgStart + msgLen
+		if msgEnd > len(hsData) {
+			out.Anomalies.TruncatedRecord = true
+			break
+		}
+		body := hsData[msgStart:msgEnd]
+
+		switch msgType {
+		case TLSHandshakeClientHello:
+			if !out.HasClientHello {
+				ch, err := parseTLSClientHelloWithRecordVersion(body, firstRecordVersion, false)
+				if err != nil {
+					if !parsedAny {
+						return TLSHandshake{}, err
+					}
+					break
+				}
+				out.ClientHello = ch
+				out.HasClientHello = true
+				out.Anomalies = mergeTLSAnomalies(out.Anomalies, ch.Anomalies)
+				parsedAny = true
+			}
+		case TLSHandshakeServerHello:
+			if !out.HasServerHello {
+				sh, err := parseTLSServerHelloWithRecordVersion(body, firstRecordVersion, false)
+				if err != nil {
+					if !parsedAny {
+						return TLSHandshake{}, err
+					}
+					break
+				}
+				out.ServerHello = sh
+				out.HasServerHello = true
+				out.Anomalies = mergeTLSAnomalies(out.Anomalies, sh.Anomalies)
+				parsedAny = true
+			}
+		case TLSHandshakeCertificate:
+			if len(out.Certificates) == 0 {
+				certs, certAnom, err := parseTLSCertificateBody(body)
+				if err == nil && len(certs) > 0 {
+					out.Certificates = certs
+					out.Anomalies = mergeTLSAnomalies(out.Anomalies, certAnom)
+					parsedAny = true
+				}
+			}
+		}
+
+		hsOffset = msgEnd
+	}
+
+	if !parsedAny {
+		return TLSHandshake{}, fmt.Errorf("%w: no complete TLS handshake message found", ErrInvalidTLS)
+	}
+	return out, nil
+}
+
+// ParseTLSClientHello parses a raw TLS ClientHello handshake body (excluding the
+// 4-byte handshake header and 5-byte TLS record header) and computes its JA4
+// fingerprint assuming TCP transport ('t').
+func ParseTLSClientHello(body []byte) (TLSClientHello, error) {
+	return parseTLSClientHelloWithRecordVersion(body, TLSVersion12, false)
+}
+
+func parseTLSClientHelloWithRecordVersion(body []byte, recordVer uint16, isQUIC bool) (TLSClientHello, error) {
+	if len(body) < 38 {
+		return TLSClientHello{}, fmt.Errorf("%w: ClientHello body shorter than 38 bytes", ErrInvalidTLS)
+	}
+	hsVer := binary.BigEndian.Uint16(body[0:2])
+	ch := TLSClientHello{
+		RecordVersion:     recordVer,
+		HandshakeVersion:  hsVer,
+		NegotiatedVersion: hsVer,
+	}
+	copy(ch.Random[:], body[2:34])
+
+	offset := 34
+	sidLen := int(body[offset])
+	offset++
+	if sidLen > 32 || offset+sidLen > len(body) {
+		return TLSClientHello{}, fmt.Errorf("%w: invalid ClientHello session ID length %d", ErrInvalidTLS, sidLen)
+	}
+	ch.SessionID = bytes.Clone(body[offset : offset+sidLen])
+	offset += sidLen
+
+	if offset+2 > len(body) {
+		return TLSClientHello{}, fmt.Errorf("%w: truncated ClientHello cipher suites length", ErrInvalidTLS)
+	}
+	csBytesLen := int(binary.BigEndian.Uint16(body[offset : offset+2]))
+	offset += 2
+	if csBytesLen == 0 || csBytesLen%2 != 0 || offset+csBytesLen > len(body) {
+		return TLSClientHello{}, fmt.Errorf("%w: invalid ClientHello cipher suites byte length %d", ErrInvalidTLS, csBytesLen)
+	}
+	csCount := csBytesLen / 2
+	if csCount > MaxTLSCipherSuites {
+		return TLSClientHello{}, fmt.Errorf("%w: cipher suite count %d exceeds %d", ErrTLSLimit, csCount, MaxTLSCipherSuites)
+	}
+	ch.CipherSuites = make([]uint16, csCount)
+	for i := range csCount {
+		ch.CipherSuites[i] = binary.BigEndian.Uint16(body[offset+i*2 : offset+i*2+2])
+	}
+	offset += csBytesLen
+
+	if offset+1 > len(body) {
+		return TLSClientHello{}, fmt.Errorf("%w: truncated ClientHello compression methods", ErrInvalidTLS)
+	}
+	compLen := int(body[offset])
+	offset++
+	if compLen == 0 || offset+compLen > len(body) {
+		return TLSClientHello{}, fmt.Errorf("%w: invalid ClientHello compression methods length %d", ErrInvalidTLS, compLen)
+	}
+	ch.CompressionMethods = bytes.Clone(body[offset : offset+compLen])
+	offset += compLen
+
+	if offset+2 <= len(body) {
+		extTotalLen := int(binary.BigEndian.Uint16(body[offset : offset+2]))
+		offset += 2
+		if offset+extTotalLen > len(body) {
+			return TLSClientHello{}, fmt.Errorf("%w: ClientHello extensions length %d exceeds body", ErrInvalidTLS, extTotalLen)
+		}
+		extEnd := offset + extTotalLen
+		var seenNonGREASE [MaxTLSExtensions]uint16
+		seenCount := 0
+
+		for offset < extEnd {
+			if extEnd-offset < 4 {
+				return TLSClientHello{}, fmt.Errorf("%w: truncated ClientHello extension header", ErrInvalidTLS)
+			}
+			if len(ch.Extensions) >= MaxTLSExtensions {
+				return TLSClientHello{}, fmt.Errorf("%w: extension count exceeds %d", ErrTLSLimit, MaxTLSExtensions)
+			}
+			extType := binary.BigEndian.Uint16(body[offset : offset+2])
+			extLen := int(binary.BigEndian.Uint16(body[offset+2 : offset+4]))
+			offset += 4
+			if offset+extLen > extEnd {
+				return TLSClientHello{}, fmt.Errorf("%w: extension %#04x length %d exceeds extensions block", ErrInvalidTLS, extType, extLen)
+			}
+			extData := body[offset : offset+extLen]
+			offset += extLen
+
+			ch.Extensions = append(ch.Extensions, extType)
+			if !IsGREASE(extType) {
+				if slices.Contains(seenNonGREASE[:seenCount], extType) {
+					ch.Anomalies.DuplicateExtension = true
+				} else if seenCount < len(seenNonGREASE) {
+					seenNonGREASE[seenCount] = extType
+					seenCount++
+				}
+			}
+
+			switch extType {
+			case TLSExtServerName:
+				parseSNIExtension(extData, &ch)
+			case TLSExtALPN:
+				parseALPNExtension(extData, &ch, isQUIC)
+			case TLSExtSupportedVersions:
+				parseClientSupportedVersions(extData, &ch)
+			case TLSExtSignatureAlgorithms:
+				parseSignatureAlgorithms(extData, &ch)
+			case TLSExtSupportedGroups:
+				parseSupportedGroups(extData, &ch)
+			}
+		}
+	}
+
+	ch.JA4 = computeJA4(&ch, isQUIC)
+	return ch, nil
+}
+
+func parseSNIExtension(extData []byte, ch *TLSClientHello) {
+	if len(extData) < 2 {
+		ch.Anomalies.EmptySNI = true
+		return
+	}
+	listLen := int(binary.BigEndian.Uint16(extData[0:2]))
+	if 2+listLen > len(extData) {
+		return
+	}
+	cur := 2
+	end := 2 + listLen
+	for cur+3 <= end {
+		nameType := extData[cur]
+		nameLen := int(binary.BigEndian.Uint16(extData[cur+1 : cur+3]))
+		cur += 3
+		if cur+nameLen > end {
+			return
+		}
+		if nameType == 0 {
+			if nameLen == 0 {
+				ch.Anomalies.EmptySNI = true
+			} else {
+				ch.SNI = string(extData[cur : cur+nameLen])
+				if _, err := netip.ParseAddr(ch.SNI); err == nil {
+					ch.Anomalies.SNIIPLiteral = true
+				}
+			}
+			return
+		}
+		cur += nameLen
+	}
+}
+
+func parseALPNExtension(extData []byte, ch *TLSClientHello, isQUIC bool) {
+	if len(extData) < 2 {
+		return
+	}
+	listLen := int(binary.BigEndian.Uint16(extData[0:2]))
+	if 2+listLen > len(extData) {
+		return
+	}
+	cur := 2
+	end := 2 + listLen
+	for cur < end && len(ch.ALPNs) < MaxTLSALPNProtocols {
+		pLen := int(extData[cur])
+		cur++
+		if pLen == 0 || cur+pLen > end {
+			break
+		}
+		proto := string(extData[cur : cur+pLen])
+		ch.ALPNs = append(ch.ALPNs, proto)
+		if !isQUIC && (proto == "h3" || strings.HasPrefix(proto, "h3-")) {
+			ch.Anomalies.ALPNTransportMismatch = true
+		}
+		cur += pLen
+	}
+}
+
+func parseClientSupportedVersions(extData []byte, ch *TLSClientHello) {
+	if len(extData) < 1 {
+		return
+	}
+	listLen := int(extData[0])
+	if listLen%2 != 0 || 1+listLen > len(extData) {
+		return
+	}
+	count := listLen / 2
+	var maxVer uint16
+	for i := range count {
+		v := binary.BigEndian.Uint16(extData[1+i*2 : 1+i*2+2])
+		ch.SupportedVersions = append(ch.SupportedVersions, v)
+		if !IsGREASE(v) && v > maxVer {
+			maxVer = v
+		}
+	}
+	if maxVer != 0 {
+		ch.NegotiatedVersion = maxVer
+	}
+}
+
+func parseSignatureAlgorithms(extData []byte, ch *TLSClientHello) {
+	if len(extData) < 2 {
+		return
+	}
+	listLen := int(binary.BigEndian.Uint16(extData[0:2]))
+	if listLen%2 != 0 || 2+listLen > len(extData) {
+		return
+	}
+	count := min(listLen/2, MaxTLSSignatureSchemes)
+	for i := range count {
+		sig := binary.BigEndian.Uint16(extData[2+i*2 : 2+i*2+2])
+		ch.SignatureSchemes = append(ch.SignatureSchemes, sig)
+	}
+}
+
+func parseSupportedGroups(extData []byte, ch *TLSClientHello) {
+	if len(extData) < 2 {
+		return
+	}
+	listLen := int(binary.BigEndian.Uint16(extData[0:2]))
+	if listLen%2 != 0 || 2+listLen > len(extData) {
+		return
+	}
+	count := min(listLen/2, MaxTLSExtensions)
+	for i := range count {
+		grp := binary.BigEndian.Uint16(extData[2+i*2 : 2+i*2+2])
+		ch.SupportedGroups = append(ch.SupportedGroups, grp)
+	}
+}
+
+// ParseTLSServerHello parses a raw TLS ServerHello handshake body (excluding the
+// 4-byte handshake header and 5-byte TLS record header) and computes its JA4S
+// fingerprint assuming TCP transport ('t').
+func ParseTLSServerHello(body []byte) (TLSServerHello, error) {
+	return parseTLSServerHelloWithRecordVersion(body, TLSVersion12, false)
+}
+
+func parseTLSServerHelloWithRecordVersion(body []byte, recordVer uint16, isQUIC bool) (TLSServerHello, error) {
+	if len(body) < 38 {
+		return TLSServerHello{}, fmt.Errorf("%w: ServerHello body shorter than 38 bytes", ErrInvalidTLS)
+	}
+	hsVer := binary.BigEndian.Uint16(body[0:2])
+	sh := TLSServerHello{
+		RecordVersion:     recordVer,
+		HandshakeVersion:  hsVer,
+		NegotiatedVersion: hsVer,
+	}
+	copy(sh.Random[:], body[2:34])
+
+	offset := 34
+	sidLen := int(body[offset])
+	offset++
+	if sidLen > 32 || offset+sidLen > len(body) {
+		return TLSServerHello{}, fmt.Errorf("%w: invalid ServerHello session ID length %d", ErrInvalidTLS, sidLen)
+	}
+	sh.SessionID = bytes.Clone(body[offset : offset+sidLen])
+	offset += sidLen
+
+	if offset+3 > len(body) {
+		return TLSServerHello{}, fmt.Errorf("%w: truncated ServerHello cipher suite or compression", ErrInvalidTLS)
+	}
+	sh.CipherSuite = binary.BigEndian.Uint16(body[offset : offset+2])
+	sh.CompressionMethod = body[offset+2]
+	offset += 3
+
+	if offset+2 <= len(body) {
+		extTotalLen := int(binary.BigEndian.Uint16(body[offset : offset+2]))
+		offset += 2
+		if offset+extTotalLen > len(body) {
+			return TLSServerHello{}, fmt.Errorf("%w: ServerHello extensions length %d exceeds body", ErrInvalidTLS, extTotalLen)
+		}
+		extEnd := offset + extTotalLen
+		for offset < extEnd {
+			if extEnd-offset < 4 {
+				return TLSServerHello{}, fmt.Errorf("%w: truncated ServerHello extension header", ErrInvalidTLS)
+			}
+			if len(sh.Extensions) >= MaxTLSExtensions {
+				return TLSServerHello{}, fmt.Errorf("%w: extension count exceeds %d", ErrTLSLimit, MaxTLSExtensions)
+			}
+			extType := binary.BigEndian.Uint16(body[offset : offset+2])
+			extLen := int(binary.BigEndian.Uint16(body[offset+2 : offset+4]))
+			offset += 4
+			if offset+extLen > extEnd {
+				return TLSServerHello{}, fmt.Errorf("%w: ServerHello extension %#04x exceeds block", ErrInvalidTLS, extType)
+			}
+			extData := body[offset : offset+extLen]
+			offset += extLen
+
+			sh.Extensions = append(sh.Extensions, extType)
+			switch extType {
+			case TLSExtSupportedVersions:
+				if len(extData) == 2 {
+					v := binary.BigEndian.Uint16(extData[0:2])
+					sh.SupportedVersion = v
+					sh.NegotiatedVersion = v
+				}
+			case TLSExtALPN:
+				if len(extData) >= 4 {
+					listLen := int(binary.BigEndian.Uint16(extData[0:2]))
+					pLen := int(extData[2])
+					if 2+listLen <= len(extData) && 3+pLen <= len(extData) && pLen > 0 {
+						sh.ALPN = string(extData[3 : 3+pLen])
+					}
+				}
+			}
+		}
+	}
+
+	sh.JA4S = computeJA4S(&sh, isQUIC)
+	return sh, nil
+}
+
+func ja4VersionCode(v uint16) string {
+	switch v {
+	case TLSVersion13:
+		return "13"
+	case TLSVersion12:
+		return "12"
+	case TLSVersion11:
+		return "11"
+	case TLSVersion10:
+		return "10"
+	case TLSVersionSSL30:
+		return "s3"
+	default:
+		return "00"
+	}
+}
+
+func ja4ALPNCode(alpn string) [2]byte {
+	if len(alpn) == 0 {
+		return [2]byte{'0', '0'}
+	}
+	first := alpn[0]
+	last := alpn[len(alpn)-1]
+	if !isASCIIAlphaNum(first) || !isASCIIAlphaNum(last) {
+		var hexPair [2]byte
+		hex.Encode(hexPair[:], []byte{first})
+		if len(alpn) > 1 {
+			var lastHex [2]byte
+			hex.Encode(lastHex[:], []byte{last})
+			hexPair[1] = lastHex[1]
+		}
+		return hexPair
+	}
+	return [2]byte{first, last}
+}
+
+func isASCIIAlphaNum(b byte) bool {
+	return (b >= '0' && b <= '9') || (b >= 'A' && b <= 'Z') || (b >= 'a' && b <= 'z')
+}
+
+func appendTwoDigits(dst []byte, n int) []byte {
+	if n > 99 {
+		n = 99
+	}
+	return append(dst, byte('0'+n/10), byte('0'+n%10))
+}
+
+func appendHex16(dst []byte, v uint16) []byte {
+	const hexDigits = "0123456789abcdef"
+	return append(dst,
+		hexDigits[(v>>12)&0x0f],
+		hexDigits[(v>>8)&0x0f],
+		hexDigits[(v>>4)&0x0f],
+		hexDigits[v&0x0f],
+	)
+}
+
+func appendTruncSHA256Hex12(dst []byte, b []byte) []byte {
+	if len(b) == 0 {
+		return append(dst, "000000000000"...)
+	}
+	sum := sha256.Sum256(b)
+	var hexBuf [12]byte
+	hex.Encode(hexBuf[:], sum[:6])
+	return append(dst, hexBuf[:]...)
+}
+
+func truncSHA256Hex12(b []byte) string {
+	var out [12]byte
+	return string(appendTruncSHA256Hex12(out[:0], b))
+}
+
+func computeJA4(ch *TLSClientHello, isQUIC bool) string {
+	// Filter non-GREASE ciphers and extensions using stack backing arrays.
+	var ciphersBacking [64]uint16
+	ciphers := ciphersBacking[:0]
+	for _, c := range ch.CipherSuites {
+		if !IsGREASE(c) {
+			ciphers = append(ciphers, c)
+		}
+	}
+
+	var extCount int
+	var extsBacking [64]uint16
+	hashExts := extsBacking[:0]
+	for _, e := range ch.Extensions {
+		if IsGREASE(e) {
+			continue
+		}
+		extCount++
+		if e != TLSExtServerName && e != TLSExtALPN {
+			hashExts = append(hashExts, e)
+		}
+	}
+
+	// Part a (10 chars): [t|q][version][d|i][ciphers:2][exts:2][alpn:2]
+	var out [36]byte
+	b := out[:0]
+	if isQUIC {
+		b = append(b, 'q')
+	} else {
+		b = append(b, 't')
+	}
+	b = append(b, ja4VersionCode(ch.NegotiatedVersion)...)
+	if ch.SNI != "" && !ch.Anomalies.SNIIPLiteral {
+		b = append(b, 'd')
+	} else {
+		b = append(b, 'i')
+	}
+	b = appendTwoDigits(b, len(ciphers))
+	b = appendTwoDigits(b, extCount)
+	var firstALPN string
+	if len(ch.ALPNs) > 0 {
+		firstALPN = ch.ALPNs[0]
+	}
+	alpnChars := ja4ALPNCode(firstALPN)
+	b = append(b, alpnChars[0], alpnChars[1], '_')
+
+	// Part b: sorted non-GREASE ciphers hash (12 chars).
+	if len(ciphers) == 0 {
+		b = append(b, "000000000000"...)
+	} else {
+		slices.Sort(ciphers)
+		var csBacking [256]byte
+		csBuf := csBacking[:0]
+		for i, c := range ciphers {
+			if i > 0 {
+				csBuf = append(csBuf, ',')
+			}
+			csBuf = appendHex16(csBuf, c)
+		}
+		b = appendTruncSHA256Hex12(b, csBuf)
+	}
+	b = append(b, '_')
+
+	// Part c: sorted non-GREASE extensions (excluding SNI & ALPN) + "_" + original-order signature schemes.
+	if len(hashExts) == 0 {
+		b = append(b, "000000000000"...)
+	} else {
+		slices.Sort(hashExts)
+		var extBacking [512]byte
+		extBuf := extBacking[:0]
+		for i, e := range hashExts {
+			if i > 0 {
+				extBuf = append(extBuf, ',')
+			}
+			extBuf = appendHex16(extBuf, e)
+		}
+		// Append non-GREASE signature algorithms in wire order.
+		firstSig := true
+		for _, sig := range ch.SignatureSchemes {
+			if IsGREASE(sig) {
+				continue
+			}
+			if firstSig {
+				extBuf = append(extBuf, '_')
+				firstSig = false
+			} else {
+				extBuf = append(extBuf, ',')
+			}
+			extBuf = appendHex16(extBuf, sig)
+		}
+		b = appendTruncSHA256Hex12(b, extBuf)
+	}
+
+	return string(b)
+}
+
+func computeJA4S(sh *TLSServerHello, isQUIC bool) string {
+	var out [32]byte
+	b := out[:0]
+	if isQUIC {
+		b = append(b, 'q')
+	} else {
+		b = append(b, 't')
+	}
+	b = append(b, ja4VersionCode(sh.NegotiatedVersion)...)
+	b = appendTwoDigits(b, len(sh.Extensions))
+	alpnChars := ja4ALPNCode(sh.ALPN)
+	b = append(b, alpnChars[0], alpnChars[1], '_')
+	b = appendHex16(b, sh.CipherSuite)
+	b = append(b, '_')
+
+	if len(sh.Extensions) == 0 {
+		b = append(b, "000000000000"...)
+	} else {
+		var extBacking [256]byte
+		extBuf := extBacking[:0]
+		for i, e := range sh.Extensions {
+			if i > 0 {
+				extBuf = append(extBuf, ',')
+			}
+			extBuf = appendHex16(extBuf, e)
+		}
+		b = appendTruncSHA256Hex12(b, extBuf)
+	}
+	return string(b)
+}
+
+func parseTLSCertificateBody(body []byte) ([]TLSCertificate, TLSAnomalies, error) {
+	var anomalies TLSAnomalies
+	if len(body) < 3 {
+		return nil, anomalies, fmt.Errorf("%w: Certificate handshake body too short", ErrInvalidTLS)
+	}
+	listLen := int(body[0])<<16 | int(body[1])<<8 | int(body[2])
+	offset := 3
+	if offset+listLen > len(body) {
+		anomalies.TruncatedRecord = true
+		listLen = len(body) - offset
+	}
+	end := offset + listLen
+
+	var certs []TLSCertificate
+	for offset+3 <= end && len(certs) < MaxTLSCertificates {
+		certLen := int(body[offset])<<16 | int(body[offset+1])<<8 | int(body[offset+2])
+		offset += 3
+		if certLen <= 0 || offset+certLen > end {
+			anomalies.TruncatedRecord = true
+			break
+		}
+		der := bytes.Clone(body[offset : offset+certLen])
+		offset += certLen
+
+		parsed, err := x509.ParseCertificate(der)
+		if err != nil {
+			anomalies.InvalidCertificateDER = true
+			continue
+		}
+		selfSigned := bytes.Equal(parsed.RawIssuer, parsed.RawSubject)
+		if len(certs) == 0 && selfSigned {
+			anomalies.SelfSignedCertificate = true
+		}
+		ja4x := JA4XFromCert(parsed)
+		var serialHex string
+		if parsed.SerialNumber != nil {
+			serialHex = hex.EncodeToString(parsed.SerialNumber.Bytes())
+		}
+		certs = append(certs, TLSCertificate{
+			Version:    parsed.Version,
+			Serial:     serialHex,
+			Subject:    parsed.Subject.String(),
+			Issuer:     parsed.Issuer.String(),
+			NotBefore:  parsed.NotBefore.Unix(),
+			NotAfter:   parsed.NotAfter.Unix(),
+			DNSNames:   slices.Clone(parsed.DNSNames),
+			SelfSigned: selfSigned,
+			JA4X:       ja4x,
+			RawDER:     der,
+		})
+	}
+
+	return certs, anomalies, nil
+}
+
+// JA4XFromDER parses a DER-encoded X.509 certificate and returns its FoxIO JA4X
+// structural fingerprint (<issuer_rdn_hash>_<subject_rdn_hash>_<extension_oid_hash>).
+func JA4XFromDER(der []byte) (string, error) {
+	cert, err := x509.ParseCertificate(der)
+	if err != nil {
+		return "", fmt.Errorf("%w: %w", ErrInvalidTLS, err)
+	}
+	return JA4XFromCert(cert), nil
+}
+
+// JA4XFromCert computes the FoxIO JA4X fingerprint for an already-parsed
+// [x509.Certificate].
+func JA4XFromCert(cert *x509.Certificate) string {
+	if cert == nil {
+		return "000000000000_000000000000_000000000000"
+	}
+	issuerOIDs := extractRDNOIDHexList(cert.RawIssuer)
+	subjectOIDs := extractRDNOIDHexList(cert.RawSubject)
+
+	var extOIDs []byte
+	for i, ext := range cert.Extensions {
+		rawOID, err := asn1.Marshal(ext.Id)
+		if err != nil || len(rawOID) < 3 || rawOID[0] != 0x06 {
+			continue
+		}
+		oidContent := rawOID[2:]
+		if i > 0 && len(extOIDs) > 0 {
+			extOIDs = append(extOIDs, ',')
+		}
+		extOIDs = appendHexBytes(extOIDs, oidContent)
+	}
+
+	return truncSHA256Hex12(issuerOIDs) + "_" + truncSHA256Hex12(subjectOIDs) + "_" + truncSHA256Hex12(extOIDs)
+}
+
+func extractRDNOIDHexList(rawRDNSeq []byte) []byte {
+	var seq asn1.RawValue
+	if _, err := asn1.Unmarshal(rawRDNSeq, &seq); err != nil {
+		return nil
+	}
+	rest := seq.Bytes
+	var out []byte
+	for len(rest) > 0 {
+		var rdnSet asn1.RawValue
+		var err error
+		rest, err = asn1.Unmarshal(rest, &rdnSet)
+		if err != nil {
+			break
+		}
+		setBytes := rdnSet.Bytes
+		for len(setBytes) > 0 {
+			var atv asn1.RawValue
+			setBytes, err = asn1.Unmarshal(setBytes, &atv)
+			if err != nil {
+				break
+			}
+			var oidRaw asn1.RawValue
+			if _, err := asn1.Unmarshal(atv.Bytes, &oidRaw); err != nil || oidRaw.Tag != asn1.TagOID {
+				continue
+			}
+			if len(out) > 0 {
+				out = append(out, ',')
+			}
+			out = appendHexBytes(out, oidRaw.Bytes)
+		}
+	}
+	return out
+}
+
+func appendHexBytes(dst []byte, src []byte) []byte {
+	const hexDigits = "0123456789abcdef"
+	for _, b := range src {
+		dst = append(dst, hexDigits[b>>4], hexDigits[b&0x0f])
+	}
+	return dst
+}
+
+func mergeTLSAnomalies(a, b TLSAnomalies) TLSAnomalies {
+	return TLSAnomalies{
+		TruncatedRecord:       a.TruncatedRecord || b.TruncatedRecord,
+		SNIIPLiteral:          a.SNIIPLiteral || b.SNIIPLiteral,
+		EmptySNI:              a.EmptySNI || b.EmptySNI,
+		DuplicateExtension:    a.DuplicateExtension || b.DuplicateExtension,
+		ALPNTransportMismatch: a.ALPNTransportMismatch || b.ALPNTransportMismatch,
+		SelfSignedCertificate: a.SelfSignedCertificate || b.SelfSignedCertificate,
+		InvalidCertificateDER: a.InvalidCertificateDER || b.InvalidCertificateDER,
+	}
+}
+
+// TLS extracts TLS handshakes (ClientHello, ServerHello, X.509 certificates,
+// JA4, JA4S, and JA4X) across all reassembled TCP streams in the capture.
+func (c *Capture) TLS(data []byte) ([]TLSRecord, error) {
+	streams, err := c.Streams(data)
+	if err != nil {
+		return nil, err
+	}
+	if len(streams) == 0 {
+		return nil, nil
+	}
+
+	var records []TLSRecord
+	for i := range streams {
+		st := &streams[i]
+		var merged TLSHandshake
+		var found bool
+
+		if tlsOff := findTLSHandshakeStart(st.Client.Data); tlsOff >= 0 {
+			if hs, err := ParseTLSRecords(st.Client.Data[tlsOff:]); err == nil && hs.HasClientHello {
+				merged.ClientHello = hs.ClientHello
+				merged.HasClientHello = true
+				merged.Anomalies = mergeTLSAnomalies(merged.Anomalies, hs.Anomalies)
+				if len(hs.Certificates) > 0 {
+					merged.Certificates = hs.Certificates
+				}
+				found = true
+			}
+		}
+
+		if tlsOff := findTLSHandshakeStart(st.Server.Data); tlsOff >= 0 {
+			if hs, err := ParseTLSRecords(st.Server.Data[tlsOff:]); err == nil {
+				if hs.HasServerHello {
+					merged.ServerHello = hs.ServerHello
+					merged.HasServerHello = true
+					found = true
+				}
+				if len(hs.Certificates) > 0 {
+					merged.Certificates = hs.Certificates
+					found = true
+				}
+				merged.Anomalies = mergeTLSAnomalies(merged.Anomalies, hs.Anomalies)
+			}
+		}
+
+		if found {
+			if len(records) >= MaxTLSHandshakesPerScan {
+				return nil, fmt.Errorf("%w: exceeds %d TLS handshakes", ErrTLSLimit, MaxTLSHandshakesPerScan)
+			}
+			records = append(records, TLSRecord{
+				FlowIndex: st.FlowIndex,
+				SrcAddr:   st.SrcAddr,
+				DstAddr:   st.DstAddr,
+				SrcPort:   st.SrcPort,
+				DstPort:   st.DstPort,
+				Handshake: merged,
+			})
+		}
+	}
+
+	return records, nil
+}
+
+func findTLSHandshakeStart(buf []byte) int {
+	if len(buf) < 6 {
+		return -1
+	}
+	// Check offset 0 first (standard TLS over TCP).
+	if isValidTLSHandshakeHeader(buf) {
+		return 0
+	}
+	return -1
+}
+
+func isValidTLSHandshakeHeader(buf []byte) bool {
+	if len(buf) < 6 || buf[0] != TLSRecordHandshake || buf[1] != 0x03 || buf[2] > 0x04 {
+		return false
+	}
+	hsType := buf[5]
+	return hsType == TLSHandshakeClientHello || hsType == TLSHandshakeServerHello || hsType == TLSHandshakeCertificate
+}
+
+// HasTLSJA4 reports whether any TLS ClientHello in the capture matches the
+// supplied JA4 fingerprint string.
+func (c *Capture) HasTLSJA4(data []byte, ja4 string) (bool, error) {
+	records, err := c.TLS(data)
+	if err != nil {
+		return false, err
+	}
+	for i := range records {
+		if records[i].Handshake.HasClientHello && records[i].Handshake.ClientHello.JA4 == ja4 {
+			return true, nil
+		}
+	}
+	return false, nil
+}
+
+// HasTLSSNI reports whether any TLS ClientHello in the capture matches sni
+// (case-insensitive ASCII comparison).
+func (c *Capture) HasTLSSNI(data []byte, sni string) (bool, error) {
+	records, err := c.TLS(data)
+	if err != nil {
+		return false, err
+	}
+	for i := range records {
+		if records[i].Handshake.HasClientHello && strings.EqualFold(records[i].Handshake.ClientHello.SNI, sni) {
+			return true, nil
+		}
+	}
+	return false, nil
+}
+
+// Unused helper imports check.
+var (
+	_ = cmp.Compare[int]
+	_ = strconv.Itoa
+)
