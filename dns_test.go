@@ -133,6 +133,15 @@ func TestDNSCompressionLoopsForwardPointersAndLimits(t *testing.T) {
 		t.Fatalf("ParseDNS(forward compression pointer) err = %v, want ErrInvalidDNS", err)
 	}
 
+	// Compression pointer into the 12-byte DNS header must be rejected.
+	var hdrPtrPkt [18]byte
+	binary.BigEndian.PutUint16(hdrPtrPkt[4:6], 1)
+	hdrPtrPkt[12] = 0xc0
+	hdrPtrPkt[13] = 0x04
+	if _, err := ParseDNS(hdrPtrPkt[:]); !errors.Is(err, ErrInvalidDNS) {
+		t.Fatalf("ParseDNS(header compression pointer) err = %v, want ErrInvalidDNS", err)
+	}
+
 	var longName bytes.Buffer
 	var hdr [12]byte
 	binary.BigEndian.PutUint16(hdr[4:6], 1)
@@ -203,5 +212,62 @@ func TestDNSAnswerTXTStrings(t *testing.T) {
 		if !slices.Equal(got.Answers[0].TXT, want) || got.Anomalies.InvalidRDataLength != bad {
 			t.Fatalf("TXT answer: %+v, anomalies %+v", got.Answers[0], got.Anomalies)
 		}
+	}
+}
+
+func TestDNSTCPReassemblyAndDomainStatsNoDoubleCount(t *testing.T) {
+	// Two-label name entropy matches docstring (computed over entire name).
+	if ent := DNSLabelEntropy("ab.cd"); ent <= 0 {
+		t.Fatalf("DNSLabelEntropy(ab.cd) = %v, want > 0", ent)
+	}
+
+	// Build a TCP DNS query + response pair split across multiple TCP segments.
+	var qBuf bytes.Buffer
+	var hdr [12]byte
+	binary.BigEndian.PutUint16(hdr[0:2], 0x1111)
+	binary.BigEndian.PutUint16(hdr[4:6], 1)
+	qBuf.Write(hdr[:])
+	qBuf.Write([]byte("\x02c2\x07example\x03com\x00"))
+	qBuf.Write([]byte{0, byte(DNSTypeA), 0, 1})
+	qMsg := qBuf.Bytes()
+	rMsg := buildDNSQueryResponsePacket()
+
+	tcpFrame := func(msg []byte) []byte {
+		out := make([]byte, 2+len(msg))
+		binary.BigEndian.PutUint16(out[0:2], uint16(len(msg)))
+		copy(out[2:], msg)
+		return out
+	}
+	cStream := tcpFrame(qMsg)
+	sStream := tcpFrame(rMsg)
+	cSplit := len(cStream) / 2
+	sSplit := len(sStream) / 2
+	frames := [][]byte{
+		buildEthernetIPv4TCPFrame([4]byte{10, 0, 0, 1}, [4]byte{8, 8, 8, 8}, 54000, 53, 1, 1, TCPFlagPSH|TCPFlagACK, cStream[:cSplit]),
+		buildEthernetIPv4TCPFrame([4]byte{10, 0, 0, 1}, [4]byte{8, 8, 8, 8}, 54000, 53, 1+uint32(cSplit), 1, TCPFlagPSH|TCPFlagACK, cStream[cSplit:]),
+		buildEthernetIPv4TCPFrame([4]byte{8, 8, 8, 8}, [4]byte{10, 0, 0, 1}, 53, 54000, 1, 1+uint32(len(cStream)), TCPFlagPSH|TCPFlagACK, sStream[:sSplit]),
+		buildEthernetIPv4TCPFrame([4]byte{8, 8, 8, 8}, [4]byte{10, 0, 0, 1}, 53, 54000, 1+uint32(sSplit), 1+uint32(len(cStream)), TCPFlagPSH|TCPFlagACK, sStream[sSplit:]),
+	}
+	raw := buildClassicPCAP(binary.LittleEndian, false, LinkTypeEthernet, 65535, frames)
+	c, err := New(raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	checkReaderParity(t, raw, c.DNS, c.DNSFromReaderAt)
+	recs, err := c.DNS(raw)
+	if err != nil || len(recs) != 2 {
+		t.Fatalf("DNS(multi-segment TCP) = (%d, %v), want 2", len(recs), err)
+	}
+	if has, err := c.HasDNSQuery(raw, "c2.example.com"); err != nil || !has {
+		t.Fatalf("HasDNSQuery(multi-segment TCP) = (%v, %v), want true", has, err)
+	}
+
+	// DNSDomainStats must not double-count echoed questions in responses.
+	stats, err := c.DNSDomainStats(raw)
+	if err != nil || len(stats) != 1 {
+		t.Fatalf("DNSDomainStats() = (%+v, %v)", stats, err)
+	}
+	if stats[0].QueryCount != 1 || stats[0].UniqueSubdomains != 1 {
+		t.Fatalf("DNSDomainStats[0] = %+v, want QueryCount=1 UniqueSubdomains=1", stats[0])
 	}
 }

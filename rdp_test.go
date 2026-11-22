@@ -92,4 +92,23 @@ func TestParseRDPNegotiationAndCaptureRDP(t *testing.T) {
 	if _, err := ParseRDPNegotiation([]byte{0x02, 0x00, 0x00}); !errors.Is(err, ErrInvalidRDP) {
 		t.Fatalf("ParseRDPNegotiation(short) err = %v, want ErrInvalidRDP", err)
 	}
+
+	// x224Len < 6 must be rejected.
+	badX224 := bytes.Clone(reqPDU)
+	badX224[4] = 5
+	if _, err := ParseRDPNegotiation(badX224); !errors.Is(err, ErrInvalidRDP) {
+		t.Fatalf("ParseRDPNegotiation(x224Len=5) err = %v, want ErrInvalidRDP", err)
+	}
+
+	// Non-RDP TPKT/X.224 (e.g. ISO-TSAP on port 102 without Cookie/RDP_NEG_*) must not be emitted by Capture.RDP.
+	isoTSAP := []byte{0x03, 0x00, 0x00, 0x0b, 0x06, x224CodeConnectionRequest, 0, 0, 0, 1, 0}
+	isoPkt := buildEthernetIPv4TCPFrame([4]byte{10, 0, 0, 1}, [4]byte{10, 0, 0, 2}, 50000, 102, 1, 1, TCPFlagPSH|TCPFlagACK, isoTSAP)
+	isoRaw := buildClassicPCAP(binary.LittleEndian, false, LinkTypeEthernet, 65535, [][]byte{isoPkt})
+	isoCap, err := New(isoRaw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, err := isoCap.RDP(isoRaw); err != nil || len(got) != 0 {
+		t.Fatalf("Capture.RDP(ISO-TSAP) = (%+v, %v), want empty", got, err)
+	}
 }

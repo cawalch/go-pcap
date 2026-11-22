@@ -467,7 +467,7 @@ func decodeDNSNameBounded(payload []byte, start int, limit int, allowCompression
 				anomalies.InvalidCompressionPtr = true
 				return "", 0, fmt.Errorf("%w: DNS label compression exceeds %d jumps", ErrDNSLimit, MaxDNSCompressionJumps)
 			}
-			if ptr >= cur || ptr >= len(payload) {
+			if ptr < 12 || ptr >= cur || ptr >= len(payload) {
 				anomalies.InvalidCompressionPtr = true
 				return "", 0, fmt.Errorf("%w: invalid DNS compression pointer %d at offset %d", ErrInvalidDNS, ptr, cur)
 			}
@@ -496,6 +496,7 @@ func scanDNS(source ipFrameSource) ([]DNSRecord, error) {
 	var table flowIndexTable
 	var defrag ipFragAccumulator
 	var records []DNSRecord
+	var hasTCPDNS bool
 
 	err := source.walk(func(pkt PacketRecord, frame Frame, l4 []byte) error {
 
@@ -565,30 +566,7 @@ func scanDNS(source ipFrameSource) ([]DNSRecord, error) {
 			})
 
 		case IPProtoTCP:
-			if len(l4) < 14 {
-				return nil
-			}
-			dnsLen := int(binary.BigEndian.Uint16(l4[0:2]))
-			if dnsLen < 12 || 2+dnsLen > len(l4) {
-				return nil
-			}
-			msg, err := ParseDNS(l4[2 : 2+dnsLen])
-			if err != nil {
-				return nil
-			}
-			if len(records) >= MaxDNSMessagesPerScan {
-				return fmt.Errorf("%w: exceeds %d messages", ErrDNSLimit, MaxDNSMessagesPerScan)
-			}
-			records = append(records, DNSRecord{
-				PacketIndex: pkt.Index,
-				FlowIndex:   flowIdx,
-				SrcAddr:     frame.SrcAddr,
-				DstAddr:     frame.DstAddr,
-				SrcPort:     frame.SrcPort,
-				DstPort:     frame.DstPort,
-				TimestampNs: pkt.TimestampNs,
-				Message:     msg,
-			})
+			hasTCPDNS = true
 		}
 		return nil
 	})
@@ -596,7 +574,68 @@ func scanDNS(source ipFrameSource) ([]DNSRecord, error) {
 		return nil, err
 	}
 
+	if hasTCPDNS {
+		tcpSource := ipFrameSource{
+			capture: source.capture,
+			data:    source.data,
+			reader:  source.reader,
+		}
+		if source.reader != nil {
+			tcpSource.needsPayload = func(f Frame, _ []byte) bool {
+				return f.IPProtocol == IPProtoTCP && (isDNSPort(f.SrcPort) || isDNSPort(f.DstPort))
+			}
+		}
+		streams, err := collectStreams(tcpSource)
+		if err != nil {
+			return nil, err
+		}
+		for i := range streams {
+			st := &streams[i]
+			if !isDNSPort(st.SrcPort) && !isDNSPort(st.DstPort) {
+				continue
+			}
+			if err := extractDNSFromTCPStream(st.Client.Data, st.FlowIndex, st.SrcAddr, st.DstAddr, st.SrcPort, st.DstPort, &records); err != nil {
+				return nil, err
+			}
+			if err := extractDNSFromTCPStream(st.Server.Data, st.FlowIndex, st.DstAddr, st.SrcAddr, st.DstPort, st.SrcPort, &records); err != nil {
+				return nil, err
+			}
+		}
+	}
+
 	return records, nil
+}
+
+func extractDNSFromTCPStream(
+	stream []byte,
+	flowIndex int,
+	srcAddr, dstAddr netip.Addr,
+	srcPort, dstPort uint16,
+	records *[]DNSRecord,
+) error {
+	for off := 0; off+2 <= len(stream); {
+		dnsLen := int(binary.BigEndian.Uint16(stream[off : off+2]))
+		if dnsLen < 12 || off+2+dnsLen > len(stream) {
+			break
+		}
+		msg, err := ParseDNS(stream[off+2 : off+2+dnsLen])
+		off += 2 + dnsLen
+		if err != nil {
+			continue
+		}
+		if len(*records) >= MaxDNSMessagesPerScan {
+			return fmt.Errorf("%w: exceeds %d messages", ErrDNSLimit, MaxDNSMessagesPerScan)
+		}
+		*records = append(*records, DNSRecord{
+			FlowIndex: flowIndex,
+			SrcAddr:   srcAddr,
+			DstAddr:   dstAddr,
+			SrcPort:   srcPort,
+			DstPort:   dstPort,
+			Message:   msg,
+		})
+	}
+	return nil
 }
 
 // HasDNSQuery reports whether any DNS message in the capture contains a question
@@ -612,6 +651,7 @@ func (c *Capture) HasDNSQuery(data []byte, qname string) (bool, error) {
 	r := SafeReader{data: data, size: int64(len(data))}
 	var defrag ipFragAccumulator
 	found := false
+	var hasTCPDNS bool
 
 	err := c.walkPackets(&r, func(pkt PacketRecord) error {
 		payload, err := r.Slice(pkt.PayloadOffset, pkt.PayloadLength)
@@ -636,21 +676,15 @@ func (c *Capture) HasDNSQuery(data []byte, qname string) (bool, error) {
 		if !isDNSPort(frame.SrcPort) && !isDNSPort(frame.DstPort) {
 			return nil
 		}
-		l4 := payload[frame.PayloadOffset : frame.PayloadOffset+frame.PayloadLength]
-		dnsPayload := l4
 		if frame.IPProtocol == IPProtoTCP {
-			if len(l4) < 14 {
-				return nil
-			}
-			dnsLen := int(binary.BigEndian.Uint16(l4[0:2]))
-			if dnsLen < 12 || 2+dnsLen > len(l4) {
-				return nil
-			}
-			dnsPayload = l4[2 : 2+dnsLen]
-		} else if frame.IPProtocol != IPProtoUDP {
+			hasTCPDNS = true
 			return nil
 		}
-		if dnsPayloadHasQuery(dnsPayload, target) {
+		if frame.IPProtocol != IPProtoUDP {
+			return nil
+		}
+		l4 := payload[frame.PayloadOffset : frame.PayloadOffset+frame.PayloadLength]
+		if dnsPayloadHasQuery(l4, target) {
 			found = true
 			return errStopWalk
 		}
@@ -659,7 +693,39 @@ func (c *Capture) HasDNSQuery(data []byte, qname string) (bool, error) {
 	if err != nil {
 		return false, err
 	}
-	return found, nil
+	if found {
+		return true, nil
+	}
+	if hasTCPDNS {
+		streams, err := c.Streams(data)
+		if err != nil {
+			return false, err
+		}
+		for i := range streams {
+			st := &streams[i]
+			if !isDNSPort(st.SrcPort) && !isDNSPort(st.DstPort) {
+				continue
+			}
+			if tcpDNSStreamHasQuery(st.Client.Data, target) || tcpDNSStreamHasQuery(st.Server.Data, target) {
+				return true, nil
+			}
+		}
+	}
+	return false, nil
+}
+
+func tcpDNSStreamHasQuery(stream []byte, target string) bool {
+	for off := 0; off+2 <= len(stream); {
+		dnsLen := int(binary.BigEndian.Uint16(stream[off : off+2]))
+		if dnsLen < 12 || off+2+dnsLen > len(stream) {
+			break
+		}
+		if dnsPayloadHasQuery(stream[off+2:off+2+dnsLen], target) {
+			return true
+		}
+		off += 2 + dnsLen
+	}
+	return false
 }
 
 func dnsPayloadHasQuery(payload []byte, target string) bool {
@@ -707,7 +773,10 @@ type DNSDomainStats struct {
 // of the subdomain prefix of qname (excluding its final two registrable apex
 // labels, or over the entire name if qname has two or fewer labels).
 func DNSLabelEntropy(qname string) float64 {
-	sub, _ := splitDNSSubdomainAndApex(qname)
+	sub, apex := splitDNSSubdomainAndApex(qname)
+	if sub == "" {
+		sub = apex
+	}
 	if sub == "" {
 		return 0
 	}
@@ -745,7 +814,7 @@ func splitDNSSubdomainAndApex(qname string) (subdomain string, apex string) {
 	}
 	lastDot := strings.LastIndexByte(clean, '.')
 	if lastDot <= 0 {
-		return clean, clean
+		return "", clean
 	}
 	secondLastDot := strings.LastIndexByte(clean[:lastDot], '.')
 	if secondLastDot < 0 {
@@ -801,13 +870,17 @@ func (c *Capture) DNSDomainStats(data []byte) ([]DNSDomainStats, error) {
 				})
 			}
 			da := &accums[idx]
-			if !msg.IsResponse {
-				da.queryCount++
-			} else if msg.RCode == DNSRCodeNameError {
-				da.nxCount++
+			if msg.IsResponse {
+				if msg.RCode == DNSRCodeNameError {
+					da.nxCount++
+				}
+				continue
 			}
+			da.queryCount++
 			if sub != "" {
-				da.subdomains[sub] = struct{}{}
+				if len(da.subdomains) < MaxDNSMessagesPerScan {
+					da.subdomains[sub] = struct{}{}
+				}
 				ent := DNSLabelEntropy(qname)
 				if ent > da.maxEntropy {
 					da.maxEntropy = ent

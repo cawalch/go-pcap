@@ -60,7 +60,7 @@ func ParseRDPNegotiation(buf []byte) (RDPNegotiation, error) {
 
 	x224Len := int(buf[4])
 	x224Code := buf[5] & 0xf0
-	if 5+x224Len > tpktLen || (x224Code != x224CodeConnectionRequest && x224Code != x224CodeConnectionConfirm) {
+	if x224Len < 6 || 5+x224Len > tpktLen || (x224Code != x224CodeConnectionRequest && x224Code != x224CodeConnectionConfirm) {
 		return RDPNegotiation{}, fmt.Errorf("%w: invalid X.224 connection PDU code %#x", ErrInvalidRDP, buf[5])
 	}
 
@@ -69,7 +69,7 @@ func ParseRDPNegotiation(buf []byte) (RDPNegotiation, error) {
 	}
 
 	// Variable part of X.224 TPDU starts at offset 11 (after 4-byte TPKT + 7-byte fixed X.224 header).
-	varData := buf[11:tpktLen]
+	varData := buf[11 : 5+x224Len]
 	if !out.IsConfirm && bytes.HasPrefix(varData, []byte("Cookie:")) {
 		lineEnd := bytes.Index(varData, []byte("\r\n"))
 		if lineEnd < 0 || lineEnd > MaxRDPCookieBytes {
@@ -99,6 +99,13 @@ func ParseRDPNegotiation(buf []byte) (RDPNegotiation, error) {
 	return out, nil
 }
 
+func isRDPNegotiationRecord(srcPort, dstPort uint16, neg RDPNegotiation) bool {
+	if srcPort == 3389 || dstPort == 3389 {
+		return true
+	}
+	return neg.Cookie != "" || neg.HasNegReq || neg.HasNegRsp || neg.HasNegFailure
+}
+
 // RDP extracts RDP TPKT / X.224 negotiation PDUs across all reassembled TCP
 // streams in the capture.
 func (c *Capture) RDP(data []byte) ([]RDPRecord, error) {
@@ -110,7 +117,7 @@ func (c *Capture) RDP(data []byte) ([]RDPRecord, error) {
 	for i := range streams {
 		st := &streams[i]
 		if len(st.Client.Data) >= 11 && st.Client.Data[0] == 0x03 && st.Client.Data[1] == 0x00 {
-			if neg, err := ParseRDPNegotiation(st.Client.Data); err == nil {
+			if neg, err := ParseRDPNegotiation(st.Client.Data); err == nil && isRDPNegotiationRecord(st.SrcPort, st.DstPort, neg) {
 				if len(records) >= MaxRDPRecordsPerScan {
 					return nil, fmt.Errorf("%w: exceeds %d RDP records", ErrRDPLimit, MaxRDPRecordsPerScan)
 				}
@@ -125,7 +132,7 @@ func (c *Capture) RDP(data []byte) ([]RDPRecord, error) {
 			}
 		}
 		if len(st.Server.Data) >= 11 && st.Server.Data[0] == 0x03 && st.Server.Data[1] == 0x00 {
-			if neg, err := ParseRDPNegotiation(st.Server.Data); err == nil {
+			if neg, err := ParseRDPNegotiation(st.Server.Data); err == nil && isRDPNegotiationRecord(st.DstPort, st.SrcPort, neg) {
 				if len(records) >= MaxRDPRecordsPerScan {
 					return nil, fmt.Errorf("%w: exceeds %d RDP records", ErrRDPLimit, MaxRDPRecordsPerScan)
 				}
