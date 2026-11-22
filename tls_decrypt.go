@@ -411,6 +411,10 @@ func (c *Capture) DecryptedTLSStreams(data []byte, extraKeyLog []byte) ([]TCPStr
 		return nil, err
 	}
 
+	return decryptTLSStreams(streams, keyLog), nil
+}
+
+func decryptTLSStreams(streams []TCPStream, keyLog *TLSKeyLog) []TCPStream {
 	var decrypted []TCPStream
 	for i := range streams {
 		st := &streams[i]
@@ -450,5 +454,5 @@ func (c *Capture) DecryptedTLSStreams(data []byte, extraKeyLog []byte) ([]TCPStr
 			Server:    StreamBuffer{Data: serverApp},
 		})
 	}
-	return decrypted, nil
+	return decrypted
 }

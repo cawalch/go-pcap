@@ -214,3 +214,53 @@ func BenchmarkReaderAtFlows(b *testing.B) {
 		}
 	}
 }
+
+func BenchmarkCaptureWeb(b *testing.B) {
+	for _, h2 := range []bool{false, true} {
+		for _, keyed := range []bool{false, true} {
+			b.Run(fmt.Sprintf("h2=%t/keyed=%t", h2, keyed), func(b *testing.B) {
+				raw, c := mixedWebCapture(b, h2, keyed)
+				b.ReportAllocs()
+				for b.Loop() {
+					var err error
+					if h2 {
+						_, err = c.HTTP2(raw)
+					} else {
+						_, err = c.HTTP(raw)
+					}
+					if err != nil {
+						b.Fatal(err)
+					}
+				}
+			})
+		}
+	}
+}
+
+func BenchmarkCaptureStreams(b *testing.B) {
+	for _, tc := range []struct {
+		name            string
+		flows, segments int
+	}{{"ManyFlows", 256, 4}, {"ManySegments", 4, 256}} {
+		b.Run(tc.name, func(b *testing.B) {
+			var frames [][]byte
+			payload := make([]byte, 128)
+			for seg := range tc.segments {
+				for flow := range tc.flows {
+					frames = append(frames, buildEthernetIPv4TCPFrame([4]byte{10, 0, 0, 1}, [4]byte{10, 0, 0, 2}, uint16(10000+flow), 80, uint32(seg*len(payload)), 0, TCPFlagACK, payload))
+				}
+			}
+			raw := buildClassicPCAP(binary.LittleEndian, false, LinkTypeEthernet, 65535, frames)
+			c, err := New(raw)
+			if err != nil {
+				b.Fatal(err)
+			}
+			b.ReportAllocs()
+			for b.Loop() {
+				if _, err := c.Streams(raw); err != nil {
+					b.Fatal(err)
+				}
+			}
+		})
+	}
+}
