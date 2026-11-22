@@ -388,7 +388,7 @@ func reassembleQUICCryptoChunks(chunks []quicCryptoChunk) ([]byte, bool) {
 	if len(chunks) == 1 && chunks[0].offset == 0 && len(chunks[0].data) <= MaxQUICCryptoBytes {
 		return chunks[0].data, false
 	}
-	slices.SortFunc(chunks, func(a, b quicCryptoChunk) int {
+	slices.SortStableFunc(chunks, func(a, b quicCryptoChunk) int {
 		return cmp.Compare(a.offset, b.offset)
 	})
 
@@ -428,6 +428,7 @@ func DecryptQUICInitial(datagrams [][]byte) (QUICHandshake, error) {
 
 	var firstHdr QUICInitialHeader
 	var haveFirst bool
+	var effectiveDCID []byte
 	var keys quicInitialKeys
 	var chunks []quicCryptoChunk
 
@@ -440,13 +441,25 @@ func DecryptQUICInitial(datagrams [][]byte) (QUICHandshake, error) {
 			}
 			if !haveFirst {
 				firstHdr = hdr
+				effectiveDCID = hdr.DCID
 				keys, err = deriveQUICInitialKeys(hdr.DCID, hdr.Version, true)
 				if err != nil {
 					return QUICHandshake{}, err
 				}
 				haveFirst = true
 			}
-			if plain, err := decryptSingleQUICInitial(rem[:hdr.PacketLength], hdr, keys); err == nil {
+			plain, decErr := decryptSingleQUICInitial(rem[:hdr.PacketLength], hdr, keys)
+			if decErr != nil && !bytes.Equal(hdr.DCID, effectiveDCID) {
+				// Retry-updated DCID: re-derive client Initial keys for the new DCID.
+				if retryKeys, kErr := deriveQUICInitialKeys(hdr.DCID, hdr.Version, true); kErr == nil {
+					if retryPlain, rErr := decryptSingleQUICInitial(rem[:hdr.PacketLength], hdr, retryKeys); rErr == nil {
+						keys = retryKeys
+						effectiveDCID = hdr.DCID
+						plain, decErr = retryPlain, nil
+					}
+				}
+			}
+			if decErr == nil {
 				_ = extractQUICCryptoFrames(plain, &chunks)
 			}
 			rem = rem[hdr.PacketLength:]
@@ -477,7 +490,7 @@ func DecryptQUICInitial(datagrams [][]byte) (QUICHandshake, error) {
 
 	return QUICHandshake{
 		Version:        firstHdr.Version,
-		DCID:           bytes.Clone(firstHdr.DCID),
+		DCID:           bytes.Clone(effectiveDCID),
 		SCID:           bytes.Clone(firstHdr.SCID),
 		Token:          bytes.Clone(firstHdr.Token),
 		HasClientHello: true,
@@ -579,23 +592,36 @@ func scanQUIC(source ipFrameSource) ([]QUICRecord, error) {
 		if len(fb.clientPkt) == 0 {
 			continue
 		}
-		hs, err := DecryptQUICInitial(fb.clientPkt)
+		srcAddr, dstAddr, srcPort, dstPort := fb.srcAddr, fb.dstAddr, fb.srcPort, fb.dstPort
+		clientPkt, serverPkt := fb.clientPkt, fb.serverPkt
+		hs, err := DecryptQUICInitial(clientPkt)
+		if err != nil && len(serverPkt) > 0 {
+			// Handle server-first capture ordering by retrying client Initial on serverPkt.
+			if swappedHS, swapErr := DecryptQUICInitial(serverPkt); swapErr == nil {
+				hs = swappedHS
+				err = nil
+				serverPkt = clientPkt
+				srcAddr, dstAddr = dstAddr, srcAddr
+				srcPort, dstPort = dstPort, srcPort
+			}
+		}
 		if err != nil {
 			continue
 		}
-		// Optionally decrypt server Initial packets using the client's first DCID.
-		if len(fb.serverPkt) > 0 {
-			if sh, ok := decryptQUICServerInitial(fb.serverPkt, hs.DCID, hs.Version); ok {
+		// Optionally decrypt server Initial packets using the active client DCID.
+		if len(serverPkt) > 0 {
+			if sh, ok := decryptQUICServerInitial(serverPkt, hs.DCID, hs.Version); ok {
 				hs.ServerHello = sh
 				hs.HasServerHello = true
+				hs.Anomalies = mergeTLSAnomalies(hs.Anomalies, sh.Anomalies)
 			}
 		}
 		records = append(records, QUICRecord{
 			FlowIndex: fb.flowIndex,
-			SrcAddr:   fb.srcAddr,
-			DstAddr:   fb.dstAddr,
-			SrcPort:   fb.srcPort,
-			DstPort:   fb.dstPort,
+			SrcAddr:   srcAddr,
+			DstAddr:   dstAddr,
+			SrcPort:   srcPort,
+			DstPort:   dstPort,
 			Handshake: hs,
 		})
 	}

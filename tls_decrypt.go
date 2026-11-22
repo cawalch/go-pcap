@@ -67,13 +67,9 @@ func ParseTLSKeyLog(data []byte) (*TLSKeyLog, error) {
 			continue
 		}
 
-		entry, exists := kl.Entries[clientRandom]
-		if !exists {
-			if count >= MaxTLSKeyLogEntries {
-				return nil, fmt.Errorf("%w: keylog entries exceed %d", ErrSecretLimit, MaxTLSKeyLogEntries)
-			}
-			count++
-		}
+		var entry TLSKeyLogEntry
+		var exists bool
+		entry, exists = kl.Entries[clientRandom]
 		switch label {
 		case "CLIENT_HANDSHAKE_TRAFFIC_SECRET":
 			entry.ClientHandshakeSecret = secret
@@ -87,6 +83,12 @@ func ParseTLSKeyLog(data []byte) (*TLSKeyLog, error) {
 			entry.MasterSecret = secret
 		default:
 			continue
+		}
+		if !exists {
+			if count >= MaxTLSKeyLogEntries {
+				return nil, fmt.Errorf("%w: keylog entries exceed %d", ErrSecretLimit, MaxTLSKeyLogEntries)
+			}
+			count++
 		}
 		kl.Entries[clientRandom] = entry
 	}
@@ -191,6 +193,7 @@ func DecryptTLS13Records(
 	var hsSeq, appSeq uint64
 	inAppPhase := hsAEAD == nil
 	var hsBuf, appBuf bytes.Buffer
+	var hsFull, appFull bool
 	offset := 0
 
 	for offset+5 <= len(stream) {
@@ -208,8 +211,8 @@ func DecryptTLS13Records(
 			continue
 		}
 
-		// Try current phase AEAD first; if handshake phase finishes (e.g. after Server Finished),
-		// transition seamlessly to appAEAD with sequence number 0.
+		// Try current phase AEAD first; only transition permanently to appAEAD
+		// once appAEAD.Open actually succeeds (avoiding premature phase flip on 0-RTT).
 		var plain []byte
 		var decErr error
 		if !inAppPhase && hsAEAD != nil {
@@ -218,10 +221,14 @@ func DecryptTLS13Records(
 			if decErr == nil {
 				hsSeq++
 			} else if appAEAD != nil {
-				inAppPhase = true
+				appNonce := xorTLS13Nonce(appIV, appSeq)
+				if appPlain, appErr := appAEAD.Open(nil, appNonce[:], ciphertext, header); appErr == nil {
+					inAppPhase = true
+					plain, decErr = appPlain, nil
+					appSeq++
+				}
 			}
-		}
-		if inAppPhase && appAEAD != nil {
+		} else if appAEAD != nil {
 			nonce := xorTLS13Nonce(appIV, appSeq)
 			plain, decErr = appAEAD.Open(nil, nonce[:], ciphertext, header)
 			if decErr == nil {
@@ -245,12 +252,24 @@ func DecryptTLS13Records(
 
 		switch innerType {
 		case TLSRecordHandshake:
-			if hsBuf.Len()+len(innerContent) <= MaxTLSHandshakeBytes {
-				hsBuf.Write(innerContent)
+			if !hsFull {
+				rem := MaxTLSHandshakeBytes - hsBuf.Len()
+				if len(innerContent) <= rem {
+					hsBuf.Write(innerContent)
+				} else {
+					hsBuf.Write(innerContent[:rem])
+					hsFull = true
+				}
 			}
 		case TLSRecordApplicationData:
-			if appBuf.Len()+len(innerContent) <= MaxFlowStreamBytes {
-				appBuf.Write(innerContent)
+			if !appFull {
+				rem := MaxFlowStreamBytes - appBuf.Len()
+				if len(innerContent) <= rem {
+					appBuf.Write(innerContent)
+				} else {
+					appBuf.Write(innerContent[:rem])
+					appFull = true
+				}
 			}
 		}
 	}
@@ -351,6 +370,7 @@ func DecryptTLS12Records(
 	}
 
 	var seqNum uint64
+	var seenCCS bool
 	var appBuf bytes.Buffer
 	offset := 0
 	for offset+5 <= len(stream) {
@@ -363,15 +383,21 @@ func DecryptTLS12Records(
 		recordBody := stream[offset+5 : offset+5+recLen]
 		offset += 5 + recLen
 
-		if contentType != TLSRecordApplicationData && contentType != TLSRecordHandshake {
+		if contentType == TLSRecordChangeCipherSpec {
+			seenCCS = true
+			seqNum = 0
+			continue
+		}
+		if contentType != TLSRecordApplicationData && contentType != TLSRecordHandshake && (!seenCCS || contentType != TLSRecordAlert) {
+			continue
+		}
+		if !seenCCS && contentType == TLSRecordHandshake {
 			continue
 		}
 		// TLS 1.2 AES-GCM record payload: 8-byte explicit nonce + ciphertext + 16-byte tag.
 		if len(recordBody) < 8+aead.Overhead() {
 			continue
 		}
-		// Skip cleartext handshake records that precede ChangeCipherSpec: try AEAD open,
-		// and only advance seqNum when AEAD authentication succeeds.
 		var nonce [12]byte
 		copy(nonce[0:4], salt[:])
 		copy(nonce[4:12], recordBody[:8])
@@ -389,8 +415,14 @@ func DecryptTLS12Records(
 			continue
 		}
 		seqNum++
-		if contentType == TLSRecordApplicationData && appBuf.Len()+len(plain) <= MaxFlowStreamBytes {
-			appBuf.Write(plain)
+		if contentType == TLSRecordApplicationData {
+			rem := MaxFlowStreamBytes - appBuf.Len()
+			if len(plain) <= rem {
+				appBuf.Write(plain)
+			} else {
+				appBuf.Write(plain[:rem])
+				break
+			}
 		}
 	}
 
@@ -418,12 +450,24 @@ func decryptTLSStreams(streams []TCPStream, keyLog *TLSKeyLog) []TCPStream {
 	var decrypted []TCPStream
 	for i := range streams {
 		st := &streams[i]
-		if findTLSHandshakeStart(st.Client.Data) < 0 || findTLSHandshakeStart(st.Server.Data) < 0 {
+		cData, sData := st.Client.Data, st.Server.Data
+		srcAddr, dstAddr, srcPort, dstPort := st.SrcAddr, st.DstAddr, st.SrcPort, st.DstPort
+		cOff, sOff := findTLSHandshakeStart(cData), findTLSHandshakeStart(sData)
+		if cOff < 0 || sOff < 0 {
 			continue
 		}
-		hsClient, err1 := ParseTLSRecords(st.Client.Data)
-		hsServer, err2 := ParseTLSRecords(st.Server.Data)
-		if err1 != nil || err2 != nil || !hsClient.HasClientHello || !hsServer.HasServerHello {
+		hsClient, err1 := ParseTLSRecords(cData[cOff:])
+		hsServer, err2 := ParseTLSRecords(sData[sOff:])
+		if err1 != nil || err2 != nil {
+			continue
+		}
+		if !hsClient.HasClientHello && hsServer.HasClientHello && hsClient.HasServerHello {
+			hsClient, hsServer = hsServer, hsClient
+			cData, sData = sData, cData
+			srcAddr, dstAddr = dstAddr, srcAddr
+			srcPort, dstPort = dstPort, srcPort
+		}
+		if !hsClient.HasClientHello || !hsServer.HasServerHello {
 			continue
 		}
 		entry, ok := keyLog.Entries[hsClient.ClientHello.Random]
@@ -435,21 +479,21 @@ func decryptTLSStreams(streams []TCPStream, keyLog *TLSKeyLog) []TCPStream {
 		var errC, errS error
 
 		if hsServer.ServerHello.NegotiatedVersion == TLSVersion13 || len(entry.ClientTrafficSecret0) > 0 || len(entry.ServerTrafficSecret0) > 0 {
-			_, clientApp, errC = DecryptTLS13Records(st.Client.Data, suite, entry.ClientHandshakeSecret, entry.ClientTrafficSecret0)
-			_, serverApp, errS = DecryptTLS13Records(st.Server.Data, suite, entry.ServerHandshakeSecret, entry.ServerTrafficSecret0)
+			_, clientApp, errC = DecryptTLS13Records(cData, suite, entry.ClientHandshakeSecret, entry.ClientTrafficSecret0)
+			_, serverApp, errS = DecryptTLS13Records(sData, suite, entry.ServerHandshakeSecret, entry.ServerTrafficSecret0)
 		} else if len(entry.MasterSecret) > 0 {
-			clientApp, errC = DecryptTLS12Records(st.Client.Data, suite, entry.MasterSecret, hsClient.ClientHello.Random, hsServer.ServerHello.Random, true)
-			serverApp, errS = DecryptTLS12Records(st.Server.Data, suite, entry.MasterSecret, hsClient.ClientHello.Random, hsServer.ServerHello.Random, false)
+			clientApp, errC = DecryptTLS12Records(cData, suite, entry.MasterSecret, hsClient.ClientHello.Random, hsServer.ServerHello.Random, true)
+			serverApp, errS = DecryptTLS12Records(sData, suite, entry.MasterSecret, hsClient.ClientHello.Random, hsServer.ServerHello.Random, false)
 		}
 		if (errC != nil && errS != nil) || (len(clientApp) == 0 && len(serverApp) == 0) {
 			continue
 		}
 		decrypted = append(decrypted, TCPStream{
 			FlowIndex: st.FlowIndex,
-			SrcAddr:   st.SrcAddr,
-			DstAddr:   st.DstAddr,
-			SrcPort:   st.SrcPort,
-			DstPort:   st.DstPort,
+			SrcAddr:   srcAddr,
+			DstAddr:   dstAddr,
+			SrcPort:   srcPort,
+			DstPort:   dstPort,
 			Client:    StreamBuffer{Data: clientApp},
 			Server:    StreamBuffer{Data: serverApp},
 		})
