@@ -25,6 +25,7 @@ type KRB5Message struct {
 
 // KRB5Record associates a parsed [KRB5Message] with its 5-tuple UDP or TCP flow
 // in a [Capture].
+// For TCP, PacketIndex identifies the packet containing the first record-mark byte.
 type KRB5Record struct {
 	PacketIndex int
 	FlowIndex   int
