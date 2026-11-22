@@ -42,6 +42,11 @@ func JA4T(window uint16, options []byte) (string, bool) {
 		kindCount++
 
 		if kind == tcpOptKindEOL {
+			// Wireshark reports consecutive zero padding bytes as EOLs.
+			i++
+			if i < len(options) && options[i] == tcpOptKindEOL {
+				continue
+			}
 			break
 		}
 		if kind == tcpOptKindNOP {
@@ -133,6 +138,11 @@ func JA4L(deltaNs int64, ttl uint8) string {
 		deltaNs = 0
 	}
 	halfRTTMicros := uint64(deltaNs) / 2_000
+	// Round to the nearest microsecond, with an even result at a tie.
+	remainder := deltaNs % 2_000
+	if remainder > 1_000 || remainder == 1_000 && halfRTTMicros%2 != 0 {
+		halfRTTMicros++
+	}
 	var buf [32]byte
 	out := strconv.AppendUint(buf[:0], halfRTTMicros, 10)
 	out = append(out, '_')

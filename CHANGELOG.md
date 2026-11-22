@@ -8,6 +8,15 @@ for pre-v1 releases (`0.y.z` minor bumps may include API additions or changes).
 
 ## [v0.1.0] - 2026-11-21
 
+### Fixed
+
+- Resolve PcapNG interface IDs within each section and preserve ReaderAt flow
+  byte counts and truncation flags across padded frames and deep headers.
+- Retain earlier TCP segments on reordered midstream pickup and sequence wrap.
+  Reject overlapping IPv6 fragments and handle atomic packets independently.
+- Match reference TCP fingerprint padding and round half-RTT measurements to
+  the nearest microsecond, with ties rounded to even.
+
 ### Added
 - Classic PCAP (little/big-endian, microsecond/nanosecond) and PcapNG (`SHB`,
   `IDB`, `EPB`, `SPB`, `DSB`) container parsing (`New`, `NewWithLength`,
@@ -44,4 +53,4 @@ for pre-v1 releases (`0.y.z` minor bumps may include API additions or changes).
 - Statistical C2 beacon timing periodicity and Producer-Consumer Ratio (PCR)
   analyzer (`ComputeBeaconStats`, `Capture.Beacons`).
 - Pure-Go stdlib `syscall` live interface capture (`OpenLive`, `ParseBPFBuffer`)
-  for macOS (`/dev/bpf*`) and Linux (`AF_PACKET`).
+  for macOS (`/dev/bpf*`), Linux (`AF_PACKET`), and Windows (`SIO_RCVALL`).

@@ -53,7 +53,8 @@ go test -run '^$' -fuzz '^FuzzPackets$' -fuzztime=30s -parallel=2
 go test -run '^$' -fuzz '^FuzzDecodeFrame$' -fuzztime=30s -parallel=2
 ```
 
-The tests use deterministic synthetic PCAP and PcapNG fixtures built in memory.
+The tests use synthetic PCAP and PcapNG fixtures built in memory and offline
+[reference inputs](testdata/foxio/README.md) for fingerprint compatibility.
 Separate tests cover byte-order variants, nanosecond timestamps, PcapNG
 Decryption Secrets Blocks (`DSB`), Enhanced Packet Block process metadata,
 VLAN nesting, IPv4/IPv6 headers, TCP/UDP framing, truncation, arithmetic

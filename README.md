@@ -214,7 +214,7 @@ rule evaluation belong in the adapter.
 ## Contribute
 
 See [Contributing](CONTRIBUTING.md) for validation commands, feature scope, and
-documentation style. Tests use synthetic in-memory fixtures and require no
+documentation style. Tests use synthetic inputs and checked-in reference fixtures and require no
 external packet captures, sibling repositories, or network access after you
 install Go.
 
