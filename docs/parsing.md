@@ -234,6 +234,17 @@ extract DNS queries and responses over UDP (ports 53, 5353, 5355) and TCP (port
 jump at most `MaxDNSCompressionJumps` times. Use `capture.HasDNSQuery(data, qname)`
 to test whether a capture queries a domain without allocating `DNSRecord` slices.
 
+For SVCB and HTTPS records, inspect `rr.ServiceBinding` for the priority,
+ordered ALPN identifiers, optional port, and presence of a nonempty ECH
+configuration. `rr.Target` is the advertised name (empty for the DNS root).
+Priority zero denotes an alias and its parameters are ignored. The parser
+accepts uncompressed targets and strictly increasing parameter keys. Unknown
+keys are skipped. A malformed parameter length or ordering sets
+`InvalidRDataLength` and leaves the binding nil. More than 32 ALPN identifiers
+returns `ErrDNSLimit`. The original RDATA remains available via `DataOffset`
+and `DataLength`. For an OPT record, read `rr.EDNSUDPPayloadSize()` and
+`rr.EDNSDOBit()` for the advertised payload size and DNSSEC OK flag.
+
 To evaluate DNS tunneling or high-entropy subdomain indicators, call
 `DNSLabelEntropy(qname)` on a domain name or `capture.DNSDomainStats(data)` to
 aggregate query counts, unique subdomain fan-out, `NXDOMAIN` counts, maximum

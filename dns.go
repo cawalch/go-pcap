@@ -34,15 +34,40 @@ type DNSQuestion struct {
 // DNSResourceRecord represents one answer, authority, or additional record in a
 // DNS message.
 type DNSResourceRecord struct {
-	Name       string
-	Type       uint16
-	Class      uint16
-	TTL        uint32
-	Address    netip.Addr
-	Target     string
-	TXT        []string
-	DataOffset uint32
-	DataLength uint32
+	Name           string
+	Type           uint16
+	Class          uint16
+	TTL            uint32
+	Address        netip.Addr
+	Target         string
+	TXT            []string
+	DataOffset     uint32
+	DataLength     uint32
+	ServiceBinding *DNSServiceBinding // Present for a successfully decoded SVCB or HTTPS record.
+}
+
+// DNSServiceBinding contains the observed SVCB or HTTPS parameters. The
+// enclosing record's Target is the target name (empty for the DNS root).
+type DNSServiceBinding struct {
+	Priority     uint16 // Zero identifies AliasMode.
+	Port         uint16
+	HasPort      bool
+	HasECHConfig bool // A nonempty ech parameter was present.
+	ALPN         []string
+}
+
+// EDNSUDPPayloadSize returns the advertised UDP payload size of an OPT record,
+// or zero for other record types.
+func (r DNSResourceRecord) EDNSUDPPayloadSize() uint16 {
+	if r.Type == DNSTypeOPT {
+		return r.Class
+	}
+	return 0
+}
+
+// EDNSDOBit reports whether an OPT record has the DNSSEC OK flag set.
+func (r DNSResourceRecord) EDNSDOBit() bool {
+	return r.Type == DNSTypeOPT && r.TTL&0x8000 != 0
 }
 
 // DNSMessage contains a parsed DNS query or response message.
@@ -220,20 +245,24 @@ func decodeDNSRecordSection(
 				anomalies.InvalidRDataLength = true
 			}
 		case DNSTypeCNAME, DNSTypeNS, DNSTypePTR:
-			target, _, err := decodeDNSNameBounded(payload, rdataStart, rdataEnd, anomalies)
+			target, _, err := decodeDNSNameBounded(payload, rdataStart, rdataEnd, true, anomalies)
 			if err != nil {
 				return nil, offset, err
 			}
 			rec.Target = target
 		case DNSTypeMX:
 			if rdLen >= 3 {
-				target, _, err := decodeDNSNameBounded(payload, rdataStart+2, rdataEnd, anomalies)
+				target, _, err := decodeDNSNameBounded(payload, rdataStart+2, rdataEnd, true, anomalies)
 				if err != nil {
 					return nil, offset, err
 				}
 				rec.Target = target
 			} else {
 				anomalies.InvalidRDataLength = true
+			}
+		case DNSTypeSVCB, DNSTypeHTTPS:
+			if err := decodeDNSServiceBinding(payload[rdataStart:rdataEnd], &rec, anomalies); err != nil {
+				return nil, offset, err
 			}
 		case DNSTypeTXT:
 			rec.TXT = decodeDNSTXT(payload[rdataStart:rdataEnd], anomalies)
@@ -243,6 +272,98 @@ func decodeDNSRecordSection(
 		offset = rdataEnd
 	}
 	return records, offset, nil
+}
+
+// RFC 9460 encodes the priority, an uncompressed target, then key/length/value
+// parameters in strictly increasing key order. Commit metadata after framing
+// the entire record so a malformed tail cannot publish a partial advertisement.
+func decodeDNSServiceBinding(data []byte, rec *DNSResourceRecord, anomalies *DNSAnomalies) error {
+	if len(data) < 3 {
+		anomalies.InvalidRDataLength = true
+		return nil
+	}
+	var nameAnomalies DNSAnomalies
+	target, off, err := decodeDNSNameBounded(data, 2, len(data), false, &nameAnomalies)
+	if err != nil {
+		return err
+	}
+	if off-2 > MaxDNSNameBytes {
+		return fmt.Errorf("%w: SVCB target exceeds %d wire bytes", ErrDNSLimit, MaxDNSNameBytes)
+	}
+	if nameAnomalies.TruncatedSection {
+		anomalies.InvalidRDataLength = true
+		return nil
+	}
+	binding := DNSServiceBinding{Priority: binary.BigEndian.Uint16(data)}
+	prev := -1
+	for params := data[off:]; len(params) > 0; {
+		if len(params) < 4 {
+			anomalies.InvalidRDataLength = true
+			return nil
+		}
+		key := int(binary.BigEndian.Uint16(params))
+		n := int(binary.BigEndian.Uint16(params[2:]))
+		if key <= prev || n > len(params)-4 {
+			anomalies.InvalidRDataLength = true
+			return nil
+		}
+		value := params[4 : 4+n]
+		prev = key
+		params = params[4+n:]
+		if binding.Priority == 0 {
+			continue // AliasMode ignores parameter values.
+		}
+		switch key {
+		case 1: // alpn
+			binding.ALPN, err = decodeSVCBALPN(value)
+			if err != nil {
+				return err
+			}
+			if binding.ALPN == nil {
+				anomalies.InvalidRDataLength = true
+				return nil
+			}
+		case 3: // port
+			if n != 2 {
+				anomalies.InvalidRDataLength = true
+				return nil
+			}
+			binding.Port = binary.BigEndian.Uint16(value)
+			binding.HasPort = true
+		case 5: // ech
+			binding.HasECHConfig = n > 0
+		}
+	}
+	rec.Target = target
+	rec.ServiceBinding = &binding
+	return nil
+}
+
+// Validate the length-prefixed IDs before copying their common backing string.
+func decodeSVCBALPN(value []byte) ([]string, error) {
+	count := 0
+	for i := 0; i < len(value); {
+		n := int(value[i])
+		if n == 0 || n > len(value)-i-1 {
+			return nil, nil
+		}
+		count++
+		if count > MaxDNSALPNProtocols {
+			return nil, fmt.Errorf("%w: more than %d ALPN identifiers", ErrDNSLimit, MaxDNSALPNProtocols)
+		}
+		i += 1 + n
+	}
+	if count == 0 {
+		return nil, nil
+	}
+	wire := string(value)
+	ids := make([]string, count)
+	for i := range ids {
+		end := 1 + int(wire[0])
+		ids[i] = wire[1:end]
+		wire = wire[end:]
+	}
+	return ids, nil
 }
 
 func decodeDNSTXT(rdata []byte, anomalies *DNSAnomalies) []string {
@@ -265,10 +386,10 @@ func decodeDNSTXT(rdata []byte, anomalies *DNSAnomalies) []string {
 }
 
 func decodeDNSName(payload []byte, start int, anomalies *DNSAnomalies) (string, int, error) {
-	return decodeDNSNameBounded(payload, start, len(payload), anomalies)
+	return decodeDNSNameBounded(payload, start, len(payload), true, anomalies)
 }
 
-func decodeDNSNameBounded(payload []byte, start int, limit int, anomalies *DNSAnomalies) (string, int, error) {
+func decodeDNSNameBounded(payload []byte, start int, limit int, allowCompression bool, anomalies *DNSAnomalies) (string, int, error) {
 	if start < 0 || start >= limit || limit > len(payload) {
 		anomalies.TruncatedSection = true
 		return "", limit, nil
@@ -326,6 +447,10 @@ func decodeDNSNameBounded(payload []byte, start int, limit int, anomalies *DNSAn
 			cur += labelLen
 
 		case 0xc0:
+			if !allowCompression {
+				anomalies.InvalidCompressionPtr = true
+				return "", 0, fmt.Errorf("%w: compressed SVCB target", ErrInvalidDNS)
+			}
 			if cur+1 >= bound {
 				anomalies.TruncatedSection = true
 				if nextOffset < 0 {
