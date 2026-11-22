@@ -252,6 +252,18 @@ and `Certificate` handshake messages:
   and preserving signature scheme wire order).
 - `TLSServerHello.JA4S` reports the FoxIO JA4S fingerprint over the server's
   selected version, cipher suite, ALPN, and wire-order extension list.
+- `ClientHello.SupportedGroups` lists advertised groups. `KeyShareGroups`
+  lists groups with an offered key share. Both retain up to `MaxTLSExtensions`
+  non-GREASE IDs in wire order. A malformed key-share vector contributes no
+  IDs. The parser skips the public-key bytes.
+- `ClientHello.HasECH` reports a nonempty encrypted_client_hello extension.
+  This observation includes GREASE ECH offers. The extension ID also appears
+  in `Extensions` when its payload is empty.
+- `ServerHello.SelectedGroup` gives the group from a structurally valid
+  server key share (zero when unavailable). If `IsHelloRetryRequest` is true,
+  the group is the one requested for the next ClientHello. For example,
+  `!sh.IsHelloRetryRequest && sh.SelectedGroup == pcap.TLSGroupX25519MLKEM768`
+  identifies an observed ServerHello selecting that hybrid group.
 - Each certificate in the chain exposes DNS SANs in `DNSNames` and IPv4/IPv6
   SANs in `IPAddresses` as `netip.Addr` values. For example,
   `record.Handshake.Certificates[0].IPAddresses` gives the leaf's addresses

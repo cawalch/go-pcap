@@ -429,6 +429,17 @@ const (
 	TLSExtSignatureAlgorithms uint16 = 0x000d
 	TLSExtALPN                uint16 = 0x0010
 	TLSExtSupportedVersions   uint16 = 0x002b
+	TLSExtKeyShare            uint16 = 0x0033
+	TLSExtECH                 uint16 = 0xfe0d
+)
+
+// TLS named groups commonly observed in key_share.
+const (
+	TLSGroupSecp256r1             uint16 = 0x0017
+	TLSGroupX25519                uint16 = 0x001d
+	TLSGroupX25519Kyber768Draft00 uint16 = 0x6399
+	TLSGroupSecP256r1MLKEM768     uint16 = 0x11eb
+	TLSGroupX25519MLKEM768        uint16 = 0x11ec
 )
 
 // Parser and validation errors.

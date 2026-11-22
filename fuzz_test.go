@@ -132,6 +132,9 @@ func FuzzParseDNS(f *testing.F) {
 
 func FuzzParseTLSRecords(f *testing.F) {
 	f.Add(buildTLS13ClientHelloRecord("c2.example.com", "h2"))
+	client, server := testKeyShareRecords(true)
+	f.Add(client)
+	f.Add(server)
 
 	f.Fuzz(func(t *testing.T, data []byte) {
 		hs, err := ParseTLSRecords(data)
