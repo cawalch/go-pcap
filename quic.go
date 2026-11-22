@@ -470,12 +470,10 @@ func DecryptQUICInitial(datagrams [][]byte) (QUICHandshake, error) {
 // capture and extracts their embedded TLS 1.3 ClientHello and 'q13...' JA4
 // fingerprints.
 func (c *Capture) QUIC(data []byte) ([]QUICRecord, error) {
-	if err := c.validateContainer(); err != nil {
-		return nil, err
-	}
-	if c.PacketCount == 0 {
-		return nil, nil
-	}
+	return scanQUIC(ipFrameSource{capture: c, data: data})
+}
+
+func scanQUIC(source ipFrameSource) ([]QUICRecord, error) {
 
 	type quicFlowBuf struct {
 		flowIndex int
@@ -487,34 +485,25 @@ func (c *Capture) QUIC(data []byte) ([]QUICRecord, error) {
 		serverPkt [][]byte
 	}
 
-	r := SafeReader{data: data, size: int64(len(data))}
 	var table flowIndexTable
 	var defrag ipFragAccumulator
 	slotByFlow := make(map[int]int)
 	var flows []quicFlowBuf
 
-	err := c.walkPackets(&r, func(pkt PacketRecord) error {
-		payload, err := r.Slice(pkt.PayloadOffset, pkt.PayloadLength)
-		if err != nil {
-			return err
-		}
-		frame, err := DecodeFrame(payload, pkt.LinkType)
-		if err != nil || frame.IPVersion == 0 {
-			return nil
-		}
+	err := source.walk(func(_ PacketRecord, frame Frame, l4 []byte) error {
 
 		var udpPayload []byte
 		if frame.Anomalies.IPFragment && frame.IPProtocol == IPProtoUDP {
 			var srcPort, dstPort uint16
 			var ok bool
-			udpPayload, srcPort, dstPort, ok = defrag.addUDPFragment(&frame, payload)
+			udpPayload, srcPort, dstPort, ok = defrag.addUDPFragment(&frame, l4)
 			if !ok {
 				return nil
 			}
 			frame.SrcPort = srcPort
 			frame.DstPort = dstPort
 		} else if frame.IPProtocol == IPProtoUDP && frame.PayloadLength >= 7 {
-			udpPayload = payload[frame.PayloadOffset : frame.PayloadOffset+frame.PayloadLength]
+			udpPayload = l4
 		}
 
 		key, _ := makeCanonicalFlowKey(frame.IPProtocol, frame.SrcAddr, frame.SrcPort, frame.DstAddr, frame.DstPort)

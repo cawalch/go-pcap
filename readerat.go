@@ -130,52 +130,36 @@ func (c *Capture) FlowsFromReaderAt(r io.ReaderAt) ([]FlowSummary, error) {
 	var table flowIndexTable
 	var flows []FlowSummary
 	var hsTimes []tcpHandshakeTime
-	var hdrBuf [256]byte
+	var header [256]byte
 	var scratch []byte
-	var totalRead int64
-
+	budget := scanReadBudget{r: r, remaining: MaxReaderAtScanBytes}
 	for pkt, err := range c.PacketSeqFromReaderAt(r) {
 		if err != nil {
 			return nil, err
 		}
-		readLen := min(pkt.PayloadLength, int64(len(hdrBuf)))
-		if readLen <= 0 {
+		n := min(pkt.PayloadLength, int64(len(header)))
+		if n == 0 {
 			continue
 		}
-		if totalRead+readLen > MaxReaderAtScanBytes {
-			return nil, fmt.Errorf("%w: ReaderAt scan exceeds %d bytes", ErrPacketLimit, MaxReaderAtScanBytes)
-		}
-		if err := readExactAt(r, hdrBuf[:readLen], pkt.PayloadOffset, c.fileSize); err != nil {
+		if err := budget.check(n); err != nil {
 			return nil, err
 		}
-		totalRead += readLen
-
-		payload := hdrBuf[:readLen]
+		payload := header[:n]
+		if err := readExactAt(r, payload, pkt.PayloadOffset, c.fileSize); err != nil {
+			return nil, err
+		}
+		budget.remaining -= n
 		frame, err := DecodeFrame(payload, pkt.LinkType)
-		for readLen < pkt.PayloadLength && err == nil && !completeFlowPrefix(&frame, payload, pkt.PayloadLength) {
-			next := pkt.PayloadLength
-			// Read just beyond an incomplete header before fetching the rest
-			// of a long frame. Charge each byte once, including retries.
-			if frame.Anomalies.TruncatedLayer {
-				next = min(next, 2*readLen)
-			}
-			tail := next - readLen
-			if tail > MaxReaderAtScanBytes-totalRead {
-				return nil, fmt.Errorf("%w: ReaderAt scan exceeds %d bytes", ErrPacketLimit, MaxReaderAtScanBytes)
-			}
-			if int64(cap(scratch)) < next {
-				scratch = make([]byte, next)
-			}
-			copy(scratch[:readLen], payload)
-			payload = scratch[:next]
-			if err := readExactAt(r, payload[readLen:], pkt.PayloadOffset+readLen, c.fileSize); err != nil {
+		if err != nil {
+			continue
+		}
+		if n < pkt.PayloadLength && !completeFlowPrefix(&frame, payload, pkt.PayloadLength) {
+			payload, err = extendFramePrefix(&budget, c.fileSize, pkt, &frame, payload, &scratch)
+			if err != nil {
 				return nil, err
 			}
-			totalRead += tail
-			readLen = next
-			frame, err = DecodeFrame(payload, pkt.LinkType)
 		}
-		if err != nil || frame.IPVersion == 0 {
+		if frame.IPVersion == 0 {
 			continue
 		}
 		l4Len := uint64(frame.PayloadLength)
@@ -310,51 +294,131 @@ func completeFlowPrefix(f *Frame, prefix []byte, captured int64) bool {
 	return true
 }
 
-// DNSFromReaderAt extracts and parses DNS records from an [io.ReaderAt] under
-// [MaxReaderAtScanBytes].
+// DNSFromReaderAt extracts DNS records using bounded metadata, frame header,
+// DNS transport and UDP fragment reads under [MaxReaderAtScanBytes].
 func (c *Capture) DNSFromReaderAt(r io.ReaderAt) ([]DNSRecord, error) {
-	raw, err := c.readBoundedCaptureBytes(r)
-	if err != nil {
-		return nil, err
-	}
-	return c.DNS(raw)
+	return scanDNS(ipFrameSource{capture: c, reader: r, needsPayload: func(f Frame, _ []byte) bool {
+		return f.IPProtocol == IPProtoUDP && f.Anomalies.IPFragment ||
+			(f.IPProtocol == IPProtoUDP || f.IPProtocol == IPProtoTCP) && (isDNSPort(f.SrcPort) || isDNSPort(f.DstPort))
+	}})
 }
 
-// TLSFromReaderAt extracts and parses TLS handshakes and JA4/JA4S/JA4X
-// fingerprints from an [io.ReaderAt] under [MaxReaderAtScanBytes].
+// TLSFromReaderAt extracts TLS handshakes and fingerprints from reassembled
+// TCP payloads on any port under [MaxReaderAtScanBytes].
 func (c *Capture) TLSFromReaderAt(r io.ReaderAt) ([]TLSRecord, error) {
-	raw, err := c.readBoundedCaptureBytes(r)
+	streams, err := collectStreams(ipFrameSource{capture: c, reader: r, needsPayload: func(f Frame, _ []byte) bool { return f.IPProtocol == IPProtoTCP }})
 	if err != nil {
 		return nil, err
 	}
-	return c.TLS(raw)
+	return c.tlsFromStreams(streams, nil)
 }
 
-// QUICFromReaderAt decrypts and parses QUIC v1/v2 Initial packets and JA4
-// fingerprints from an [io.ReaderAt] under [MaxReaderAtScanBytes].
+// QUICFromReaderAt extracts QUIC v1/v2 Initial handshakes and fingerprints
+// using bounded UDP datagram and fragment reads under [MaxReaderAtScanBytes].
 func (c *Capture) QUICFromReaderAt(r io.ReaderAt) ([]QUICRecord, error) {
-	raw, err := c.readBoundedCaptureBytes(r)
-	if err != nil {
-		return nil, err
-	}
-	return c.QUIC(raw)
+	return scanQUIC(ipFrameSource{capture: c, reader: r, needsPayload: func(f Frame, start []byte) bool {
+		return f.IPProtocol == IPProtoUDP && (f.Anomalies.IPFragment ||
+			f.PayloadLength >= 7 && (len(start) == 0 || start[0]&0xc0 == 0xc0))
+	}})
 }
 
-func (c *Capture) readBoundedCaptureBytes(r io.ReaderAt) ([]byte, error) {
-	if err := c.validateContainer(); err != nil {
-		return nil, err
+type scanReadBudget struct {
+	r         io.ReaderAt
+	remaining int64
+}
+
+func (b *scanReadBudget) check(n int64) error {
+	if n > b.remaining {
+		return fmt.Errorf("%w: ReaderAt scan exceeds %d bytes", ErrPacketLimit, MaxReaderAtScanBytes)
 	}
-	if r == nil {
-		return nil, fmt.Errorf("%w: nil ReaderAt", ErrInvalidHeader)
+	return nil
+}
+
+func (b *scanReadBudget) ReadAt(p []byte, off int64) (int, error) {
+	if err := b.check(int64(len(p))); err != nil {
+		return 0, err
 	}
-	if c.fileSize < 0 || c.fileSize > MaxReaderAtScanBytes {
-		return nil, fmt.Errorf("%w: capture size %d exceeds ReaderAt scan limit %d", ErrPacketLimit, c.fileSize, MaxReaderAtScanBytes)
+	n, err := b.r.ReadAt(p, off)
+	b.remaining -= int64(n)
+	return n, err
+}
+
+// extendFramePrefix resolves incomplete headers and nested tunnel lengths.
+func extendFramePrefix(budget *scanReadBudget, size int64, pkt PacketRecord, f *Frame, data []byte, scratch *[]byte) ([]byte, error) {
+	for {
+		n := int64(len(data))
+		next := pkt.PayloadLength
+		if f.Anomalies.TruncatedLayer {
+			next = min(next, 2*n)
+		}
+		if err := budget.check(next - n); err != nil {
+			return nil, err
+		}
+		if int64(cap(*scratch)) < next {
+			*scratch = make([]byte, next)
+		}
+		copy((*scratch)[:n], data)
+		data = (*scratch)[:next]
+		if err := readExactAt(budget.r, data[n:], pkt.PayloadOffset+n, size); err != nil {
+			return nil, err
+		}
+		budget.remaining -= next - n
+		// DecodeFrame has already accepted this link header. Extending its
+		// backing data cannot shorten the header or change its link type.
+		*f, _ = DecodeFrame(data, pkt.LinkType)
+		if next == pkt.PayloadLength || completeFlowPrefix(f, data, pkt.PayloadLength) {
+			return data, nil
+		}
 	}
-	buf := make([]byte, c.fileSize)
-	if err := readExactAt(r, buf, 0, c.fileSize); err != nil {
-		return nil, err
+}
+
+func (s ipFrameSource) walkReaderAt(visit func(PacketRecord, Frame, []byte) error) error {
+	if s.reader == nil {
+		return fmt.Errorf("%w: nil ReaderAt", ErrInvalidHeader)
 	}
-	return buf, nil
+	var header [256]byte
+	var scratch []byte
+	budget := scanReadBudget{r: s.reader, remaining: MaxReaderAtScanBytes}
+	return s.capture.walkPacketsFromReaderAt(&budget, func(pkt PacketRecord) error {
+		n := min(pkt.PayloadLength, int64(len(header)))
+		if n == 0 {
+			return nil
+		}
+		data := header[:n]
+		if err := readExactAt(&budget, data, pkt.PayloadOffset, s.capture.fileSize); err != nil {
+			return err
+		}
+		f, err := DecodeFrame(data, pkt.LinkType)
+		if err != nil {
+			return nil
+		}
+		if n < pkt.PayloadLength && !completeFlowPrefix(&f, data, pkt.PayloadLength) {
+			data, err = extendFramePrefix(&budget, s.capture.fileSize, pkt, &f, data, &scratch)
+			if err != nil {
+				return err
+			}
+		}
+		if f.IPVersion == 0 {
+			return nil
+		}
+		start, end := int64(f.PayloadOffset), int64(f.PayloadOffset)+int64(f.PayloadLength)
+		available := data[start:min(end, int64(len(data)))]
+		if f.PayloadLength == 0 || !s.needsPayload(f, available) {
+			return visit(pkt, f, nil)
+		}
+		// Protocol state can retain these bytes across calls (TCP segments,
+		// IP fragments and QUIC datagrams). Never retain prefix scratch.
+		missing := int64(f.PayloadLength) - int64(len(available))
+		if err := budget.check(missing); err != nil {
+			return err
+		}
+		payload := make([]byte, f.PayloadLength)
+		copied := copy(payload, available)
+		if err := readExactAt(&budget, payload[copied:], pkt.PayloadOffset+start+int64(copied), s.capture.fileSize); err != nil {
+			return err
+		}
+		return visit(pkt, f, payload)
+	})
 }
 
 func readExactAt(r io.ReaderAt, buf []byte, offset, totalSize int64) error {

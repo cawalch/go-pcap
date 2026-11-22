@@ -363,30 +363,19 @@ func isDNSPort(port uint16) bool {
 // DNS extracts and parses DNS messages across all UDP (ports 53, 5353, 5355)
 // and TCP (port 53 length-prefixed) packets in the capture.
 func (c *Capture) DNS(data []byte) ([]DNSRecord, error) {
-	if err := c.validateContainer(); err != nil {
-		return nil, err
-	}
-	if c.PacketCount == 0 {
-		return nil, nil
-	}
+	return scanDNS(ipFrameSource{capture: c, data: data})
+}
 
-	r := SafeReader{data: data, size: int64(len(data))}
+func scanDNS(source ipFrameSource) ([]DNSRecord, error) {
+
 	var table flowIndexTable
 	var defrag ipFragAccumulator
 	var records []DNSRecord
 
-	err := c.walkPackets(&r, func(pkt PacketRecord) error {
-		payload, err := r.Slice(pkt.PayloadOffset, pkt.PayloadLength)
-		if err != nil {
-			return err
-		}
-		frame, err := DecodeFrame(payload, pkt.LinkType)
-		if err != nil || frame.IPVersion == 0 {
-			return nil
-		}
+	err := source.walk(func(pkt PacketRecord, frame Frame, l4 []byte) error {
 
 		if frame.Anomalies.IPFragment && frame.IPProtocol == IPProtoUDP {
-			udpPayload, srcPort, dstPort, ok := defrag.addUDPFragment(&frame, payload)
+			udpPayload, srcPort, dstPort, ok := defrag.addUDPFragment(&frame, l4)
 			if !ok {
 				return nil
 			}
@@ -429,7 +418,6 @@ func (c *Capture) DNS(data []byte) ([]DNSRecord, error) {
 		if frame.PayloadLength == 0 || !isDNSPort(frame.SrcPort) && !isDNSPort(frame.DstPort) {
 			return nil
 		}
-		l4 := payload[frame.PayloadOffset : frame.PayloadOffset+frame.PayloadLength]
 
 		switch frame.IPProtocol {
 		case IPProtoUDP:
@@ -510,7 +498,7 @@ func (c *Capture) HasDNSQuery(data []byte, qname string) (bool, error) {
 			return nil
 		}
 		if frame.Anomalies.IPFragment && frame.IPProtocol == IPProtoUDP {
-			udpPayload, srcPort, dstPort, ok := defrag.addUDPFragment(&frame, payload)
+			udpPayload, srcPort, dstPort, ok := defrag.addUDPFragment(&frame, payload[frame.PayloadOffset:frame.PayloadOffset+frame.PayloadLength])
 			if !ok || (!isDNSPort(srcPort) && !isDNSPort(dstPort)) {
 				return nil
 			}
