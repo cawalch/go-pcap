@@ -168,6 +168,10 @@ without heap allocations:
 - `Frame.PayloadOffset` and `Frame.PayloadLength` identify the innermost
   transport payload slice (`payload[frame.PayloadOffset : frame.PayloadOffset+frame.PayloadLength]`).
 
+IPv6 reassembly discards a datagram if fragments overlap, including identical
+bytes. A first UDP or TCP fragment must contain its complete transport header.
+Atomic IPv6 packets are decoded independently of pending fragment groups.
+
 ## Aggregate 5-tuple flows
 
 Call `capture.Flows(data)` to aggregate IPv4 and IPv6 packets into deterministic

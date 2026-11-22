@@ -5,6 +5,7 @@ import (
 	"encoding/binary"
 	"errors"
 	"net/netip"
+	"os"
 	"testing"
 )
 
@@ -104,5 +105,112 @@ func TestFragmentedUDPDNSAndQUIC(t *testing.T) {
 	quicRecs, err := cap.QUIC(raw)
 	if err != nil || len(quicRecs) != 1 || !bytes.Equal([]byte(quicRecs[0].Handshake.ClientHello.SNI), []byte("frag-quic.example.com")) {
 		t.Fatalf("QUIC() on fragmented UDP = (%+v, %v)", quicRecs, err)
+	}
+}
+
+func TestIPv6FragmentPolicy(t *testing.T) {
+	for _, kind := range []string{"dns", "quic"} {
+		var payload []byte
+		src, dst := uint16(53), uint16(53000)
+		if kind == "dns" {
+			payload = buildDNSQueryResponsePacket()
+		} else {
+			var err error
+			payload, err = os.ReadFile("testdata/rfc9001-client.bin")
+			if err != nil {
+				t.Fatal(err)
+			}
+			src, dst = 53000, 443
+		}
+		udp := make([]byte, 8+len(payload))
+		binary.BigEndian.PutUint16(udp, src)
+		binary.BigEndian.PutUint16(udp[2:], dst)
+		binary.BigEndian.PutUint16(udp[4:], uint16(len(udp)))
+		copy(udp[8:], payload)
+		frame := func(off uint16, more bool, data []byte) []byte {
+			wire := make([]byte, 62+len(data))
+			binary.BigEndian.PutUint16(wire[12:], EtherTypeIPv6)
+			wire[14], wire[20], wire[21] = 0x60, IPProtoIPv6Frag, 64
+			wire[37], wire[53] = 1, 2
+			binary.BigEndian.PutUint16(wire[18:], uint16(8+len(data)))
+			wire[54] = IPProtoUDP
+			if more {
+				off |= 1
+			}
+			binary.BigEndian.PutUint16(wire[56:], off)
+			binary.BigEndian.PutUint32(wire[58:], 7)
+			copy(wire[62:], data)
+			return wire
+		}
+		tiny, err := DecodeFrame(frame(0, true, udp[:4]), LinkTypeEthernet)
+		if err != nil || !tiny.Anomalies.TruncatedLayer {
+			t.Fatalf("short first UDP header: %+v, %v", tiny, err)
+		}
+		first := frame(0, true, udp[:16])
+		last := frame(16, false, udp[16:])
+		atomic := frame(0, false, udp)
+		for _, tc := range []struct {
+			name   string
+			frames [][]byte
+			want   int
+		}{
+			{"reordered", [][]byte{last, first}, 1},
+			{"identical overlap", [][]byte{first, first, last}, 0},
+			{"conflicting overlap", [][]byte{first, frame(8, true, make([]byte, 8)), last}, 0},
+			{"short first header", [][]byte{frame(0, true, udp[:4]), first, last}, 0},
+			{"independent atomic", [][]byte{first, atomic, last}, 2},
+		} {
+			t.Run(kind+"/"+tc.name, func(t *testing.T) {
+				raw := buildClassicPCAP(binary.LittleEndian, false, LinkTypeEthernet, 65535, tc.frames)
+				c, err := New(raw)
+				if err != nil {
+					t.Fatal(err)
+				}
+				var n int
+				if kind == "dns" {
+					r, e := c.DNS(raw)
+					err = e
+					n = len(r)
+				} else {
+					r, e := c.QUIC(raw)
+					err = e
+					n = len(r)
+				}
+				// QUIC emits one handshake per flow for the two valid datagrams.
+				want := tc.want
+				if kind == "quic" && want == 2 {
+					want = 1
+				}
+				if err != nil || n != want {
+					t.Fatalf("records = %d, %v; want %d", n, err, want)
+				}
+			})
+		}
+	}
+}
+
+func BenchmarkIPFragments(b *testing.B) {
+	for _, tc := range []struct {
+		name, addr string
+		overlap    bool
+	}{
+		{"IPv4", "192.0.2.1", false}, {"IPv6", "2001:db8::1", false}, {"IPv6Overlap", "2001:db8::1", true},
+	} {
+		b.Run(tc.name, func(b *testing.B) {
+			var parts [8]IPFragmentInput
+			addr := netip.MustParseAddr(tc.addr)
+			for i := range parts {
+				parts[7-i] = IPFragmentInput{SrcAddr: addr, DstAddr: addr, Protocol: IPProtoUDP, FragmentOffset: i * 128, MoreFragments: i < 7, Payload: make([]byte, 128)}
+			}
+			if tc.overlap {
+				parts[0].FragmentOffset -= 8
+			}
+			b.ReportAllocs()
+			for b.Loop() {
+				if _, _, err := DefragmentIP(parts[:]); err != nil {
+					b.Fatal(err)
+				}
+			}
+		})
 	}
 }

@@ -412,6 +412,9 @@ func decodeIPv6(r *SafeReader, offset int64, f *Frame) {
 		f.IPProtocol = nextHeader
 		cur += extLen
 		if f.Anomalies.IPFragment {
+			if f.IPFragOffset == 0 && shortFragmentHeader(nextHeader, r.data[cur:ipBound]) {
+				f.Anomalies.TruncatedLayer = true
+			}
 			f.PayloadOffset = uint32(cur)
 			if ipBound > cur {
 				f.PayloadLength = uint32(ipBound - cur)
