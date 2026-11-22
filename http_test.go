@@ -3,6 +3,7 @@ package pcap
 import (
 	"bytes"
 	"errors"
+	"strings"
 	"testing"
 )
 
@@ -28,10 +29,7 @@ func TestHTTPRequestJA4HAndChunkedResponseCarving(t *testing.T) {
 	if string(req.Body) != "MZ_PAYLOAD" || req.CookieCount != 2 {
 		t.Fatalf("Body=%q, CookieCount=%d", req.Body, req.CookieCount)
 	}
-	wantJA4H := "po11cr05enus_" +
-		truncSHA256Hex12([]byte("Host,User-Agent,Accept-Language,Content-Type,Content-Length")) + "_" +
-		truncSHA256Hex12([]byte("a_sid,z_token")) + "_" +
-		truncSHA256Hex12([]byte("a_sid=123,z_token=999"))
+	wantJA4H := "po11cr05enus_b43fff474339_5ac59ab507d3_be8d5d33fe4b"
 	if req.JA4H != wantJA4H {
 		t.Fatalf("HTTPRequest.JA4H = %q, want %q", req.JA4H, wantJA4H)
 	}
@@ -74,5 +72,15 @@ func TestHTTPBoundsAndLimits(t *testing.T) {
 
 	if _, _, err := ParseHTTPResponse([]byte("HTTP/1.1 999 Bad\r\n\r\n")); !errors.Is(err, ErrInvalidHTTP) {
 		t.Fatalf("ParseHTTPResponse(status 999) err = %v, want ErrInvalidHTTP", err)
+	}
+}
+
+func TestJA4HLargeCookieParity(t *testing.T) {
+	value := strings.Repeat("a", 1200)
+	request := "GET / HTTP/1.1\r\nHost: localhost\r\nCookie: z=2; a=" + value + "\r\nCookie: z=1\r\n\r\n"
+	req, _, err := ParseHTTPRequest([]byte(request))
+	const want = "ge11cn010000_4a823118b9ba_5521d8d1ef21_cda9743fbd5c"
+	if err != nil || req.CookieCount != 3 || req.JA4H != want {
+		t.Fatalf("got %q (%d cookies), %v; want %q", req.JA4H, req.CookieCount, err, want)
 	}
 }

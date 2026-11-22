@@ -52,8 +52,9 @@ for metadata scans, packet collection and flows. `BenchmarkReaderAtProtocols`
 and `BenchmarkReaderAtFileProtocols` compare mixed-traffic scans in memory
 and on a warm file. Measure the benefit of [reusing TCP streams in HTTP and HTTP/2](https://github.com/cawalch/go-pcap/issues/41)
 on captures with and without decryption keys before changing segment storage.
-Schedule fingerprint formatting, QUIC allocation changes
-and compiler bounds-check work when end-to-end measurements justify them.
+Use `BenchmarkCaptureFingerprints` and `BenchmarkCaptureQUICInitials` to
+measure formatting and decryption costs across complete capture scans.
+Schedule compiler bounds-check work when those measurements justify it.
 
 ### Protocol and integration proposals
 

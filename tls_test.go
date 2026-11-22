@@ -161,7 +161,7 @@ func TestTLSHandshakeJA4SuiteAndCaptureTLS(t *testing.T) {
 	if ch.SNI != "c2.example.com" || len(ch.ALPNs) != 1 || ch.ALPNs[0] != "h2" {
 		t.Fatalf("ClientHello SNI/ALPN = (%q, %v)", ch.SNI, ch.ALPNs)
 	}
-	wantJA4 := "t13d0205h2_" + truncSHA256Hex12([]byte("1301,1302")) + "_" + truncSHA256Hex12([]byte("000a,000d,002b_0403,0804"))
+	wantJA4 := "t13d0205h2_62ed6f6ca7ad_fbabbea27ee8"
 	if ch.JA4 != wantJA4 {
 		t.Fatalf("ClientHello.JA4 = %q, want %q", ch.JA4, wantJA4)
 	}
@@ -173,7 +173,7 @@ func TestTLSHandshakeJA4SuiteAndCaptureTLS(t *testing.T) {
 	if !hsServer.HasServerHello || len(hsServer.Certificates) != 1 {
 		t.Fatalf("ServerHello/Certs = (hasSH=%v, certs=%d)", hsServer.HasServerHello, len(hsServer.Certificates))
 	}
-	wantJA4S := "t1302h2_1301_" + truncSHA256Hex12([]byte("002b,0010"))
+	wantJA4S := "t1302h2_1301_14e9539264dc"
 	if hsServer.ServerHello.JA4S != wantJA4S {
 		t.Fatalf("ServerHello.JA4S = %q, want %q", hsServer.ServerHello.JA4S, wantJA4S)
 	}

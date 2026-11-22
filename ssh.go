@@ -162,9 +162,15 @@ func parseFirstSSHKexInit(rest []byte) (SSHKexInit, error) {
 }
 
 func computeHASSH(kex, enc, mac, comp string) string {
-	raw := kex + ";" + enc + ";" + mac + ";" + comp
-	sum := md5.Sum([]byte(raw))
-	return hex.EncodeToString(sum[:])
+	h := md5.New()
+	for i, field := range [...]string{kex, enc, mac, comp} {
+		if i != 0 {
+			h.Write([]byte(";"))
+		}
+		h.Write([]byte(field))
+	}
+	var sum [md5.Size]byte
+	return hex.EncodeToString(h.Sum(sum[:0]))
 }
 
 // SSH extracts SSH handshakes, HASSH / HASSHServer fingerprints, and FoxIO

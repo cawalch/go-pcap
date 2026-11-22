@@ -611,11 +611,6 @@ func appendTruncSHA256Hex12(dst []byte, b []byte) []byte {
 	return append(dst, hexBuf[:]...)
 }
 
-func truncSHA256Hex12(b []byte) string {
-	var out [12]byte
-	return string(appendTruncSHA256Hex12(out[:0], b))
-}
-
 func computeJA4(ch *TLSClientHello, isQUIC bool) string {
 	// Filter non-GREASE ciphers and extensions using stack backing arrays.
 	var ciphersBacking [64]uint16
@@ -814,10 +809,13 @@ func JA4XFromCert(cert *x509.Certificate) string {
 	if cert == nil {
 		return "000000000000_000000000000_000000000000"
 	}
-	issuerOIDs := extractRDNOIDHexList(cert.RawIssuer)
-	subjectOIDs := extractRDNOIDHexList(cert.RawSubject)
-
-	var extOIDs []byte
+	var out [38]byte
+	var scratch [256]byte
+	b := appendTruncSHA256Hex12(out[:0], appendRDNOIDHexList(scratch[:0], cert.RawIssuer))
+	b = append(b, '_')
+	b = appendTruncSHA256Hex12(b, appendRDNOIDHexList(scratch[:0], cert.RawSubject))
+	b = append(b, '_')
+	extOIDs := scratch[:0]
 	for i, ext := range cert.Extensions {
 		rawOID, err := asn1.Marshal(ext.Id)
 		if err != nil || len(rawOID) < 3 || rawOID[0] != 0x06 {
@@ -827,19 +825,18 @@ func JA4XFromCert(cert *x509.Certificate) string {
 		if i > 0 && len(extOIDs) > 0 {
 			extOIDs = append(extOIDs, ',')
 		}
-		extOIDs = appendHexBytes(extOIDs, oidContent)
+		extOIDs = hex.AppendEncode(extOIDs, oidContent)
 	}
 
-	return truncSHA256Hex12(issuerOIDs) + "_" + truncSHA256Hex12(subjectOIDs) + "_" + truncSHA256Hex12(extOIDs)
+	return string(appendTruncSHA256Hex12(b, extOIDs))
 }
 
-func extractRDNOIDHexList(rawRDNSeq []byte) []byte {
+func appendRDNOIDHexList(out, rawRDNSeq []byte) []byte {
 	var seq asn1.RawValue
 	if _, err := asn1.Unmarshal(rawRDNSeq, &seq); err != nil {
-		return nil
+		return out
 	}
 	rest := seq.Bytes
-	var out []byte
 	for len(rest) > 0 {
 		var rdnSet asn1.RawValue
 		var err error
@@ -861,18 +858,10 @@ func extractRDNOIDHexList(rawRDNSeq []byte) []byte {
 			if len(out) > 0 {
 				out = append(out, ',')
 			}
-			out = appendHexBytes(out, oidRaw.Bytes)
+			out = hex.AppendEncode(out, oidRaw.Bytes)
 		}
 	}
 	return out
-}
-
-func appendHexBytes(dst []byte, src []byte) []byte {
-	const hexDigits = "0123456789abcdef"
-	for _, b := range src {
-		dst = append(dst, hexDigits[b>>4], hexDigits[b&0x0f])
-	}
-	return dst
 }
 
 func mergeTLSAnomalies(a, b TLSAnomalies) TLSAnomalies {

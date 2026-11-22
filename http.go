@@ -381,27 +381,32 @@ func computeJA4H(
 
 	// Part b: truncated SHA-256 of wire-order header names (excluding Cookie and Referer).
 	b = appendTruncSHA256Hex12(b, hdrNames)
-	b = append(b, '_')
 
-	// Part c: truncated SHA-256 of sorted cookie names.
-	if len(cookieNames) == 0 {
-		b = append(b, "000000000000"...)
-	} else {
-		sortedNames := slices.Clone(cookieNames)
-		slices.Sort(sortedNames)
-		b = appendTruncSHA256Hex12(b, []byte(strings.Join(sortedNames, ",")))
+	// These lists belong to this request. Hash each sorted list using the
+	// header-name scratch space after the preceding hash has consumed it.
+	for _, fields := range [...][]string{cookieNames, cookiePairs} {
+		b = append(b, '_')
+		if len(fields) == 0 {
+			b = appendTruncSHA256Hex12(b, nil)
+			continue
+		}
+		slices.Sort(fields)
+		input := hdrNames[:0]
+		size := len(fields) - 1 // commas between fields
+		for _, field := range fields {
+			size += len(field)
+		}
+		if size > cap(input) {
+			input = make([]byte, 0, size)
+		}
+		for i, field := range fields {
+			if i > 0 {
+				input = append(input, ',')
+			}
+			input = append(input, field...)
+		}
+		b = appendTruncSHA256Hex12(b, input)
 	}
-	b = append(b, '_')
-
-	// Part d: truncated SHA-256 of sorted cookie name=value pairs.
-	if len(cookiePairs) == 0 {
-		b = append(b, "000000000000"...)
-	} else {
-		sortedPairs := slices.Clone(cookiePairs)
-		slices.Sort(sortedPairs)
-		b = appendTruncSHA256Hex12(b, []byte(strings.Join(sortedPairs, ",")))
-	}
-
 	return string(b)
 }
 

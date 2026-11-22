@@ -64,8 +64,8 @@ func TestSSHHandshakeAndHASSH(t *testing.T) {
 	if hs.ClientBanner != "SSH-2.0-OpenSSH_9.6" || hs.ServerBanner != "SSH-2.0-OpenSSH_9.6p1" {
 		t.Fatalf("Banners = (%q, %q)", hs.ClientBanner, hs.ServerBanner)
 	}
-	wantHASSH := computeHASSH("curve25519-sha256", "chacha20-poly1305@openssh.com", "umac-128-etm@openssh.com", "none")
-	wantHASSHServer := computeHASSH("curve25519-sha256", "aes128-gcm@openssh.com", "umac-128-etm@openssh.com", "none")
+	const wantHASSH = "8663e68f847e5181dd867c4a2a1965d8"
+	const wantHASSHServer = "a50b379f2b9cfcd7139b986d901f42c2"
 	if hs.HASSH != wantHASSH || hs.HASSHServer != wantHASSHServer {
 		t.Fatalf("HASSH = (%q, %q), want (%q, %q)", hs.HASSH, hs.HASSHServer, wantHASSH, wantHASSHServer)
 	}

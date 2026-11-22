@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"strings"
 	"testing"
 )
 
@@ -436,5 +437,70 @@ func BenchmarkCaptureQUICInitials(b *testing.B) {
 		if err != nil || len(records) != 64 || !records[63].Handshake.HasServerHello {
 			b.Fatalf("got %d records, err %v", len(records), err)
 		}
+	}
+}
+
+// BenchmarkCaptureFingerprints includes flow grouping, reassembly and parsing
+// for 32 independent connections carrying the same application exchange.
+func BenchmarkCaptureFingerprints(b *testing.B) {
+	read := func(name string) []byte {
+		b.Helper()
+		p, err := os.ReadFile("testdata/foxio/" + name)
+		if err != nil {
+			b.Fatal(err)
+		}
+		return p
+	}
+	der := read("h2-leaf.der")
+	listLen := 3 + len(der)
+	cert := []byte{byte(listLen >> 16), byte(listLen >> 8), byte(listLen), byte(len(der) >> 16), byte(len(der) >> 8), byte(len(der))}
+	tlsServer := append(read("h2-server.tls"), wrapTLSHandshakeRecord(TLSHandshakeCertificate, append(cert, der...))...)
+	for _, tc := range []struct {
+		name           string
+		port           uint16
+		client, server []byte
+	}{
+		{"TLS", 443, read("grease-client.tls"), tlsServer},
+		{"HTTP", 80, []byte("GET / HTTP/1.1\r\nHost: localhost\r\nUser-Agent: curl/8.1.2\r\nCookie: z_sid=123; theme=dark; a_key=0123456789\r\nAccept-Language: en-US\r\n\r\n"), nil},
+		{"HTTPNoCookies", 80, []byte("GET / HTTP/1.1\r\nHost: localhost\r\n\r\n"), nil},
+		{"HTTPLargeCookies", 80, []byte("GET / HTTP/1.1\r\nHost: localhost\r\nCookie: " + strings.Repeat("session="+strings.Repeat("a", 96)+"; ", 48) + "\r\n\r\n"), nil},
+		{"SSH", 22, buildSSHKexStream("SSH-2.0-OpenSSH_9.6", "curve25519-sha256", "ssh-ed25519", "chacha20-poly1305@openssh.com", "umac-128-etm@openssh.com", "none"), buildSSHKexStream("SSH-2.0-OpenSSH_9.6", "curve25519-sha256", "ssh-ed25519", "aes128-gcm@openssh.com", "umac-128-etm@openssh.com", "none")},
+	} {
+		b.Run(tc.name, func(b *testing.B) {
+			client, server := [4]byte{192, 0, 2, 1}, [4]byte{192, 0, 2, 2}
+			var frames [][]byte
+			for i := range 32 {
+				port := uint16(10000 + i)
+				frames = append(frames, buildEthernetIPv4TCPFrame(client, server, port, tc.port, 1, 0, TCPFlagACK, tc.client))
+				if tc.server != nil {
+					frames = append(frames, buildEthernetIPv4TCPFrame(server, client, tc.port, port, 1, 0, TCPFlagACK, tc.server))
+				}
+			}
+			raw := buildPCAPNGFixture(binary.LittleEndian, nil, frames)
+			c, err := New(raw)
+			if err != nil {
+				b.Fatal(err)
+			}
+			b.ReportAllocs()
+			for b.Loop() {
+				switch tc.name {
+				case "TLS":
+					rs, e := c.TLS(raw)
+					if e != nil || len(rs) != 32 || len(rs[0].Handshake.Certificates) != 1 || rs[0].Handshake.Certificates[0].JA4X == "" || rs[0].Handshake.ServerHello.JA4S == "" || rs[0].Handshake.ClientHello.JA4 == "" {
+						b.Fatal("missing TLS fingerprints", e)
+					}
+				case "HTTP", "HTTPNoCookies", "HTTPLargeCookies":
+					rs, e := c.HTTP(raw)
+					if e != nil || len(rs) != 32 || rs[0].Request.JA4H == "" {
+						b.Fatal("missing JA4H", e)
+					}
+				case "SSH":
+					rs, e := c.SSH(raw)
+					if e != nil || len(rs) != 32 || rs[0].Handshake.HASSH == "" || rs[0].Handshake.HASSHServer == "" {
+						b.Fatal("missing HASSH", e)
+					}
+				}
+			}
+		})
 	}
 }
