@@ -122,3 +122,90 @@ func (f *Frame) JA4T(frameData []byte) (string, bool) {
 	}
 	return JA4T(f.TCPWindow, opts)
 }
+
+// JA4L formats a FoxIO JA4L (Light Distance / Latency) fingerprint from a
+// one-way or half-RTT latency delta in nanoseconds and the peer's IP TTL /
+// HopLimit:
+//
+//	<half_rtt_microseconds>_<ttl>
+func JA4L(deltaNs int64, ttl uint8) string {
+	if deltaNs < 0 {
+		deltaNs = 0
+	}
+	halfRTTMicros := uint64(deltaNs) / 2_000
+	var buf [32]byte
+	out := strconv.AppendUint(buf[:0], halfRTTMicros, 10)
+	out = append(out, '_')
+	out = strconv.AppendUint(out, uint64(ttl), 10)
+	return string(out)
+}
+
+// JA4SSHSegment describes one TCP packet in an SSH flow for [JA4SSH].
+type JA4SSHSegment struct {
+	IsClient      bool
+	PayloadLength int
+	Flags         uint8
+}
+
+// JA4SSH computes the FoxIO JA4SSH fingerprint over a sequence of bidirectional
+// TCP segments:
+//
+//	c<client_mode_len>s<server_mode_len>_c<client_data_pkts>s<server_data_pkts>_c<client_bare_acks>s<server_bare_acks>
+//
+// When two payload lengths share the same maximum frequency, the smaller length
+// wins (matching FoxIO JA4SSH tie-breaking).
+func JA4SSH(segments []JA4SSHSegment) string {
+	clientCounts := make(map[int]int)
+	serverCounts := make(map[int]int)
+	var clientDataPkts, serverDataPkts int
+	var clientBareACKs, serverBareACKs int
+
+	for i := range segments {
+		seg := &segments[i]
+		if seg.PayloadLength > 0 {
+			if seg.IsClient {
+				clientDataPkts++
+				clientCounts[seg.PayloadLength]++
+			} else {
+				serverDataPkts++
+				serverCounts[seg.PayloadLength]++
+			}
+		} else if (seg.Flags&TCPFlagACK) != 0 && (seg.Flags&(TCPFlagSYN|TCPFlagFIN|TCPFlagRST)) == 0 {
+			if seg.IsClient {
+				clientBareACKs++
+			} else {
+				serverBareACKs++
+			}
+		}
+	}
+
+	clientMode := modePayloadLen(clientCounts)
+	serverMode := modePayloadLen(serverCounts)
+
+	var buf [64]byte
+	out := append(buf[:0], 'c')
+	out = strconv.AppendInt(out, int64(clientMode), 10)
+	out = append(out, 's')
+	out = strconv.AppendInt(out, int64(serverMode), 10)
+	out = append(out, '_', 'c')
+	out = strconv.AppendInt(out, int64(clientDataPkts), 10)
+	out = append(out, 's')
+	out = strconv.AppendInt(out, int64(serverDataPkts), 10)
+	out = append(out, '_', 'c')
+	out = strconv.AppendInt(out, int64(clientBareACKs), 10)
+	out = append(out, 's')
+	out = strconv.AppendInt(out, int64(serverBareACKs), 10)
+	return string(out)
+}
+
+func modePayloadLen(counts map[int]int) int {
+	bestLen := 0
+	bestCount := 0
+	for length, c := range counts {
+		if c > bestCount || (c == bestCount && (bestLen == 0 || length < bestLen)) {
+			bestCount = c
+			bestLen = length
+		}
+	}
+	return bestLen
+}

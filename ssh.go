@@ -42,8 +42,8 @@ type SSHHandshake struct {
 	HASSHServer  string
 }
 
-// SSHRecord associates a parsed [SSHHandshake] with its 5-tuple TCP flow in a
-// [Capture].
+// SSHRecord associates a parsed [SSHHandshake] and its FoxIO JA4SSH session
+// fingerprint with its 5-tuple TCP flow in a [Capture].
 type SSHRecord struct {
 	FlowIndex int
 	SrcAddr   netip.Addr
@@ -51,6 +51,7 @@ type SSHRecord struct {
 	SrcPort   uint16
 	DstPort   uint16
 	Handshake SSHHandshake
+	JA4SSH    string
 }
 
 // ParseSSHHandshake parses SSH version banners and the first SSH_MSG_KEXINIT
@@ -166,13 +167,44 @@ func computeHASSH(kex, enc, mac, comp string) string {
 	return hex.EncodeToString(sum[:])
 }
 
-// SSH extracts SSH handshakes and HASSH / HASSHServer fingerprints across all
-// reassembled TCP streams in the capture.
+// SSH extracts SSH handshakes, HASSH / HASSHServer fingerprints, and FoxIO
+// JA4SSH session fingerprints across all TCP flows in the capture.
 func (c *Capture) SSH(data []byte) ([]SSHRecord, error) {
 	streams, err := c.Streams(data)
 	if err != nil {
 		return nil, err
 	}
+	if len(streams) == 0 {
+		return nil, nil
+	}
+
+	// Collect per-flow JA4SSH segments in a single packet pass.
+	r := SafeReader{data: data, size: int64(len(data))}
+	var table flowIndexTable
+	segsByFlow := make(map[int][]JA4SSHSegment)
+	_ = c.walkPackets(&r, func(pkt PacketRecord) error {
+		payload, err := r.Slice(pkt.PayloadOffset, pkt.PayloadLength)
+		if err != nil {
+			return err
+		}
+		frame, err := DecodeFrame(payload, pkt.LinkType)
+		if err != nil || frame.IPVersion == 0 || frame.IPProtocol != IPProtoTCP {
+			return nil
+		}
+		key, isFirst := makeCanonicalFlowKey(frame.IPProtocol, frame.SrcAddr, frame.SrcPort, frame.DstAddr, frame.DstPort)
+		flowIdx, _, err := table.lookupOrInsert(key)
+		if err != nil {
+			return err
+		}
+		_ = isFirst
+		segsByFlow[flowIdx] = append(segsByFlow[flowIdx], JA4SSHSegment{
+			IsClient:      frame.SrcAddr == streamsFlowClientAddr(streams, flowIdx, frame.SrcAddr),
+			PayloadLength: int(frame.PayloadLength),
+			Flags:         frame.TCPFlags,
+		})
+		return nil
+	})
+
 	var records []SSHRecord
 	for i := range streams {
 		st := &streams[i]
@@ -193,7 +225,17 @@ func (c *Capture) SSH(data []byte) ([]SSHRecord, error) {
 			SrcPort:   st.SrcPort,
 			DstPort:   st.DstPort,
 			Handshake: hs,
+			JA4SSH:    JA4SSH(segsByFlow[st.FlowIndex]),
 		})
 	}
 	return records, nil
+}
+
+func streamsFlowClientAddr(streams []TCPStream, flowIndex int, fallback netip.Addr) netip.Addr {
+	for i := range streams {
+		if streams[i].FlowIndex == flowIndex {
+			return streams[i].SrcAddr
+		}
+	}
+	return fallback
 }

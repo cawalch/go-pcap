@@ -121,3 +121,66 @@ func TestDecodeFrameLinuxSLL2AndLoopback(t *testing.T) {
 		t.Fatalf("DecodeFrame(LinkTypeNull) = (%+v, %v)", fLoop, err)
 	}
 }
+
+func TestDecodeFrameTunnelsMPLSPPPoEGREVXLANGeneve(t *testing.T) {
+	// Issue #12: Verify zero-alloc tunnel peeling for MPLS, PPPoE, GRE, VXLAN, and Geneve.
+	innerEth := buildEthernetIPv4TCPFrame([4]byte{10, 1, 1, 1}, [4]byte{10, 2, 2, 2}, 12345, 443, 1, 0, TCPFlagSYN, []byte("inner"))
+	innerIPv4 := innerEth[14:]
+
+	// 1. MPLS 2-label stack over IPv4: Ethernet (14) + MPLS label 1 (4, BOS=0) + MPLS label 2 (4, BOS=1) + IPv4/TCP.
+	mplsFrame := make([]byte, 14+8+len(innerIPv4))
+	binary.BigEndian.PutUint16(mplsFrame[12:14], EtherTypeMPLSUnicast)
+	mplsFrame[14+2] = 0x00 // BOS = 0
+	mplsFrame[18+2] = 0x01 // BOS = 1
+	copy(mplsFrame[22:], innerIPv4)
+	fMPLS, err := DecodeFrame(mplsFrame, LinkTypeEthernet)
+	if err != nil || fMPLS.DstPort != 443 || fMPLS.SrcAddr != netip.MustParseAddr("10.1.1.1") {
+		t.Fatalf("DecodeFrame(MPLS) = (%+v, %v)", fMPLS, err)
+	}
+
+	// 2. PPPoE Session over IPv4: Ethernet (14, 0x8864) + PPPoE (6) + PPP proto IPv4 (2, 0x0021) + IPv4/TCP.
+	pppoeFrame := make([]byte, 14+8+len(innerIPv4))
+	binary.BigEndian.PutUint16(pppoeFrame[12:14], EtherTypePPPoESession)
+	binary.BigEndian.PutUint16(pppoeFrame[20:22], 0x0021)
+	copy(pppoeFrame[22:], innerIPv4)
+	fPPPoE, err := DecodeFrame(pppoeFrame, LinkTypeEthernet)
+	if err != nil || fPPPoE.DstPort != 443 || fPPPoE.DstAddr != netip.MustParseAddr("10.2.2.2") {
+		t.Fatalf("DecodeFrame(PPPoE) = (%+v, %v)", fPPPoE, err)
+	}
+
+	// 3. GRE over IPv4 carrying inner IPv4/TCP: Ethernet (14) + Outer IPv4 (20, proto=47) + GRE (4, proto=0x0800) + inner IPv4/TCP.
+	greFrame := make([]byte, 14+20+4+len(innerIPv4))
+	binary.BigEndian.PutUint16(greFrame[12:14], EtherTypeIPv4)
+	greFrame[14] = 0x45
+	binary.BigEndian.PutUint16(greFrame[16:18], uint16(20+4+len(innerIPv4)))
+	greFrame[22] = 64
+	greFrame[23] = IPProtoGRE
+	copy(greFrame[26:30], []byte{172, 16, 0, 1})
+	copy(greFrame[30:34], []byte{172, 16, 0, 2})
+	binary.BigEndian.PutUint16(greFrame[36:38], EtherTypeIPv4)
+	copy(greFrame[38:], innerIPv4)
+	fGRE, err := DecodeFrame(greFrame, LinkTypeEthernet)
+	if err != nil || fGRE.DstPort != 443 || fGRE.SrcAddr != netip.MustParseAddr("10.1.1.1") {
+		t.Fatalf("DecodeFrame(GRE) = (%+v, %v)", fGRE, err)
+	}
+
+	// 4. VXLAN (UDP port 4789, 8-byte VXLAN header with 0x08 flag + inner Ethernet frame).
+	vxlanPayload := make([]byte, 8+len(innerEth))
+	vxlanPayload[0] = 0x08
+	copy(vxlanPayload[8:], innerEth)
+	vxlanFrame := buildEthernetIPv4UDPFrame([4]byte{172, 16, 0, 1}, [4]byte{172, 16, 0, 2}, 55555, 4789, vxlanPayload)
+	fVXLAN, err := DecodeFrame(vxlanFrame, LinkTypeEthernet)
+	if err != nil || fVXLAN.DstPort != 443 || fVXLAN.SrcAddr != netip.MustParseAddr("10.1.1.1") {
+		t.Fatalf("DecodeFrame(VXLAN) = (%+v, %v)", fVXLAN, err)
+	}
+
+	// 5. Geneve (UDP port 6081, 8-byte Geneve header with protocol 0x6558 Transparent Ethernet Bridging + inner Ethernet frame).
+	genevePayload := make([]byte, 8+len(innerEth))
+	binary.BigEndian.PutUint16(genevePayload[2:4], EtherTypeTransparentBr)
+	copy(genevePayload[8:], innerEth)
+	geneveFrame := buildEthernetIPv4UDPFrame([4]byte{172, 16, 0, 1}, [4]byte{172, 16, 0, 2}, 55555, 6081, genevePayload)
+	fGeneve, err := DecodeFrame(geneveFrame, LinkTypeEthernet)
+	if err != nil || fGeneve.DstPort != 443 || fGeneve.DstAddr != netip.MustParseAddr("10.2.2.2") {
+		t.Fatalf("DecodeFrame(Geneve) = (%+v, %v)", fGeneve, err)
+	}
+}

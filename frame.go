@@ -21,6 +21,7 @@ type FrameAnomalies struct {
 	IPFragment                bool
 	InvalidTCPDataOffset      bool
 	VLANDepthExceeded         bool
+	MPLSDepthExceeded         bool
 	IPv6ExtLimitExceeded      bool
 }
 
@@ -32,6 +33,7 @@ func (a FrameAnomalies) Any() bool {
 		a.IPFragment ||
 		a.InvalidTCPDataOffset ||
 		a.VLANDepthExceeded ||
+		a.MPLSDepthExceeded ||
 		a.IPv6ExtLimitExceeded
 }
 
@@ -188,16 +190,80 @@ func DecodeFrame(data []byte, linkType LinkType) (Frame, error) {
 		return Frame{}, fmt.Errorf("%w: unsupported link type %d", ErrInvalidFrame, linkType)
 	}
 
+	dispatchEtherType(r, offset, &f)
+	return f, nil
+}
+
+func dispatchEtherType(r *SafeReader, offset int64, f *Frame) {
+	// Peel PPPoE Session (0x8864) or MPLS label stacks (0x8847 / 0x8848) before L3 dispatch.
+	if f.EtherType == EtherTypePPPoESession {
+		if r.Size()-offset < 8 {
+			f.Anomalies.TruncatedLayer = true
+			return
+		}
+		pppProto, _ := r.ReadUint16BE(offset + 6)
+		f.pushLayer(LayerPPPoE, offset, 8)
+		offset += 8
+		switch pppProto {
+		case 0x0021:
+			f.EtherType = EtherTypeIPv4
+		case 0x0057:
+			f.EtherType = EtherTypeIPv6
+		default:
+			f.PayloadOffset = uint32(offset)
+			if r.Size() > offset {
+				f.PayloadLength = uint32(r.Size() - offset)
+			}
+			return
+		}
+	}
+
+	if f.EtherType == EtherTypeMPLSUnicast || f.EtherType == EtherTypeMPLSMulticast {
+		mplsStart := offset
+		labels := 0
+		for {
+			if labels >= MaxMPLSLabels {
+				f.Anomalies.MPLSDepthExceeded = true
+				return
+			}
+			if r.Size()-offset < 4 {
+				f.Anomalies.TruncatedLayer = true
+				return
+			}
+			bos := (r.data[offset+2] & 0x01) != 0
+			offset += 4
+			labels++
+			if bos {
+				break
+			}
+		}
+		f.pushLayer(LayerMPLS, mplsStart, offset-mplsStart)
+		if r.Size() <= offset {
+			f.Anomalies.TruncatedLayer = true
+			return
+		}
+		switch r.data[offset] >> 4 {
+		case 4:
+			f.EtherType = EtherTypeIPv4
+		case 6:
+			f.EtherType = EtherTypeIPv6
+		default:
+			f.PayloadOffset = uint32(offset)
+			f.PayloadLength = uint32(r.Size() - offset)
+			return
+		}
+	}
+
 	switch f.EtherType {
 	case EtherTypeIPv4:
-		decodeIPv4(r, offset, &f)
+		decodeIPv4(r, offset, f)
 	case EtherTypeIPv6:
-		decodeIPv6(r, offset, &f)
+		decodeIPv6(r, offset, f)
 	case EtherTypeARP:
 		avail := r.Size() - offset
 		if avail < 28 {
 			f.Anomalies.TruncatedLayer = true
-			return f, nil
+			return
 		}
 		f.pushLayer(LayerARP, offset, 28)
 		f.PayloadOffset = uint32(offset + 28)
@@ -207,8 +273,6 @@ func DecodeFrame(data []byte, linkType LinkType) (Frame, error) {
 			f.PayloadLength = uint32(r.Size() - offset)
 		}
 	}
-
-	return f, nil
 }
 
 func isVLANEtherType(et uint16) bool {
@@ -400,8 +464,37 @@ func decodeTransport(r *SafeReader, offset, ipBound int64, proto uint8, f *Frame
 		f.SrcPort = binary.BigEndian.Uint16(r.data[offset : offset+2])
 		f.DstPort = binary.BigEndian.Uint16(r.data[offset+2 : offset+4])
 		f.pushLayer(LayerUDP, offset, 8)
-		f.PayloadOffset = uint32(offset + 8)
-		f.PayloadLength = uint32(avail - 8)
+		udpPayloadOff := offset + 8
+		udpPayloadLen := avail - 8
+		f.PayloadOffset = uint32(udpPayloadOff)
+		f.PayloadLength = uint32(udpPayloadLen)
+
+		// Peel VXLAN (UDP port 4789, 8-byte VXLAN header with I-flag 0x08 + inner 14-byte Ethernet)
+		// or Geneve (UDP port 6081, 8 + OptLen*4 header) when space permits in Layers.
+		if int(f.LayerCount)+2 <= MaxFrameLayers {
+			if f.DstPort == 4789 && udpPayloadLen >= 8+14 && r.data[udpPayloadOff] == 0x08 {
+				f.pushLayer(LayerVXLAN, udpPayloadOff, 8)
+				decodeInnerEthernet(r, udpPayloadOff+8, f)
+			} else if f.DstPort == 6081 && udpPayloadLen >= 8 {
+				optLen := int64(r.data[udpPayloadOff]&0x3f) * 4
+				geneveHdrLen := 8 + optLen
+				protoType := binary.BigEndian.Uint16(r.data[udpPayloadOff+2 : udpPayloadOff+4])
+				if udpPayloadLen >= geneveHdrLen {
+					f.pushLayer(LayerGeneve, udpPayloadOff, geneveHdrLen)
+					innerOff := udpPayloadOff + geneveHdrLen
+					switch protoType {
+					case EtherTypeTransparentBr:
+						decodeInnerEthernet(r, innerOff, f)
+					case EtherTypeIPv4, EtherTypeIPv6:
+						f.EtherType = protoType
+						dispatchEtherType(r, innerOff, f)
+					}
+				}
+			}
+		}
+
+	case IPProtoGRE:
+		decodeGRE(r, offset, ipBound, f)
 
 	case IPProtoICMP, IPProtoIPv6ICMP:
 		if avail < 4 {
@@ -425,8 +518,83 @@ func decodeTransport(r *SafeReader, offset, ipBound int64, proto uint8, f *Frame
 	}
 }
 
-// FlowSummary aggregates bidirectional packet, byte, flag, JA4T, and process
-// metadata for a 5-tuple network flow.
+func decodeGRE(r *SafeReader, offset, ipBound int64, f *Frame) {
+	avail := ipBound - offset
+	if avail < 4 {
+		f.Anomalies.TruncatedLayer = true
+		return
+	}
+	flagsVer := binary.BigEndian.Uint16(r.data[offset : offset+2])
+	if (flagsVer & 0x0007) != 0 {
+		// Unsupported GRE version (only standard GRE v0 is peeled).
+		f.PayloadOffset = uint32(offset)
+		f.PayloadLength = uint32(avail)
+		return
+	}
+	protoType := binary.BigEndian.Uint16(r.data[offset+2 : offset+4])
+	greLen := int64(4)
+	if (flagsVer & 0x8000) != 0 {
+		greLen += 4 // Checksum + Reserved1
+	}
+	if (flagsVer & 0x2000) != 0 {
+		greLen += 4 // Key
+	}
+	if (flagsVer & 0x1000) != 0 {
+		greLen += 4 // Sequence Number
+	}
+	if greLen > avail {
+		f.Anomalies.TruncatedLayer = true
+		return
+	}
+	f.pushLayer(LayerGRE, offset, greLen)
+	innerOff := offset + greLen
+	if int(f.LayerCount) >= MaxFrameLayers {
+		f.PayloadOffset = uint32(innerOff)
+		f.PayloadLength = uint32(ipBound - innerOff)
+		return
+	}
+	switch protoType {
+	case EtherTypeTransparentBr:
+		decodeInnerEthernet(r, innerOff, f)
+	case EtherTypeIPv4, EtherTypeIPv6, EtherTypeMPLSUnicast, EtherTypeMPLSMulticast, EtherTypePPPoESession:
+		f.EtherType = protoType
+		dispatchEtherType(r, innerOff, f)
+	default:
+		f.PayloadOffset = uint32(innerOff)
+		f.PayloadLength = uint32(ipBound - innerOff)
+	}
+}
+
+func decodeInnerEthernet(r *SafeReader, offset int64, f *Frame) {
+	if r.Size()-offset < 14 {
+		f.Anomalies.TruncatedLayer = true
+		return
+	}
+	f.EtherType = binary.BigEndian.Uint16(r.data[offset+12 : offset+14])
+	f.pushLayer(LayerEthernet, offset, 14)
+	cur := offset + 14
+	for isVLANEtherType(f.EtherType) {
+		if int(f.VLANCount) >= MaxVLANTags {
+			f.Anomalies.VLANDepthExceeded = true
+			return
+		}
+		if r.Size()-cur < 4 {
+			f.Anomalies.TruncatedLayer = true
+			return
+		}
+		tci := binary.BigEndian.Uint16(r.data[cur : cur+2])
+		nextEther := binary.BigEndian.Uint16(r.data[cur+2 : cur+4])
+		f.VLANTags[f.VLANCount] = tci & 0x0fff
+		f.VLANCount++
+		f.EtherType = nextEther
+		f.pushLayer(LayerVLAN, cur, 4)
+		cur += 4
+	}
+	dispatchEtherType(r, cur, f)
+}
+
+// FlowSummary aggregates bidirectional packet, byte, flag, JA4T, JA4L, and
+// process metadata for a 5-tuple network flow.
 type FlowSummary struct {
 	Protocol         uint8
 	SrcAddr          netip.Addr
@@ -443,8 +611,15 @@ type FlowSummary struct {
 	TCPFlags         uint8
 	ClientJA4T       string
 	ServerJA4TS      string
+	ClientJA4L       string
+	ServerJA4L       string
 	ProcessID        uint32
+	UserID           uint32
+	ProcessName      string
+	ProcessArgs      string
+	ContainerID      string
 	HasProcessID     bool
+	HasUserID        bool
 	Anomalies        FrameAnomalies
 }
 
@@ -533,8 +708,16 @@ func (c *Capture) Flows(data []byte) ([]FlowSummary, error) {
 	}
 
 	r := SafeReader{data: data, size: int64(len(data))}
+	type tcpHandshakeTime struct {
+		synNs      int64
+		synAckNs   int64
+		hasSYN     bool
+		hasSYNACK  bool
+		hasClientL bool
+	}
 	var table flowIndexTable
 	var flows []FlowSummary
+	var hsTimes []tcpHandshakeTime
 
 	err := c.walkPackets(&r, func(pkt PacketRecord) error {
 		payload, err := r.Slice(pkt.PayloadOffset, pkt.PayloadLength)
@@ -561,11 +744,18 @@ func (c *Capture) Flows(data []byte) ([]FlowSummary, error) {
 				FirstTimestampNs: pkt.TimestampNs,
 				LastTimestampNs:  pkt.TimestampNs,
 				ProcessID:        pkt.ProcessID,
+				UserID:           pkt.UserID,
+				ProcessName:      pkt.ProcessName,
+				ProcessArgs:      pkt.ProcessArgs,
+				ContainerID:      pkt.ContainerID,
 				HasProcessID:     pkt.HasProcessID,
+				HasUserID:        pkt.HasUserID,
 			})
+			hsTimes = append(hsTimes, tcpHandshakeTime{})
 		}
 
 		flow := &flows[idx]
+		hst := &hsTimes[idx]
 		flow.PacketCount++
 		if pkt.TimestampNs < flow.FirstTimestampNs {
 			flow.FirstTimestampNs = pkt.TimestampNs
@@ -577,23 +767,52 @@ func (c *Capture) Flows(data []byte) ([]FlowSummary, error) {
 			flow.ProcessID = pkt.ProcessID
 			flow.HasProcessID = true
 		}
+		if !flow.HasUserID && pkt.HasUserID {
+			flow.UserID = pkt.UserID
+			flow.HasUserID = true
+		}
+		if flow.ProcessName == "" && pkt.ProcessName != "" {
+			flow.ProcessName = pkt.ProcessName
+		}
+		if flow.ProcessArgs == "" && pkt.ProcessArgs != "" {
+			flow.ProcessArgs = pkt.ProcessArgs
+		}
+		if flow.ContainerID == "" && pkt.ContainerID != "" {
+			flow.ContainerID = pkt.ContainerID
+		}
 		flow.TCPFlags |= frame.TCPFlags
 		flow.Anomalies = mergeFrameAnomalies(flow.Anomalies, frame.Anomalies)
 
 		if frame.SrcAddr == flow.SrcAddr && frame.SrcPort == flow.SrcPort {
 			flow.ClientPackets++
 			flow.ClientBytes += uint64(frame.PayloadLength)
-			if flow.ClientJA4T == "" && (frame.TCPFlags&(TCPFlagSYN|TCPFlagACK)) == TCPFlagSYN {
-				if fp, ok := frame.JA4T(payload); ok {
-					flow.ClientJA4T = fp
+			if (frame.TCPFlags & (TCPFlagSYN | TCPFlagACK)) == TCPFlagSYN {
+				if flow.ClientJA4T == "" {
+					if fp, ok := frame.JA4T(payload); ok {
+						flow.ClientJA4T = fp
+					}
 				}
+				if !hst.hasSYN {
+					hst.synNs = pkt.TimestampNs
+					hst.hasSYN = true
+				}
+			} else if hst.hasSYNACK && !hst.hasClientL && (frame.TCPFlags&TCPFlagACK) != 0 {
+				flow.ClientJA4L = JA4L(pkt.TimestampNs-hst.synAckNs, frame.TTL)
+				hst.hasClientL = true
 			}
 		} else {
 			flow.ServerPackets++
 			flow.ServerBytes += uint64(frame.PayloadLength)
-			if flow.ServerJA4TS == "" && (frame.TCPFlags&(TCPFlagSYN|TCPFlagACK)) == (TCPFlagSYN|TCPFlagACK) {
-				if fp, ok := frame.JA4T(payload); ok {
-					flow.ServerJA4TS = fp
+			if (frame.TCPFlags & (TCPFlagSYN | TCPFlagACK)) == (TCPFlagSYN | TCPFlagACK) {
+				if flow.ServerJA4TS == "" {
+					if fp, ok := frame.JA4T(payload); ok {
+						flow.ServerJA4TS = fp
+					}
+				}
+				if hst.hasSYN && !hst.hasSYNACK {
+					hst.synAckNs = pkt.TimestampNs
+					hst.hasSYNACK = true
+					flow.ServerJA4L = JA4L(pkt.TimestampNs-hst.synNs, frame.TTL)
 				}
 			}
 		}
@@ -614,6 +833,7 @@ func mergeFrameAnomalies(a, b FrameAnomalies) FrameAnomalies {
 		IPFragment:                a.IPFragment || b.IPFragment,
 		InvalidTCPDataOffset:      a.InvalidTCPDataOffset || b.InvalidTCPDataOffset,
 		VLANDepthExceeded:         a.VLANDepthExceeded || b.VLANDepthExceeded,
+		MPLSDepthExceeded:         a.MPLSDepthExceeded || b.MPLSDepthExceeded,
 		IPv6ExtLimitExceeded:      a.IPv6ExtLimitExceeded || b.IPv6ExtLimitExceeded,
 	}
 }

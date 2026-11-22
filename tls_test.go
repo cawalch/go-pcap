@@ -2,6 +2,8 @@ package pcap
 
 import (
 	"bytes"
+	"crypto/aes"
+	"crypto/cipher"
 	"crypto/ecdsa"
 	"crypto/elliptic"
 	"crypto/rand"
@@ -16,6 +18,19 @@ import (
 	"testing"
 	"time"
 )
+
+func sealAESGCMTest(t *testing.T, key, nonce, plain, aad []byte) []byte {
+	t.Helper()
+	block, err := aes.NewCipher(key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	gcm, err := cipher.NewGCM(block)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return gcm.Seal(nil, nonce, plain, aad)
+}
 
 func buildTLS13ClientHelloRecord(sni string, alpn string) []byte {
 	var ext bytes.Buffer
@@ -295,4 +310,92 @@ func TestTLSBoundsAnomaliesAndMalformedInputs(t *testing.T) {
 	if !strings.HasPrefix(hs.ClientHello.JA4, "t13i") {
 		t.Fatalf("ClientHello.JA4 = %q, want 't13i' prefix for IP-literal SNI", hs.ClientHello.JA4)
 	}
+}
+
+func TestTLS12OfflineStreamDecryptionViaClientRandom(t *testing.T) {
+	// Issue #4: Verify TLS 1.2 CLIENT_RANDOM master secret PRF key expansion and
+	// AES-128-GCM decryption in DecryptTLS12Records and Capture.HTTP.
+	var clientRandom, serverRandom [32]byte
+	for i := range 32 {
+		clientRandom[i] = byte(0x10 + i)
+		serverRandom[i] = byte(0x50 + i)
+	}
+	masterSecret := bytes.Repeat([]byte{0x99}, 48)
+
+	// Build a TLS 1.2 ClientHello and ServerHello choosing TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256 (0xc02f).
+	var chBody bytes.Buffer
+	chBody.Write([]byte{0x03, 0x03})
+	chBody.Write(clientRandom[:])
+	chBody.WriteByte(0)
+	chBody.Write([]byte{0x00, 0x02, 0xc0, 0x2f})
+	chBody.Write([]byte{0x01, 0x00})
+	chRec := wrapTLSHandshakeRecord(TLSHandshakeClientHello, chBody.Bytes())
+
+	var shBody bytes.Buffer
+	shBody.Write([]byte{0x03, 0x03})
+	shBody.Write(serverRandom[:])
+	shBody.WriteByte(0)
+	shBody.Write([]byte{0xc0, 0x2f})
+	shBody.WriteByte(0)
+	shRec := wrapTLSHandshakeRecord(TLSHandshakeServerHello, shBody.Bytes())
+
+	// Derive TLS 1.2 key block to encrypt a client HTTP GET record (seqNum = 0).
+	keyLen, hashFn, _ := tls12CipherSuiteParams(TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256)
+	var seed [64]byte
+	copy(seed[0:32], serverRandom[:])
+	copy(seed[32:64], clientRandom[:])
+	keyBlock := tls12PRF(hashFn, masterSecret, "key expansion", seed[:], 2*keyLen+8)
+	clientWriteKey := keyBlock[:keyLen]
+	clientSalt := keyBlock[2*keyLen : 2*keyLen+4]
+
+	aead, _, err := deriveTLS13TrafficAEAD(bytes.Repeat([]byte{1}, 32), TLS_AES_128_GCM_SHA256)
+	_ = aead
+	_ = err
+	// Encrypt using DecryptTLS12Records' exact inverse.
+	plainHTTP := []byte("GET /tls12 HTTP/1.1\r\nHost: legacy.example.com\r\n\r\n")
+	encRec := encryptTLS12AppDataRecord(t, clientWriteKey, clientSalt, 0, plainHTTP)
+
+	clientStream := append(bytes.Clone(chRec), encRec...)
+	dec, err := DecryptTLS12Records(clientStream, TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256, masterSecret, clientRandom, serverRandom, true)
+	if err != nil || !bytes.Equal(dec, plainHTTP) {
+		t.Fatalf("DecryptTLS12Records() = (%q, %v), want %q", dec, err, plainHTTP)
+	}
+
+	keylog := fmt.Sprintf("CLIENT_RANDOM %s %s\n", hex.EncodeToString(clientRandom[:]), hex.EncodeToString(masterSecret))
+	p1 := buildEthernetIPv4TCPFrame([4]byte{10, 0, 0, 1}, [4]byte{10, 0, 0, 2}, 56000, 443, 1, 0, TCPFlagSYN, nil)
+	p2 := buildEthernetIPv4TCPFrame([4]byte{10, 0, 0, 2}, [4]byte{10, 0, 0, 1}, 443, 56000, 100, 2, TCPFlagSYN|TCPFlagACK, nil)
+	p3 := buildEthernetIPv4TCPFrame([4]byte{10, 0, 0, 1}, [4]byte{10, 0, 0, 2}, 56000, 443, 2, 101, TCPFlagPSH|TCPFlagACK, clientStream)
+	p4 := buildEthernetIPv4TCPFrame([4]byte{10, 0, 0, 2}, [4]byte{10, 0, 0, 1}, 443, 56000, 101, 2+uint32(len(clientStream)), TCPFlagPSH|TCPFlagACK, shRec)
+
+	rawPCAPNG := buildPCAPNGFixture(binary.LittleEndian, []byte(keylog), [][]byte{p1, p2, p3, p4})
+	cap, err := New(rawPCAPNG)
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+	httpRecords, err := cap.HTTP(rawPCAPNG)
+	if err != nil || len(httpRecords) != 1 || !httpRecords[0].IsDecrypted || httpRecords[0].Request.Path != "/tls12" {
+		t.Fatalf("cap.HTTP(TLS 1.2 DSB) = (%+v, %v)", httpRecords, err)
+	}
+}
+
+func encryptTLS12AppDataRecord(t *testing.T, writeKey []byte, salt []byte, seqNum uint64, plaintext []byte) []byte {
+	t.Helper()
+	// Derive AES-GCM directly via stdlib helper in tls_decrypt.go.
+	explicitNonce := []byte{0, 0, 0, 0, 0, 0, 0, 1}
+	var nonce [12]byte
+	copy(nonce[0:4], salt)
+	copy(nonce[4:12], explicitNonce)
+
+	var aad [13]byte
+	binary.BigEndian.PutUint64(aad[0:8], seqNum)
+	aad[8] = TLSRecordApplicationData
+	binary.BigEndian.PutUint16(aad[9:11], TLSVersion12)
+	binary.BigEndian.PutUint16(aad[11:13], uint16(len(plaintext)))
+
+	// Re-use aes.NewCipher + cipher.NewGCM through a tiny local wrapper.
+	ciphertext := sealAESGCMTest(t, writeKey, nonce[:], plaintext, aad[:])
+	recLen := uint16(len(explicitNonce) + len(ciphertext))
+	hdr := []byte{TLSRecordApplicationData, 0x03, 0x03, byte(recLen >> 8), byte(recLen)}
+	out := append(hdr, explicitNonce...)
+	return append(out, ciphertext...)
 }

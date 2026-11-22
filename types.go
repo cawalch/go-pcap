@@ -48,16 +48,17 @@ const (
 
 // PcapNG block type codes.
 const (
-	BlockTypeSectionHeader     uint32 = 0x0a0d0d0a
-	BlockTypeInterfaceDesc     uint32 = 0x00000001
-	BlockTypeSimplePacket      uint32 = 0x00000003
-	BlockTypeNameResolution    uint32 = 0x00000004
-	BlockTypeInterfaceStats    uint32 = 0x00000005
-	BlockTypeEnhancedPacket    uint32 = 0x00000006
-	BlockTypeDecryptionSecrets uint32 = 0x0000000a
+	BlockTypeSectionHeader      uint32 = 0x0a0d0d0a
+	BlockTypeInterfaceDesc      uint32 = 0x00000001
+	BlockTypeSimplePacket       uint32 = 0x00000003
+	BlockTypeNameResolution     uint32 = 0x00000004
+	BlockTypeInterfaceStats     uint32 = 0x00000005
+	BlockTypeEnhancedPacket     uint32 = 0x00000006
+	BlockTypeDecryptionSecrets  uint32 = 0x0000000a
+	BlockTypeDarwinProcessEvent uint32 = 0x80000001
 )
 
-// PcapNG option codes.
+// PcapNG option and record codes.
 const (
 	optEndOfOpt uint16 = 0
 	optComment  uint16 = 1
@@ -74,13 +75,32 @@ const (
 	optIDBOS          uint16 = 12
 	optIDBTsOffset    uint16 = 14
 
-	// Enhanced Packet Block (EPB) options (including Wireshark/ptcpdump process extensions).
-	optEPBFlags     uint16 = 2
-	optEPBDropCount uint16 = 4
-	optEPBPacketID  uint16 = 5
-	optEPBQueue     uint16 = 6
-	optEPBProcessID uint16 = 0x8001 // Process ID extension (uint32 LE)
-	optEPBThreadID  uint16 = 0x8002 // Thread ID extension (uint32 LE)
+	// Enhanced Packet Block (EPB) options (including Wireshark/ptcpdump/Darwin process extensions).
+	optEPBFlags       uint16 = 2
+	optEPBDropCount   uint16 = 4
+	optEPBPacketID    uint16 = 5
+	optEPBQueue       uint16 = 6
+	optEPBDarwinDPEB  uint16 = 0x8000 // Darwin Process Event Block index
+	optEPBProcessID   uint16 = 0x8001 // Process ID extension (uint32 LE)
+	optEPBThreadID    uint16 = 0x8002 // Thread ID extension (uint32 LE)
+	optEPBProcessName uint16 = 0x8003 // Process name / comm string
+	optEPBProcessArgs uint16 = 0x8004 // Process command-line arguments string
+	optEPBUserID      uint16 = 0x8005 // User ID (uint32 LE)
+	optEPBContainerID uint16 = 0x8006 // Container / pod ID string
+
+	// Name Resolution Block (NRB) record types.
+	nrbRecordEnd  uint16 = 0x0000
+	nrbRecordIPv4 uint16 = 0x0001
+	nrbRecordIPv6 uint16 = 0x0002
+
+	// Interface Statistics Block (ISB) options.
+	optISBStartTime uint16 = 2
+	optISBEndTime   uint16 = 3
+	optISBIfRecv    uint16 = 4
+	optISBIfDrop    uint16 = 5
+
+	// Darwin Process Event Block (DPEB) options.
+	optDPEBProcessName uint16 = 2
 )
 
 // PcapNG Decryption Secrets Block (DSB) secret types.
@@ -93,13 +113,16 @@ const (
 
 // Ethernet protocol types (EtherType).
 const (
-	EtherTypeIPv4        uint16 = 0x0800
-	EtherTypeARP         uint16 = 0x0806
-	EtherTypeVLAN        uint16 = 0x8100 // IEEE 802.1Q
-	EtherTypeIPv6        uint16 = 0x86dd
-	EtherTypeMPLSUnicast uint16 = 0x8847
-	EtherTypeQinQ        uint16 = 0x88a8 // IEEE 802.1ad
-	EtherTypeQinQLegacy  uint16 = 0x9100
+	EtherTypeIPv4          uint16 = 0x0800
+	EtherTypeARP           uint16 = 0x0806
+	EtherTypeTransparentBr uint16 = 0x6558 // Transparent Ethernet Bridging (GRE inner Ethernet)
+	EtherTypeVLAN          uint16 = 0x8100 // IEEE 802.1Q
+	EtherTypeIPv6          uint16 = 0x86dd
+	EtherTypeMPLSUnicast   uint16 = 0x8847
+	EtherTypeMPLSMulticast uint16 = 0x8848
+	EtherTypePPPoESession  uint16 = 0x8864
+	EtherTypeQinQ          uint16 = 0x88a8 // IEEE 802.1ad
+	EtherTypeQinQLegacy    uint16 = 0x9100
 )
 
 // IP protocol numbers.
@@ -108,8 +131,10 @@ const (
 	IPProtoICMP      uint8 = 1
 	IPProtoTCP       uint8 = 6
 	IPProtoUDP       uint8 = 17
+	IPProtoIPv6      uint8 = 41
 	IPProtoIPv6Route uint8 = 43
 	IPProtoIPv6Frag  uint8 = 44
+	IPProtoGRE       uint8 = 47
 	IPProtoESP       uint8 = 50
 	IPProtoAH        uint8 = 51
 	IPProtoIPv6ICMP  uint8 = 58
@@ -142,6 +167,11 @@ const (
 	LayerLoopback
 	LayerRawIP
 	LayerARP
+	LayerMPLS
+	LayerPPPoE
+	LayerGRE
+	LayerVXLAN
+	LayerGeneve
 	LayerIPv4
 	LayerIPv6
 	LayerIPv6Ext
@@ -168,6 +198,16 @@ func (p LayerProto) String() string {
 		return "raw_ip"
 	case LayerARP:
 		return "arp"
+	case LayerMPLS:
+		return "mpls"
+	case LayerPPPoE:
+		return "pppoe"
+	case LayerGRE:
+		return "gre"
+	case LayerVXLAN:
+		return "vxlan"
+	case LayerGeneve:
+		return "geneve"
 	case LayerIPv4:
 		return "ipv4"
 	case LayerIPv6:
@@ -194,11 +234,15 @@ const (
 	MaxFlows                 = 65_536
 	MaxDecryptionSecrets     = 256
 	MaxDecryptionSecretBytes = 4 << 20 // 4 MiB across all DSB blocks
+	MaxNameResolutionRecords = 16_384
+	MaxInterfaceStats        = 1024
+	MaxProcessEvents         = 16_384
 	MaxOptionsPerBlock       = 64
 	MaxOptionStringBytes     = 4096
 	MaxSnapLen               = 16 << 20 // 16 MiB
 	MaxFrameLayers           = 8
 	MaxVLANTags              = 4
+	MaxMPLSLabels            = 8
 	MaxIPv6ExtHeaders        = 8
 
 	// TCP stream reassembly limits.
@@ -276,10 +320,16 @@ const (
 	QUICVersionNegotiation uint32 = 0x00000000
 )
 
-// TLS 1.3 cipher suites supported for offline decryption.
+// TLS 1.2 and TLS 1.3 cipher suites supported for offline decryption.
 const (
-	TLS_AES_128_GCM_SHA256 uint16 = 0x1301
-	TLS_AES_256_GCM_SHA384 uint16 = 0x1302
+	TLS_RSA_WITH_AES_128_GCM_SHA256         uint16 = 0x009c
+	TLS_RSA_WITH_AES_256_GCM_SHA384         uint16 = 0x009d
+	TLS_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256 uint16 = 0xc02b
+	TLS_ECDHE_ECDSA_WITH_AES_256_GCM_SHA384 uint16 = 0xc02c
+	TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256   uint16 = 0xc02f
+	TLS_ECDHE_RSA_WITH_AES_256_GCM_SHA384   uint16 = 0xc030
+	TLS_AES_128_GCM_SHA256                  uint16 = 0x1301
+	TLS_AES_256_GCM_SHA384                  uint16 = 0x1302
 )
 
 // DNS record types (TYPE_*).

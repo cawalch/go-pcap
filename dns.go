@@ -3,6 +3,7 @@ package pcap
 import (
 	"encoding/binary"
 	"fmt"
+	"math"
 	"net/netip"
 	"strings"
 )
@@ -524,4 +525,193 @@ func dnsPayloadHasQuery(payload []byte, target string) bool {
 		offset = nextOff + 4
 	}
 	return false
+}
+
+// DNSDomainStats aggregates per-apex-domain behavioral indicators for DNS
+// tunneling and command-and-control triage.
+type DNSDomainStats struct {
+	Domain               string
+	QueryCount           int
+	UniqueSubdomains     int
+	NXDomainCount        int
+	MaxLabelLength       int
+	MaxSubdomainEntropy  float64
+	MeanSubdomainEntropy float64
+	EncodedCharRatio     float64
+	TXTAnswerBytes       uint64
+	TunnelScore          float64
+}
+
+// DNSLabelEntropy computes the Shannon entropy (in bits per byte, [0.0, 8.0])
+// of the subdomain prefix of qname (excluding its final two registrable apex
+// labels, or over the entire name if qname has two or fewer labels).
+func DNSLabelEntropy(qname string) float64 {
+	sub, _ := splitDNSSubdomainAndApex(qname)
+	if sub == "" {
+		return 0
+	}
+	var counts [256]int
+	total := 0
+	for i := range len(sub) {
+		b := sub[i]
+		if b == '.' {
+			continue
+		}
+		if b >= 'A' && b <= 'Z' {
+			b += 'a' - 'A'
+		}
+		counts[b]++
+		total++
+	}
+	if total <= 1 {
+		return 0
+	}
+	invTotal := 1.0 / float64(total)
+	var entropy float64
+	for _, c := range counts {
+		if c > 0 {
+			p := float64(c) * invTotal
+			entropy -= p * math.Log2(p)
+		}
+	}
+	return entropy
+}
+
+func splitDNSSubdomainAndApex(qname string) (subdomain string, apex string) {
+	clean := strings.TrimSuffix(strings.ToLower(strings.TrimSpace(qname)), ".")
+	if clean == "" {
+		return "", ""
+	}
+	lastDot := strings.LastIndexByte(clean, '.')
+	if lastDot <= 0 {
+		return clean, clean
+	}
+	secondLastDot := strings.LastIndexByte(clean[:lastDot], '.')
+	if secondLastDot < 0 {
+		return "", clean
+	}
+	return clean[:secondLastDot], clean[secondLastDot+1:]
+}
+
+// DNSDomainStats aggregates DNS query entropy, label lengths, unique subdomain
+// counts, NXDOMAIN ratios, and TXT payload volumes grouped by apex domain in
+// deterministic first-seen order.
+func (c *Capture) DNSDomainStats(data []byte) ([]DNSDomainStats, error) {
+	records, err := c.DNS(data)
+	if err != nil {
+		return nil, err
+	}
+	if len(records) == 0 {
+		return nil, nil
+	}
+
+	type domainAccum struct {
+		domain         string
+		queryCount     int
+		subdomains     map[string]struct{}
+		nxCount        int
+		maxLabelLen    int
+		maxEntropy     float64
+		sumEntropy     float64
+		entropySamples int
+		encodedChars   int
+		totalChars     int
+		txtBytes       uint64
+	}
+
+	indexByDomain := make(map[string]int)
+	var accums []domainAccum
+
+	for i := range records {
+		msg := &records[i].Message
+		for qIdx := range msg.Questions {
+			qname := msg.Questions[qIdx].Name
+			sub, apex := splitDNSSubdomainAndApex(qname)
+			if apex == "" {
+				continue
+			}
+			idx, exists := indexByDomain[apex]
+			if !exists {
+				idx = len(accums)
+				indexByDomain[apex] = idx
+				accums = append(accums, domainAccum{
+					domain:     apex,
+					subdomains: make(map[string]struct{}),
+				})
+			}
+			da := &accums[idx]
+			if !msg.IsResponse {
+				da.queryCount++
+			} else if msg.RCode == DNSRCodeNameError {
+				da.nxCount++
+			}
+			if sub != "" {
+				da.subdomains[sub] = struct{}{}
+				ent := DNSLabelEntropy(qname)
+				if ent > da.maxEntropy {
+					da.maxEntropy = ent
+				}
+				da.sumEntropy += ent
+				da.entropySamples++
+				for label := range strings.SplitSeq(sub, ".") {
+					if len(label) > da.maxLabelLen {
+						da.maxLabelLen = len(label)
+					}
+					for j := range len(label) {
+						ch := label[j]
+						da.totalChars++
+						if (ch >= '0' && ch <= '9') || ch == '-' || ch == '_' {
+							da.encodedChars++
+						}
+					}
+				}
+			}
+		}
+
+		for aIdx := range msg.Answers {
+			ans := &msg.Answers[aIdx]
+			if ans.Type == DNSTypeTXT {
+				_, apex := splitDNSSubdomainAndApex(ans.Name)
+				if idx, ok := indexByDomain[apex]; ok {
+					accums[idx].txtBytes += uint64(ans.DataLength)
+				}
+			}
+		}
+	}
+
+	out := make([]DNSDomainStats, len(accums))
+	for i := range accums {
+		da := &accums[i]
+		var meanEnt float64
+		if da.entropySamples > 0 {
+			meanEnt = da.sumEntropy / float64(da.entropySamples)
+		}
+		var encRatio float64
+		if da.totalChars > 0 {
+			encRatio = float64(da.encodedChars) / float64(da.totalChars)
+		}
+		// Composite tunnel score in [0.0, 1.0]: weighted combination of normalized entropy (ent/4.5),
+		// max label length (len/63), and unique subdomain fan-out.
+		entScore := min(1.0, meanEnt/4.5)
+		lenScore := min(1.0, float64(da.maxLabelLen)/63.0)
+		uniqScore := 0.0
+		if da.queryCount > 0 {
+			uniqScore = min(1.0, float64(len(da.subdomains))/float64(max(da.queryCount, 1)))
+		}
+		tunnelScore := 0.45*entScore + 0.35*lenScore + 0.20*uniqScore
+
+		out[i] = DNSDomainStats{
+			Domain:               da.domain,
+			QueryCount:           da.queryCount,
+			UniqueSubdomains:     len(da.subdomains),
+			NXDomainCount:        da.nxCount,
+			MaxLabelLength:       da.maxLabelLen,
+			MaxSubdomainEntropy:  da.maxEntropy,
+			MeanSubdomainEntropy: meanEnt,
+			EncodedCharRatio:     encRatio,
+			TXTAnswerBytes:       da.txtBytes,
+			TunnelScore:          tunnelScore,
+		}
+	}
+	return out, nil
 }

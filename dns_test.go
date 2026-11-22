@@ -146,3 +146,40 @@ func TestDNSCompressionLoopsForwardPointersAndLimits(t *testing.T) {
 		t.Fatalf("ParseDNS(>255B name) err = %v, want ErrDNSLimit", err)
 	}
 }
+
+func TestDNSLabelEntropyAndDomainStats(t *testing.T) {
+	// Issue #13: Contrast low-entropy normal subdomain ("www.example.com") with
+	// high-entropy DNS tunneling query ("4b8f9a1c0d2e3f4a5b6c7d8e9f0a1b2c.tunnel.example.com").
+	lowEnt := DNSLabelEntropy("www.example.com")
+	highEnt := DNSLabelEntropy("4b8f9a1c0d2e3f4a5b6c7d8e9f0a1b2c.tunnel.example.com")
+	if lowEnt != 0 || highEnt < 3.5 {
+		t.Fatalf("DNSLabelEntropy: low=%v (want 0), high=%v (want >= 3.5)", lowEnt, highEnt)
+	}
+
+	// Build a DNS query packet for the high-entropy subdomain.
+	var qBuf bytes.Buffer
+	var hdr [12]byte
+	binary.BigEndian.PutUint16(hdr[0:2], 0x2222)
+	binary.BigEndian.PutUint16(hdr[4:6], 1)
+	qBuf.Write(hdr[:])
+	label := "4b8f9a1c0d2e3f4a5b6c7d8e9f0a1b2c"
+	qBuf.WriteByte(byte(len(label)))
+	qBuf.WriteString(label)
+	qBuf.Write([]byte("\x07example\x03com\x00"))
+	qBuf.Write([]byte{0, byte(DNSTypeTXT), 0, 1})
+
+	udpFrame := buildEthernetIPv4UDPFrame([4]byte{10, 0, 0, 1}, [4]byte{8, 8, 8, 8}, 55000, 53, qBuf.Bytes())
+	rawPCAP := buildClassicPCAP(binary.LittleEndian, false, LinkTypeEthernet, 65535, [][]byte{udpFrame})
+	cap, err := New(rawPCAP)
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+	stats, err := cap.DNSDomainStats(rawPCAP)
+	if err != nil || len(stats) != 1 {
+		t.Fatalf("DNSDomainStats() = (%+v, %v)", stats, err)
+	}
+	st := stats[0]
+	if st.Domain != "example.com" || st.QueryCount != 1 || st.UniqueSubdomains != 1 || st.MaxLabelLength != 32 || st.TunnelScore < 0.5 {
+		t.Fatalf("DNSDomainStats[0] = %+v", st)
+	}
+}

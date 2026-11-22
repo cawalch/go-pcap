@@ -181,12 +181,133 @@ func (pw *PCAPNGWriter) WritePacket(pkt PacketRecord, payload []byte) error {
 		writePCAPNGOptionLE(&body, optEPBThreadID, b[:])
 		hasOpts = true
 	}
+	if pkt.ProcessName != "" {
+		writePCAPNGOptionLE(&body, optEPBProcessName, []byte(pkt.ProcessName))
+		hasOpts = true
+	}
+	if pkt.ProcessArgs != "" {
+		writePCAPNGOptionLE(&body, optEPBProcessArgs, []byte(pkt.ProcessArgs))
+		hasOpts = true
+	}
+	if pkt.HasUserID {
+		var b [4]byte
+		binary.LittleEndian.PutUint32(b[:], pkt.UserID)
+		writePCAPNGOptionLE(&body, optEPBUserID, b[:])
+		hasOpts = true
+	}
+	if pkt.ContainerID != "" {
+		writePCAPNGOptionLE(&body, optEPBContainerID, []byte(pkt.ContainerID))
+		hasOpts = true
+	}
 	if hasOpts {
 		writePCAPNGOptionLE(&body, optEndOfOpt, nil)
 	}
 
 	var block bytes.Buffer
 	writePCAPNGBlockLE(&block, BlockTypeEnhancedPacket, body.Bytes())
+	_, err := pw.w.Write(block.Bytes())
+	return err
+}
+
+// WriteNameResolution writes a PcapNG Name Resolution Block (NRB) containing
+// IPv4 and IPv6 hostname mappings.
+func (pw *PCAPNGWriter) WriteNameResolution(records []NameResolutionRecord) error {
+	if pw == nil || pw.w == nil {
+		return ErrInvalidHeader
+	}
+	if len(records) > MaxNameResolutionRecords {
+		return fmt.Errorf("%w: NRB records exceed %d", ErrOptionLimit, MaxNameResolutionRecords)
+	}
+	var body bytes.Buffer
+	for i := range records {
+		rec := &records[i]
+		if !rec.Addr.IsValid() || len(rec.Names) == 0 {
+			continue
+		}
+		var val bytes.Buffer
+		var recType uint16
+		if rec.Addr.Is4() {
+			recType = nrbRecordIPv4
+			a4 := rec.Addr.As4()
+			val.Write(a4[:])
+		} else {
+			recType = nrbRecordIPv6
+			a16 := rec.Addr.As16()
+			val.Write(a16[:])
+		}
+		for _, name := range rec.Names {
+			if name == "" {
+				continue
+			}
+			val.WriteString(name)
+			val.WriteByte(0)
+		}
+		if val.Len() > MaxOptionStringBytes {
+			return fmt.Errorf("%w: NRB record length %d exceeds %d", ErrOptionLimit, val.Len(), MaxOptionStringBytes)
+		}
+		writePCAPNGOptionLE(&body, recType, val.Bytes())
+	}
+	writePCAPNGOptionLE(&body, nrbRecordEnd, nil)
+
+	var block bytes.Buffer
+	writePCAPNGBlockLE(&block, BlockTypeNameResolution, body.Bytes())
+	_, err := pw.w.Write(block.Bytes())
+	return err
+}
+
+// WriteInterfaceStats writes a PcapNG Interface Statistics Block (ISB) with
+// nanosecond timestamp resolution.
+func (pw *PCAPNGWriter) WriteInterfaceStats(stat InterfaceStatistics) error {
+	if pw == nil || pw.w == nil {
+		return ErrInvalidHeader
+	}
+	var body bytes.Buffer
+	var fixed [12]byte
+	var ts uint64
+	if stat.TimestampNs > 0 {
+		ts = uint64(stat.TimestampNs)
+	}
+	binary.LittleEndian.PutUint32(fixed[0:4], stat.InterfaceID)
+	binary.LittleEndian.PutUint32(fixed[4:8], uint32(ts>>32))
+	binary.LittleEndian.PutUint32(fixed[8:12], uint32(ts&0xffffffff))
+	body.Write(fixed[:])
+
+	hasOpts := false
+	writeTSOpt := func(code uint16, ns int64) {
+		var u uint64
+		if ns > 0 {
+			u = uint64(ns)
+		}
+		var b [8]byte
+		binary.LittleEndian.PutUint32(b[0:4], uint32(u>>32))
+		binary.LittleEndian.PutUint32(b[4:8], uint32(u&0xffffffff))
+		writePCAPNGOptionLE(&body, code, b[:])
+		hasOpts = true
+	}
+	if stat.HasStartTime {
+		writeTSOpt(optISBStartTime, stat.StartTimeNs)
+	}
+	if stat.HasEndTime {
+		writeTSOpt(optISBEndTime, stat.EndTimeNs)
+	}
+	if stat.HasPacketsReceived {
+		var b [8]byte
+		binary.LittleEndian.PutUint64(b[:], stat.PacketsReceived)
+		writePCAPNGOptionLE(&body, optISBIfRecv, b[:])
+		hasOpts = true
+	}
+	if stat.HasPacketsDropped {
+		var b [8]byte
+		binary.LittleEndian.PutUint64(b[:], stat.PacketsDropped)
+		writePCAPNGOptionLE(&body, optISBIfDrop, b[:])
+		hasOpts = true
+	}
+	if hasOpts {
+		writePCAPNGOptionLE(&body, optEndOfOpt, nil)
+	}
+
+	var block bytes.Buffer
+	writePCAPNGBlockLE(&block, BlockTypeInterfaceStats, body.Bytes())
 	_, err := pw.w.Write(block.Bytes())
 	return err
 }

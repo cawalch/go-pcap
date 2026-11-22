@@ -8,7 +8,9 @@ import (
 	"iter"
 	"math"
 	"math/bits"
+	"net/netip"
 	"os"
+	"strings"
 )
 
 const (
@@ -78,6 +80,35 @@ func (a CaptureAnomalies) Any() bool {
 		a.InvalidTimestampResolution
 }
 
+// NameResolutionRecord holds an IPv4 or IPv6 address and its resolved hostnames
+// from a PcapNG Name Resolution Block (NRB).
+type NameResolutionRecord struct {
+	Addr  netip.Addr
+	Names []string
+}
+
+// InterfaceStatistics holds capture statistics from a PcapNG Interface
+// Statistics Block (ISB).
+type InterfaceStatistics struct {
+	InterfaceID        uint32
+	TimestampNs        int64
+	StartTimeNs        int64
+	EndTimeNs          int64
+	PacketsReceived    uint64
+	PacketsDropped     uint64
+	HasStartTime       bool
+	HasEndTime         bool
+	HasPacketsReceived bool
+	HasPacketsDropped  bool
+}
+
+// ProcessEvent describes a Darwin Process Event Block (DPEB) or process entry
+// in a PcapNG capture.
+type ProcessEvent struct {
+	ProcessID   uint32
+	ProcessName string
+}
+
 // PacketRecord describes one captured packet's metadata and payload byte span
 // within the capture buffer.
 type PacketRecord struct {
@@ -90,32 +121,41 @@ type PacketRecord struct {
 	PayloadOffset int64
 	PayloadLength int64
 
-	// PcapNG Enhanced Packet Block optional metadata.
+	// PcapNG Enhanced Packet Block optional metadata and process attribution.
 	ProcessID    uint32
 	ThreadID     uint32
+	UserID       uint32
 	Flags        uint32
 	DropCount    uint64
+	ProcessName  string
+	ProcessArgs  string
+	ContainerID  string
 	HasProcessID bool
 	HasThreadID  bool
+	HasUserID    bool
 }
 
 // Capture contains a parsed snapshot of a PCAP or PcapNG container's headers,
-// interfaces, decryption secrets, and extent metadata.
+// interfaces, decryption secrets, name resolution records, interface
+// statistics, process events, and extent metadata.
 // If you don't modify its exported fields, you can read a Capture concurrently.
 type Capture struct {
-	Format        Format
-	BigEndian     bool
-	NanoTimestamp bool
-	VersionMajor  uint16
-	VersionMinor  uint16
-	SnapLen       uint32
-	LinkType      LinkType
-	Hardware      string
-	OS            string
-	UserAppl      string
-	Interfaces    []InterfaceDescriptor
-	Secrets       []DecryptionSecret
-	PacketCount   int
+	Format         Format
+	BigEndian      bool
+	NanoTimestamp  bool
+	VersionMajor   uint16
+	VersionMinor   uint16
+	SnapLen        uint32
+	LinkType       LinkType
+	Hardware       string
+	OS             string
+	UserAppl       string
+	Interfaces     []InterfaceDescriptor
+	Secrets        []DecryptionSecret
+	NameRecords    []NameResolutionRecord
+	InterfaceStats []InterfaceStatistics
+	Processes      []ProcessEvent
+	PacketCount    int
 
 	fileSize       int64
 	declaredExtent uint64
@@ -404,6 +444,9 @@ type scanSummary struct {
 	userAppl       string
 	interfaces     []InterfaceDescriptor
 	secrets        []DecryptionSecret
+	nameRecords    []NameResolutionRecord
+	interfaceStats []InterfaceStatistics
+	processes      []ProcessEvent
 }
 
 func scanClassicPCAPPackets(
@@ -529,6 +572,9 @@ func parsePCAPNG(r *SafeReader, fileSize int64) (*Capture, error) {
 		UserAppl:       meta.userAppl,
 		Interfaces:     meta.interfaces,
 		Secrets:        meta.secrets,
+		NameRecords:    meta.nameRecords,
+		InterfaceStats: meta.interfaceStats,
+		Processes:      meta.processes,
 		PacketCount:    meta.packetCount,
 		fileSize:       fileSize,
 		declaredExtent: meta.declaredExtent,
@@ -645,8 +691,20 @@ func scanPCAPNGBlocksWithCallback(r *SafeReader, collectPackets bool, hintCount 
 			if err := decodeDSB(r, bodyStart, bodyEnd, order, &totalSecretBytes, &summary); err != nil {
 				return scanSummary{}, nil, err
 			}
+		case BlockTypeNameResolution:
+			if err := decodeNRB(r, bodyStart, bodyEnd, order, &summary); err != nil {
+				return scanSummary{}, nil, err
+			}
+		case BlockTypeInterfaceStats:
+			if err := decodeISB(r, bodyStart, bodyEnd, order, &summary); err != nil {
+				return scanSummary{}, nil, err
+			}
+		case BlockTypeDarwinProcessEvent:
+			if err := decodeDPEB(r, bodyStart, bodyEnd, order, &summary); err != nil {
+				return scanSummary{}, nil, err
+			}
 		default:
-			// Other blocks (NRB, ISB, vendor custom blocks) are skipped after framing validation.
+			// Other blocks (vendor custom blocks) are skipped after framing validation.
 		}
 
 		offset = int64(blockEnd)
@@ -890,9 +948,10 @@ func decodeEPBWithCallback(
 	}
 	summary.packetCount++
 
-	var pid, tid, flags uint32
+	var pid, tid, uid, flags uint32
 	var dropCount uint64
-	var hasPID, hasTID bool
+	var procName, procArgs, containerID string
+	var hasPID, hasTID, hasUID bool
 	if optOffset < bodyEnd {
 		err := walkPCAPNGOptions(r, optOffset, bodyEnd, order, func(code uint16, val []byte) error {
 			switch code {
@@ -904,6 +963,20 @@ func decodeEPBWithCallback(
 				if len(val) == 8 {
 					dropCount = order.Uint64(val)
 				}
+			case optEPBDarwinDPEB:
+				if len(val) == 4 {
+					dpebIdx := int(order.Uint32(val))
+					if dpebIdx >= 0 && dpebIdx < len(summary.processes) {
+						pe := summary.processes[dpebIdx]
+						if !hasPID {
+							pid = pe.ProcessID
+							hasPID = true
+						}
+						if procName == "" {
+							procName = pe.ProcessName
+						}
+					}
+				}
 			case optEPBProcessID:
 				if len(val) == 4 {
 					pid = order.Uint32(val)
@@ -914,6 +987,17 @@ func decodeEPBWithCallback(
 					tid = order.Uint32(val)
 					hasTID = true
 				}
+			case optEPBProcessName:
+				procName = string(val)
+			case optEPBProcessArgs:
+				procArgs = string(val)
+			case optEPBUserID:
+				if len(val) == 4 {
+					uid = order.Uint32(val)
+					hasUID = true
+				}
+			case optEPBContainerID:
+				containerID = string(val)
 			}
 			return nil
 		})
@@ -936,10 +1020,15 @@ func decodeEPBWithCallback(
 			PayloadLength: int64(capLen),
 			ProcessID:     pid,
 			ThreadID:      tid,
+			UserID:        uid,
 			Flags:         flags,
 			DropCount:     dropCount,
+			ProcessName:   procName,
+			ProcessArgs:   procArgs,
+			ContainerID:   containerID,
 			HasProcessID:  hasPID,
 			HasThreadID:   hasTID,
+			HasUserID:     hasUID,
 		}
 		if collect {
 			*packets = append(*packets, rec)
@@ -1068,6 +1157,177 @@ func decodeDSB(
 		PayloadLength: int64(secretsLen),
 		Data:          bytes.Clone(raw),
 	})
+	return nil
+}
+
+func decodeNRB(
+	r *SafeReader,
+	bodyStart, bodyEnd int64,
+	order binary.ByteOrder,
+	summary *scanSummary,
+) error {
+	offset := bodyStart
+	for offset < bodyEnd {
+		if bodyEnd-offset < 4 {
+			return fmt.Errorf("%w: truncated Name Resolution Block record header", ErrInvalidBlock)
+		}
+		recType, _ := r.ReadUint16Order(offset, order)
+		recLen, _ := r.ReadUint16Order(offset+2, order)
+		offset += 4
+		if recType == nrbRecordEnd {
+			break
+		}
+		if int64(recLen) > MaxOptionStringBytes || int64(recLen) > bodyEnd-offset {
+			return fmt.Errorf("%w: NRB record length %d exceeds bounds", ErrInvalidBlock, recLen)
+		}
+		val, err := r.Slice(offset, int64(recLen))
+		if err != nil {
+			return err
+		}
+		padded := int64(recLen)
+		if rem := padded % 4; rem != 0 {
+			padded += 4 - rem
+		}
+		offset += padded
+
+		switch recType {
+		case nrbRecordIPv4:
+			if len(val) < 5 {
+				return fmt.Errorf("%w: NRB IPv4 record shorter than 5 bytes", ErrInvalidBlock)
+			}
+			if len(summary.nameRecords) >= MaxNameResolutionRecords {
+				return fmt.Errorf("%w: NRB records exceed %d", ErrOptionLimit, MaxNameResolutionRecords)
+			}
+			addr := netip.AddrFrom4([4]byte(val[0:4]))
+			names := parseNRBNames(val[4:])
+			if len(names) > 0 {
+				summary.nameRecords = append(summary.nameRecords, NameResolutionRecord{Addr: addr, Names: names})
+			}
+		case nrbRecordIPv6:
+			if len(val) < 17 {
+				return fmt.Errorf("%w: NRB IPv6 record shorter than 17 bytes", ErrInvalidBlock)
+			}
+			if len(summary.nameRecords) >= MaxNameResolutionRecords {
+				return fmt.Errorf("%w: NRB records exceed %d", ErrOptionLimit, MaxNameResolutionRecords)
+			}
+			addr := netip.AddrFrom16([16]byte(val[0:16]))
+			names := parseNRBNames(val[16:])
+			if len(names) > 0 {
+				summary.nameRecords = append(summary.nameRecords, NameResolutionRecord{Addr: addr, Names: names})
+			}
+		}
+	}
+	if offset < bodyEnd {
+		return walkPCAPNGOptions(r, offset, bodyEnd, order, func(uint16, []byte) error { return nil })
+	}
+	return nil
+}
+
+func parseNRBNames(raw []byte) []string {
+	var names []string
+	for part := range bytes.SplitSeq(raw, []byte{0}) {
+		s := strings.TrimSpace(string(part))
+		if s != "" {
+			names = append(names, s)
+		}
+	}
+	return names
+}
+
+func decodeISB(
+	r *SafeReader,
+	bodyStart, bodyEnd int64,
+	order binary.ByteOrder,
+	summary *scanSummary,
+) error {
+	if bodyEnd-bodyStart < 12 {
+		return fmt.Errorf("%w: Interface Statistics Block body too short", ErrInvalidBlock)
+	}
+	if len(summary.interfaceStats) >= MaxInterfaceStats {
+		return fmt.Errorf("%w: ISB count exceeds %d", ErrOptionLimit, MaxInterfaceStats)
+	}
+	ifaceID, _ := r.ReadUint32Order(bodyStart, order)
+	if int(ifaceID) >= len(summary.interfaces) {
+		return fmt.Errorf("%w: ISB interface ID %d out of range", ErrInvalidPacket, ifaceID)
+	}
+	iface := summary.interfaces[ifaceID]
+	tsHigh, _ := r.ReadUint32Order(bodyStart+4, order)
+	tsLow, _ := r.ReadUint32Order(bodyStart+8, order)
+
+	stat := InterfaceStatistics{
+		InterfaceID: ifaceID,
+		TimestampNs: scaleRawTimestampNs((uint64(tsHigh)<<32)|uint64(tsLow), iface),
+	}
+
+	optOffset := bodyStart + 12
+	if optOffset < bodyEnd {
+		err := walkPCAPNGOptions(r, optOffset, bodyEnd, order, func(code uint16, val []byte) error {
+			switch code {
+			case optISBStartTime:
+				if len(val) == 8 {
+					hi := order.Uint32(val[0:4])
+					lo := order.Uint32(val[4:8])
+					stat.StartTimeNs = scaleRawTimestampNs((uint64(hi)<<32)|uint64(lo), iface)
+					stat.HasStartTime = true
+				}
+			case optISBEndTime:
+				if len(val) == 8 {
+					hi := order.Uint32(val[0:4])
+					lo := order.Uint32(val[4:8])
+					stat.EndTimeNs = scaleRawTimestampNs((uint64(hi)<<32)|uint64(lo), iface)
+					stat.HasEndTime = true
+				}
+			case optISBIfRecv:
+				if len(val) == 8 {
+					stat.PacketsReceived = order.Uint64(val)
+					stat.HasPacketsReceived = true
+				}
+			case optISBIfDrop:
+				if len(val) == 8 {
+					stat.PacketsDropped = order.Uint64(val)
+					stat.HasPacketsDropped = true
+				}
+			}
+			return nil
+		})
+		if err != nil {
+			return err
+		}
+	}
+
+	summary.interfaceStats = append(summary.interfaceStats, stat)
+	return nil
+}
+
+func decodeDPEB(
+	r *SafeReader,
+	bodyStart, bodyEnd int64,
+	order binary.ByteOrder,
+	summary *scanSummary,
+) error {
+	if bodyEnd-bodyStart < 4 {
+		return fmt.Errorf("%w: Darwin Process Event Block body too short", ErrInvalidBlock)
+	}
+	if len(summary.processes) >= MaxProcessEvents {
+		return fmt.Errorf("%w: DPEB count exceeds %d", ErrOptionLimit, MaxProcessEvents)
+	}
+	pid, _ := r.ReadUint32Order(bodyStart, order)
+	pe := ProcessEvent{ProcessID: pid}
+
+	optOffset := bodyStart + 4
+	if optOffset < bodyEnd {
+		err := walkPCAPNGOptions(r, optOffset, bodyEnd, order, func(code uint16, val []byte) error {
+			if code == optDPEBProcessName {
+				pe.ProcessName = strings.TrimRight(string(val), "\x00")
+			}
+			return nil
+		})
+		if err != nil {
+			return err
+		}
+	}
+
+	summary.processes = append(summary.processes, pe)
 	return nil
 }
 

@@ -5,6 +5,7 @@ import (
 	"crypto/aes"
 	"crypto/cipher"
 	"crypto/hkdf"
+	"crypto/hmac"
 	"crypto/sha256"
 	"crypto/sha512"
 	"encoding/binary"
@@ -265,10 +266,141 @@ func xorTLS13Nonce(iv [12]byte, seq uint64) [12]byte {
 	return out
 }
 
-// DecryptedTLSStreams reassembles TCP streams and decrypts any TLS 1.3 flows
-// matching secrets in the capture's PcapNG Decryption Secrets Blocks (DSB) or
-// extraKeyLog. Only flows with matching decryption secrets and non-empty
-// decrypted application payloads are returned.
+func tls12CipherSuiteParams(cipherSuite uint16) (keyLen int, hashFn func() hash.Hash, ok bool) {
+	switch cipherSuite {
+	case TLS_RSA_WITH_AES_128_GCM_SHA256,
+		TLS_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256,
+		TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256:
+		return 16, sha256.New, true
+	case TLS_RSA_WITH_AES_256_GCM_SHA384,
+		TLS_ECDHE_ECDSA_WITH_AES_256_GCM_SHA384,
+		TLS_ECDHE_RSA_WITH_AES_256_GCM_SHA384:
+		return 32, sha512.New384, true
+	default:
+		return 0, nil, false
+	}
+}
+
+func tls12PRF(hashFn func() hash.Hash, secret []byte, label string, seed []byte, outLen int) []byte {
+	labelAndSeed := make([]byte, len(label)+len(seed))
+	copy(labelAndSeed, label)
+	copy(labelAndSeed[len(label):], seed)
+
+	out := make([]byte, 0, outLen)
+	mac := hmac.New(hashFn, secret)
+	mac.Write(labelAndSeed)
+	a := mac.Sum(nil)
+
+	for len(out) < outLen {
+		mac.Reset()
+		mac.Write(a)
+		mac.Write(labelAndSeed)
+		block := mac.Sum(nil)
+		need := min(len(block), outLen-len(out))
+		out = append(out, block[:need]...)
+
+		mac.Reset()
+		mac.Write(a)
+		a = mac.Sum(a[:0])
+	}
+	return out
+}
+
+// DecryptTLS12Records decrypts a directional TLS 1.2 byte stream using the
+// 48-byte masterSecret (from a CLIENT_RANDOM keylog line) and the 32-byte
+// client and server random values.
+func DecryptTLS12Records(
+	stream []byte,
+	cipherSuite uint16,
+	masterSecret []byte,
+	clientRandom [32]byte,
+	serverRandom [32]byte,
+	isClient bool,
+) ([]byte, error) {
+	keyLen, hashFn, ok := tls12CipherSuiteParams(cipherSuite)
+	if !ok {
+		return nil, fmt.Errorf("%w: unsupported TLS 1.2 cipher suite %#04x for decryption", ErrInvalidTLS, cipherSuite)
+	}
+	if len(masterSecret) == 0 {
+		return nil, fmt.Errorf("%w: empty TLS 1.2 master secret", ErrInvalidTLS)
+	}
+
+	var seed [64]byte
+	copy(seed[0:32], serverRandom[:])
+	copy(seed[32:64], clientRandom[:])
+	// key_block = client_write_key (keyLen) + server_write_key (keyLen) + client_write_IV (4) + server_write_IV (4)
+	keyBlock := tls12PRF(hashFn, masterSecret, "key expansion", seed[:], 2*keyLen+8)
+
+	var writeKey []byte
+	var salt [4]byte
+	if isClient {
+		writeKey = keyBlock[:keyLen]
+		copy(salt[:], keyBlock[2*keyLen:2*keyLen+4])
+	} else {
+		writeKey = keyBlock[keyLen : 2*keyLen]
+		copy(salt[:], keyBlock[2*keyLen+4:2*keyLen+8])
+	}
+
+	block, err := aes.NewCipher(writeKey)
+	if err != nil {
+		return nil, err
+	}
+	aead, err := cipher.NewGCM(block)
+	if err != nil {
+		return nil, err
+	}
+
+	var seqNum uint64
+	var appBuf bytes.Buffer
+	offset := 0
+	for offset+5 <= len(stream) {
+		contentType := stream[offset]
+		recVer := binary.BigEndian.Uint16(stream[offset+1 : offset+3])
+		recLen := int(binary.BigEndian.Uint16(stream[offset+3 : offset+5]))
+		if recVer < TLSVersionSSL30 || recVer > TLSVersion13 || recLen > MaxTLSRecordBytes || offset+5+recLen > len(stream) {
+			break
+		}
+		recordBody := stream[offset+5 : offset+5+recLen]
+		offset += 5 + recLen
+
+		if contentType != TLSRecordApplicationData && contentType != TLSRecordHandshake {
+			continue
+		}
+		// TLS 1.2 AES-GCM record payload: 8-byte explicit nonce + ciphertext + 16-byte tag.
+		if len(recordBody) < 8+aead.Overhead() {
+			continue
+		}
+		// Skip cleartext handshake records that precede ChangeCipherSpec: try AEAD open,
+		// and only advance seqNum when AEAD authentication succeeds.
+		var nonce [12]byte
+		copy(nonce[0:4], salt[:])
+		copy(nonce[4:12], recordBody[:8])
+		ciphertext := recordBody[8:]
+		plainLen := len(ciphertext) - aead.Overhead()
+
+		var aad [13]byte
+		binary.BigEndian.PutUint64(aad[0:8], seqNum)
+		aad[8] = contentType
+		binary.BigEndian.PutUint16(aad[9:11], recVer)
+		binary.BigEndian.PutUint16(aad[11:13], uint16(plainLen))
+
+		plain, decErr := aead.Open(nil, nonce[:], ciphertext, aad[:])
+		if decErr != nil {
+			continue
+		}
+		seqNum++
+		if contentType == TLSRecordApplicationData && appBuf.Len()+len(plain) <= MaxFlowStreamBytes {
+			appBuf.Write(plain)
+		}
+	}
+
+	return appBuf.Bytes(), nil
+}
+
+// DecryptedTLSStreams reassembles TCP streams and decrypts any TLS 1.2 or TLS
+// 1.3 flows matching secrets in the capture's PcapNG Decryption Secrets Blocks
+// (DSB) or extraKeyLog. Only flows with matching decryption secrets and
+// non-empty decrypted application payloads are returned.
 func (c *Capture) DecryptedTLSStreams(data []byte, extraKeyLog []byte) ([]TCPStream, error) {
 	keyLog, err := c.TLSKeyLog(extraKeyLog)
 	if err != nil || len(keyLog.Entries) == 0 {
@@ -295,8 +427,16 @@ func (c *Capture) DecryptedTLSStreams(data []byte, extraKeyLog []byte) ([]TCPStr
 			continue
 		}
 		suite := hsServer.ServerHello.CipherSuite
-		_, clientApp, errC := DecryptTLS13Records(st.Client.Data, suite, entry.ClientHandshakeSecret, entry.ClientTrafficSecret0)
-		_, serverApp, errS := DecryptTLS13Records(st.Server.Data, suite, entry.ServerHandshakeSecret, entry.ServerTrafficSecret0)
+		var clientApp, serverApp []byte
+		var errC, errS error
+
+		if hsServer.ServerHello.NegotiatedVersion == TLSVersion13 || len(entry.ClientTrafficSecret0) > 0 || len(entry.ServerTrafficSecret0) > 0 {
+			_, clientApp, errC = DecryptTLS13Records(st.Client.Data, suite, entry.ClientHandshakeSecret, entry.ClientTrafficSecret0)
+			_, serverApp, errS = DecryptTLS13Records(st.Server.Data, suite, entry.ServerHandshakeSecret, entry.ServerTrafficSecret0)
+		} else if len(entry.MasterSecret) > 0 {
+			clientApp, errC = DecryptTLS12Records(st.Client.Data, suite, entry.MasterSecret, hsClient.ClientHello.Random, hsServer.ServerHello.Random, true)
+			serverApp, errS = DecryptTLS12Records(st.Server.Data, suite, entry.MasterSecret, hsClient.ClientHello.Random, hsServer.ServerHello.Random, false)
+		}
 		if (errC != nil && errS != nil) || (len(clientApp) == 0 && len(serverApp) == 0) {
 			continue
 		}

@@ -266,6 +266,9 @@ func parsePCAPNGFromReaderAt(r io.ReaderAt, size int64) (*Capture, error) {
 		UserAppl:       meta.userAppl,
 		Interfaces:     meta.interfaces,
 		Secrets:        meta.secrets,
+		NameRecords:    meta.nameRecords,
+		InterfaceStats: meta.interfaceStats,
+		Processes:      meta.processes,
 		PacketCount:    meta.packetCount,
 		fileSize:       size,
 		declaredExtent: meta.declaredExtent,
@@ -401,6 +404,18 @@ func scanPCAPNGReaderAt(r io.ReaderAt, size int64, collectPackets bool, hintCoun
 			}
 			if len(summary.secrets) > prevLen {
 				summary.secrets[len(summary.secrets)-1].PayloadOffset += offset
+			}
+		case BlockTypeNameResolution:
+			if err := decodeNRB(&sr, bodyStart, bodyEnd, order, &summary); err != nil {
+				return scanSummary{}, nil, err
+			}
+		case BlockTypeInterfaceStats:
+			if err := decodeISB(&sr, bodyStart, bodyEnd, order, &summary); err != nil {
+				return scanSummary{}, nil, err
+			}
+		case BlockTypeDarwinProcessEvent:
+			if err := decodeDPEB(&sr, bodyStart, bodyEnd, order, &summary); err != nil {
+				return scanSummary{}, nil, err
 			}
 		}
 

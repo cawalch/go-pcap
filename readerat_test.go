@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/binary"
 	"errors"
+	"net/netip"
 	"testing"
 )
 
@@ -92,5 +93,90 @@ func TestReaderAtAndWriterBounds(t *testing.T) {
 	}
 	if _, err := NewPCAPNGWriter(&bytes.Buffer{}, PCAPNGWriterOptions{SnapLen: MaxSnapLen + 1}); !errors.Is(err, ErrInvalidHeader) {
 		t.Fatalf("NewPCAPNGWriter(oversize snaplen) err = %v, want ErrInvalidHeader", err)
+	}
+}
+
+func TestPCAPNGNRBISBAndProcessExtensionsRoundTrip(t *testing.T) {
+	// Issues #5 and #6: Name Resolution Block (NRB), Interface Statistics Block (ISB),
+	// Darwin Process Event Block (DPEB), and EPB process attribution options (comm, args, UID, containerID).
+	var out bytes.Buffer
+	pw, err := NewPCAPNGWriter(&out, PCAPNGWriterOptions{
+		LinkType:      LinkTypeEthernet,
+		SnapLen:       65535,
+		InterfaceName: "en0",
+	})
+	if err != nil {
+		t.Fatalf("NewPCAPNGWriter() error = %v", err)
+	}
+
+	if err := pw.WriteNameResolution([]NameResolutionRecord{
+		{Addr: netip.MustParseAddr("192.0.2.10"), Names: []string{"c2.example.com", "alias.example.com"}},
+		{Addr: netip.MustParseAddr("2001:db8::10"), Names: []string{"v6.example.com"}},
+	}); err != nil {
+		t.Fatalf("WriteNameResolution() error = %v", err)
+	}
+
+	frame := buildEthernetIPv4TCPFrame([4]byte{192, 0, 2, 10}, [4]byte{198, 51, 100, 1}, 44444, 443, 1, 0, TCPFlagSYN, []byte("hi"))
+	if err := pw.WritePacket(PacketRecord{
+		TimestampNs:  int64(1700000000000000000),
+		ProcessID:    9001,
+		ThreadID:     77,
+		UserID:       501,
+		ProcessName:  "curl",
+		ProcessArgs:  "curl -k https://c2.example.com",
+		ContainerID:  "ctr-123456",
+		HasProcessID: true,
+		HasThreadID:  true,
+		HasUserID:    true,
+	}, frame); err != nil {
+		t.Fatalf("WritePacket() error = %v", err)
+	}
+
+	if err := pw.WriteInterfaceStats(InterfaceStatistics{
+		InterfaceID:        0,
+		TimestampNs:        int64(1700000010000000000),
+		StartTimeNs:        int64(1700000000000000000),
+		EndTimeNs:          int64(1700000010000000000),
+		PacketsReceived:    100,
+		PacketsDropped:     2,
+		HasStartTime:       true,
+		HasEndTime:         true,
+		HasPacketsReceived: true,
+		HasPacketsDropped:  true,
+	}); err != nil {
+		t.Fatalf("WriteInterfaceStats() error = %v", err)
+	}
+
+	// Also append a Darwin Process Event Block (DPEB) and an EPB referencing DPEB index 0.
+	var dpebBody bytes.Buffer
+	var pidBytes [4]byte
+	binary.LittleEndian.PutUint32(pidBytes[:], 8888)
+	dpebBody.Write(pidBytes[:])
+	writePCAPNGOptionLE(&dpebBody, optDPEBProcessName, []byte("safari\x00"))
+	writePCAPNGOptionLE(&dpebBody, optEndOfOpt, nil)
+	writePCAPNGBlockLE(&out, BlockTypeDarwinProcessEvent, dpebBody.Bytes())
+
+	raw := out.Bytes()
+	cap, err := New(raw)
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+	if len(cap.NameRecords) != 2 || cap.NameRecords[0].Names[0] != "c2.example.com" || cap.NameRecords[1].Names[0] != "v6.example.com" {
+		t.Fatalf("NameRecords = %+v", cap.NameRecords)
+	}
+	if len(cap.InterfaceStats) != 1 || cap.InterfaceStats[0].PacketsReceived != 100 || cap.InterfaceStats[0].PacketsDropped != 2 {
+		t.Fatalf("InterfaceStats = %+v", cap.InterfaceStats)
+	}
+	if len(cap.Processes) != 1 || cap.Processes[0].ProcessID != 8888 || cap.Processes[0].ProcessName != "safari" {
+		t.Fatalf("Processes = %+v", cap.Processes)
+	}
+
+	flows, err := cap.Flows(raw)
+	if err != nil || len(flows) != 1 {
+		t.Fatalf("Flows() = (%d, %v)", len(flows), err)
+	}
+	f := flows[0]
+	if f.ProcessID != 9001 || f.UserID != 501 || !f.HasUserID || f.ProcessName != "curl" || f.ProcessArgs != "curl -k https://c2.example.com" || f.ContainerID != "ctr-123456" {
+		t.Fatalf("FlowSummary process metadata = %+v", f)
 	}
 }
