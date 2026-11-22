@@ -11,7 +11,10 @@ import (
 // PCAPNGWriterOptions configures container and interface metadata written by
 // [NewPCAPNGWriter].
 type PCAPNGWriterOptions struct {
-	LinkType             LinkType
+	LinkType LinkType
+	// LinkTypeSet preserves LinkType verbatim in [NewPCAPNGWriter], including
+	// [LinkTypeNull] (0), instead of defaulting a zero LinkType to [LinkTypeEthernet].
+	LinkTypeSet          bool
 	SnapLen              uint32
 	InterfaceName        string
 	InterfaceDescription string
@@ -29,12 +32,12 @@ type PCAPNGWriter struct {
 
 // NewPCAPNGWriter writes a PcapNG Section Header Block (SHB) and Interface
 // Description Block (IDB, interface ID 0 with nanosecond timestamp resolution)
-// to w and returns a [PCAPNGWriter]. A zero LinkType defaults to
-// [LinkTypeEthernet] unless InterfaceName is "lo0" (use [PCAPNGWriter.AddInterface]
-// to register [LinkTypeNull] verbatim). A zero SnapLen defaults to
-// [DefaultLiveSnapLen].
+// to w and returns a [PCAPNGWriter]. When LinkTypeSet is false, a zero LinkType
+// defaults to [LinkTypeEthernet] unless InterfaceName is "lo0". Set LinkTypeSet
+// to true to preserve [LinkTypeNull] on interface 0 for any interface name. A
+// zero SnapLen defaults to [DefaultLiveSnapLen].
 func NewPCAPNGWriter(w io.Writer, opts PCAPNGWriterOptions) (*PCAPNGWriter, error) {
-	if opts.LinkType == 0 && opts.InterfaceName != "lo0" {
+	if !opts.LinkTypeSet && opts.LinkType == 0 && opts.InterfaceName != "lo0" {
 		opts.LinkType = LinkTypeEthernet
 	}
 	if opts.SnapLen == 0 {
@@ -290,15 +293,15 @@ func (pw *PCAPNGWriter) WriteNameResolution(records []NameResolutionRecord) erro
 			if name == "" {
 				continue
 			}
+			if len(name) > MaxOptionStringBytes-val.Len()-1 {
+				return fmt.Errorf("%w: NRB record length exceeds %d", ErrOptionLimit, MaxOptionStringBytes)
+			}
 			val.WriteString(name)
 			val.WriteByte(0)
 			wroteName = true
 		}
 		if !wroteName {
 			continue
-		}
-		if val.Len() > MaxOptionStringBytes {
-			return fmt.Errorf("%w: NRB record length %d exceeds %d", ErrOptionLimit, val.Len(), MaxOptionStringBytes)
 		}
 		writePCAPNGOptionLE(&body, recType, val.Bytes())
 	}

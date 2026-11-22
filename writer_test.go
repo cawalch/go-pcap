@@ -205,4 +205,32 @@ func TestPCAPNGWriterBoundsAndSnapLen(t *testing.T) {
 	if len(c.NameRecords) != 1 || c.NameRecords[0].Addr != netip.MustParseAddr("10.0.0.2") || len(c.NameRecords[0].Names) != 1 || c.NameRecords[0].Names[0] != "host.example" {
 		t.Fatalf("NameRecords = %+v", c.NameRecords)
 	}
+
+	// NRB record exceeding MaxOptionStringBytes must be rejected before copying into the record buffer.
+	if err := pw.WriteNameResolution([]NameResolutionRecord{
+		{Addr: netip.MustParseAddr("10.0.0.3"), Names: []string{strings.Repeat("a", MaxOptionStringBytes)}},
+	}); !errors.Is(err, ErrOptionLimit) {
+		t.Fatalf("WriteNameResolution(oversize) err = %v, want ErrOptionLimit", err)
+	}
+
+	// Explicit LinkTypeNull on interface 0 with an arbitrary interface name must round-trip as LinkTypeNull.
+	var nullBuf bytes.Buffer
+	nullPW, err := NewPCAPNGWriter(&nullBuf, PCAPNGWriterOptions{
+		LinkType:      LinkTypeNull,
+		LinkTypeSet:   true,
+		InterfaceName: "loopback",
+	})
+	if err != nil {
+		t.Fatalf("NewPCAPNGWriter(LinkTypeNull) err = %v", err)
+	}
+	if err := nullPW.WritePacket(PacketRecord{TimestampNs: 1}, []byte{2, 0, 0, 0}); err != nil {
+		t.Fatalf("WritePacket(LinkTypeNull) err = %v", err)
+	}
+	nullCap, nullPkts := readWrittenPackets(t, nullBuf.Bytes())
+	if len(nullCap.Interfaces) != 1 || nullCap.Interfaces[0].LinkType != LinkTypeNull || nullCap.Interfaces[0].Name != "loopback" {
+		t.Fatalf("nullCap.Interfaces = %+v, want LinkTypeNull on loopback", nullCap.Interfaces)
+	}
+	if len(nullPkts) != 1 || nullPkts[0].LinkType != LinkTypeNull {
+		t.Fatalf("nullPkts = %+v, want LinkTypeNull", nullPkts)
+	}
 }

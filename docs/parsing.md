@@ -412,10 +412,11 @@ fit unsigned 32-bit Unix seconds; zero snaplen selects `DefaultLiveSnapLen`.
 Use `NewPCAPNGWriter(w, opts)` to stream PcapNG `SHB`, `IDB` (nanosecond
 resolution), `NRB` (`WriteNameResolution`), `ISB` (`WriteInterfaceStats`),
 `DSB` (`WriteDecryptionSecrets`), and process-attributed `EPB` (`WritePacket`)
-blocks to any `io.Writer`. Interface 0 is ready immediately. Call `AddInterface`
-for each additional interface and use its returned ID in `PacketRecord` and
-`InterfaceStatistics`. Each interface has its own link type and snaplen. After
-an output error, start a new capture stream.
+blocks to any `io.Writer`. Interface 0 is ready immediately; set `LinkTypeSet: true`
+to select `LinkTypeNull` explicitly on interface 0 for any interface name. Call
+`AddInterface` for each additional interface and use its returned ID in
+`PacketRecord` and `InterfaceStatistics`. Each interface has its own link type
+and snaplen. After an output error, start a new capture stream.
 
 Call `capture.ExtractFlowPCAPNG(data, w, flowIndex)` to write one bidirectional
 flow. Pass the original capture bytes and the zero-based index from `Flows`.
