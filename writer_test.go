@@ -5,6 +5,7 @@ import (
 	"errors"
 	"io"
 	"math"
+	"net/netip"
 	"reflect"
 	"strings"
 	"testing"
@@ -153,5 +154,83 @@ func TestCaptureWriterPartialOutput(t *testing.T) {
 	}
 	if err := ng.WritePacket(PacketRecord{}, nil); !errors.Is(err, io.ErrShortWrite) || sink.writes != 2 {
 		t.Fatal(err, sink.writes)
+	}
+}
+
+func TestPCAPNGWriterBoundsAndSnapLen(t *testing.T) {
+	var buf bytes.Buffer
+	pw, err := NewPCAPNGWriter(&buf, PCAPNGWriterOptions{LinkType: LinkTypeEthernet, SnapLen: 4})
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Oversize EPB option strings must be rejected without writing corrupt TLV lengths.
+	over := strings.Repeat("x", MaxOptionStringBytes+1)
+	for _, pkt := range []PacketRecord{
+		{ProcessName: over},
+		{ProcessArgs: over},
+		{ContainerID: over},
+	} {
+		if err := pw.WritePacket(pkt, []byte{1, 2}); !errors.Is(err, ErrOptionLimit) {
+			t.Fatalf("WritePacket(oversize option) err = %v, want ErrOptionLimit", err)
+		}
+	}
+	// Negative timestamps must be rejected on WritePacket and WriteInterfaceStats.
+	if err := pw.WritePacket(PacketRecord{TimestampNs: -1}, []byte{1, 2}); !errors.Is(err, ErrInvalidPacket) {
+		t.Fatalf("WritePacket(negative ts) err = %v, want ErrInvalidPacket", err)
+	}
+	if err := pw.WriteInterfaceStats(InterfaceStatistics{TimestampNs: -1}); !errors.Is(err, ErrInvalidBlock) {
+		t.Fatalf("WriteInterfaceStats(negative ts) err = %v, want ErrInvalidBlock", err)
+	}
+	if err := pw.WriteInterfaceStats(InterfaceStatistics{HasStartTime: true, StartTimeNs: -1}); !errors.Is(err, ErrInvalidBlock) {
+		t.Fatalf("WriteInterfaceStats(negative start) err = %v, want ErrInvalidBlock", err)
+	}
+	// NRB records containing only empty strings must be skipped so read-back succeeds.
+	if err := pw.WriteNameResolution([]NameResolutionRecord{
+		{Addr: netip.MustParseAddr("10.0.0.1"), Names: []string{""}},
+		{Addr: netip.MustParseAddr("10.0.0.2"), Names: []string{"", "host.example"}},
+	}); err != nil {
+		t.Fatalf("WriteNameResolution() err = %v", err)
+	}
+	// Payloads longer than the interface SnapLen must be truncated while preserving OriginalLen.
+	if err := pw.WritePacket(PacketRecord{TimestampNs: 100}, []byte{1, 2, 3, 4, 5, 6}); err != nil {
+		t.Fatalf("WritePacket(over snaplen) err = %v", err)
+	}
+	c, pkts := readWrittenPackets(t, buf.Bytes())
+	if c.Anomalies().CaptureLenExceedsSnapLen {
+		t.Fatalf("unexpected CaptureLenExceedsSnapLen anomaly: %+v", c.Anomalies())
+	}
+	if len(pkts) != 1 || pkts[0].CaptureLen != 4 || pkts[0].OriginalLen != 6 {
+		t.Fatalf("pkts = %+v, want capLen=4 origLen=6", pkts)
+	}
+	if len(c.NameRecords) != 1 || c.NameRecords[0].Addr != netip.MustParseAddr("10.0.0.2") || len(c.NameRecords[0].Names) != 1 || c.NameRecords[0].Names[0] != "host.example" {
+		t.Fatalf("NameRecords = %+v", c.NameRecords)
+	}
+
+	// NRB record exceeding MaxOptionStringBytes must be rejected before copying into the record buffer.
+	if err := pw.WriteNameResolution([]NameResolutionRecord{
+		{Addr: netip.MustParseAddr("10.0.0.3"), Names: []string{strings.Repeat("a", MaxOptionStringBytes)}},
+	}); !errors.Is(err, ErrOptionLimit) {
+		t.Fatalf("WriteNameResolution(oversize) err = %v, want ErrOptionLimit", err)
+	}
+
+	// Explicit LinkTypeNull on interface 0 with an arbitrary interface name must round-trip as LinkTypeNull.
+	var nullBuf bytes.Buffer
+	nullPW, err := NewPCAPNGWriter(&nullBuf, PCAPNGWriterOptions{
+		LinkType:      LinkTypeNull,
+		LinkTypeSet:   true,
+		InterfaceName: "loopback",
+	})
+	if err != nil {
+		t.Fatalf("NewPCAPNGWriter(LinkTypeNull) err = %v", err)
+	}
+	if err := nullPW.WritePacket(PacketRecord{TimestampNs: 1}, []byte{2, 0, 0, 0}); err != nil {
+		t.Fatalf("WritePacket(LinkTypeNull) err = %v", err)
+	}
+	nullCap, nullPkts := readWrittenPackets(t, nullBuf.Bytes())
+	if len(nullCap.Interfaces) != 1 || nullCap.Interfaces[0].LinkType != LinkTypeNull || nullCap.Interfaces[0].Name != "loopback" {
+		t.Fatalf("nullCap.Interfaces = %+v, want LinkTypeNull on loopback", nullCap.Interfaces)
+	}
+	if len(nullPkts) != 1 || nullPkts[0].LinkType != LinkTypeNull {
+		t.Fatalf("nullPkts = %+v, want LinkTypeNull", nullPkts)
 	}
 }
