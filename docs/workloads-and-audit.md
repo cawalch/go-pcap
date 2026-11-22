@@ -90,12 +90,12 @@ Measured on Apple M3 Max (`darwin/arm64`, Go 1.27.4):
 ## Head-to-head comparison against `gopacket`
 
 Measured via the isolated `benchmarks/gopacket` submodule (`go-pcap` vs
-`github.com/gopacket/gopacket v1.3.1` on Apple M3 Max, `darwin/arm64`, Go
+`github.com/gopacket/gopacket v1.8.0` on Apple M3 Max, `darwin/arm64`, Go
 1.27.4):
 
-| Workload | `go-pcap` | `gopacket` | Result |
+| Workload | `go-pcap` | `gopacket v1.8.0` | Result |
 | --- | --- | --- | --- |
-| Ethernet + IPv4 + TCP frame decode (`DecodeFrame` vs `gopacket.NewPacket`) | `31.5 ns/op`, `0 B/op`, `0 allocs/op` (`2,251 MB/s`) | `258.5 ns/op`, `1,354 B/op`, `6 allocs/op` (`275 MB/s`) | **8.2x faster**, **0 allocs** vs 6 allocs |
-| Ethernet + IPv4 + TCP frame decode (`DecodeFrame` vs `DecodingLayerParser`) | `31.5 ns/op`, `0 B/op`, `0 allocs/op` (`2,251 MB/s`) | `35.0 ns/op`, `0 B/op`, `0 allocs/op` (`2,027 MB/s`) | **1.11x faster**, zero caller layer setup |
-| PcapNG 64-packet parse + walk (`New` + `PacketSeq` vs `pcapgo.NewNgReader`) | `3,992 ns/op`, `416 B/op`, `3 allocs/op` | `3,383 ns/op`, `13,088 B/op`, `70 allocs/op` | **31.5x less memory**, **23.3x fewer allocs** |
-| 64-packet 8-flow TCP stream reassembly (`Capture.Streams` vs `tcpassembly`) | `8,165 ns/op`, `18,192 B/op`, `77 allocs/op` (`991 MB/s`) | `83,283 ns/op`, `2,343,675 B/op`, `101 allocs/op` (`97 MB/s`) | **10.2x faster**, **128.8x less memory** (`18 KiB` vs `2.34 MiB`) |
+| Ethernet + IPv4 + TCP frame decode (`DecodeFrame` vs `gopacket.NewPacket`) | `31.7 ns/op`, `0 B/op`, `0 allocs/op` (`2,239 MB/s`) | `269.6 ns/op`, `1,354 B/op`, `6 allocs/op` (`263 MB/s`) | **8.5x faster**, **0 allocs** vs 6 allocs |
+| Ethernet + IPv4 + TCP frame decode (`DecodeFrame` vs `DecodingLayerParser`) | `31.7 ns/op`, `0 B/op`, `0 allocs/op` (`2,239 MB/s`) | `36.9 ns/op`, `0 B/op`, `0 allocs/op` (`1,922 MB/s`) | **1.16x faster**, zero caller layer setup |
+| PcapNG 64-packet parse + walk (`New` + `PacketSeq` vs `pcapgo.NewNgReader`) | `3,983 ns/op`, `416 B/op`, `3 allocs/op` (`2,329 MB/s`) | `4,771 ns/op`, `13,088 B/op`, `70 allocs/op` (`1,944 MB/s`) | **1.20x faster**, **31.5x less memory**, **23.3x fewer allocs** |
+| 64-packet 8-flow TCP stream reassembly (`Capture.Streams` vs `tcpassembly`) | `8,600 ns/op`, `18,192 B/op`, `77 allocs/op` (`940 MB/s`) | `88,845 ns/op`, `2,351,867 B/op`, `101 allocs/op` (`91 MB/s`) | **10.3x faster**, **129.3x less memory** (`18.2 KiB` vs `2.35 MiB`) |
