@@ -3,23 +3,30 @@
 // tunnel encapsulations, and extracts flow, cryptographic handshake, and
 // application protocol metadata. It uses only the Go standard library.
 //
-// Use [New] to parse a byte slice, [Open] to read a file, [NewWithLength]
-// to parse a leading stream prefix with a known total stream length, or
-// [NewFromReaderAt] (with [Capture.PacketsFromReaderAt],
+// Use [New] to parse a byte slice, [NewWithLength] to parse a leading stream
+// prefix with a known total stream length, [DecompressCapture] to bound-decode
+// gzip-compressed captures, or [Open] to read container metadata from a file
+// (discarding the file bytes after parsing). Use [NewFromReaderAt] (with
+// [Capture.PacketSeqFromReaderAt], [Capture.PacketsFromReaderAt],
 // [Capture.PacketPayloadFromReaderAt], [Capture.FlowsFromReaderAt],
 // [Capture.DNSFromReaderAt], [Capture.TLSFromReaderAt], and
 // [Capture.QUICFromReaderAt]) to read bounded container metadata, packet
 // headers, flows, and handshake records from an [io.ReaderAt] without loading
-// large captures into memory. Use [NewPCAPNGWriter] to write PcapNG containers,
-// Decryption Secrets Blocks (DSBs), Name Resolution Blocks (NRBs), Interface
-// Statistics Blocks (ISBs), and Enhanced Packet Blocks (EPBs), or [OpenLive]
-// (with [BPFFilterTCPPort], [BPFFilterUDPPort], [BPFFilterIPProtocol],
-// [BPFFilterIPv4Host], and [EvalBPF]) to capture live packets from a network
-// interface using OS-native standard-library syscalls.
+// large captures into memory.
 // These functions return a container snapshot ([Capture]) that retains no
 // reference to the input. Inspect [Capture.FileSize], [Capture.DeclaredExtent],
 // [Capture.InputTruncated], and [Capture.Anomalies] to check whether the
 // capture is truncated or contains structural anomalies.
+//
+// Use [NewPCAPWriter] to write classic PCAP captures, [NewPCAPNGWriter] (and
+// [PCAPNGWriter.AddInterface], [PCAPNGWriter.WriteDecryptionSecrets],
+// [PCAPNGWriter.WriteNameResolution], [PCAPNGWriter.WriteInterfaceStats], and
+// [PCAPNGWriter.WritePacket]) to write PcapNG containers, or
+// [Capture.ExtractFlowPCAPNG] to carve a single bidirectional flow. Use
+// [OpenLive] (with [LiveCapture.Stats], [LiveStats], [BPFFilterTCPPort],
+// [BPFFilterUDPPort], [BPFFilterIPProtocol], [BPFFilterIPv4Host], and
+// [EvalBPF]) to capture live packets from a network interface using OS-native
+// standard-library syscalls.
 //
 // To enumerate packet records in file order, pass the original bytes to
 // [Capture.PacketSeq] (single-pass iterator without slice allocation) or
@@ -34,10 +41,11 @@
 // IPv4/IPv6 network headers and TCP/UDP/ICMP transport headers using a
 // fixed-size stack layer cursor that performs zero heap allocations.
 //
-// Use [Capture.Flows] to aggregate deterministic bidirectional 5-tuple flow
-// summaries with directional packet and byte counters, unioned TCP flags,
-// client/server JA4T/JA4TS and JA4L TCP fingerprints, process attribution, and
-// anomaly flags under bounded flow and packet limits.
+// Use [Capture.Flows] (and [FlowSummary.CommunityID] for TCP/UDP correlation)
+// to aggregate deterministic bidirectional 5-tuple flow summaries with
+// directional packet and byte counters, unioned TCP flags, client/server
+// JA4T/JA4TS and JA4L TCP fingerprints, process attribution, and anomaly flags
+// under bounded flow and packet limits.
 //
 // Use [JA4T], [Frame.JA4T], [JA4L], and [JA4SSH] to compute FoxIO TCP SYN,
 // passive distance/latency, and SSH session fingerprints. Use [DefragmentIP]
