@@ -244,6 +244,7 @@ func TestDNSTCPReassemblyAndDomainStatsNoDoubleCount(t *testing.T) {
 	sSplit := len(sStream) / 2
 	frames := [][]byte{
 		buildEthernetIPv4TCPFrame([4]byte{10, 0, 0, 1}, [4]byte{8, 8, 8, 8}, 54000, 53, 1, 1, TCPFlagPSH|TCPFlagACK, cStream[:cSplit]),
+		buildEthernetIPv4UDPFrame([4]byte{8, 8, 8, 8}, [4]byte{10, 0, 0, 1}, 53, 54000, make([]byte, 12)),
 		buildEthernetIPv4TCPFrame([4]byte{10, 0, 0, 1}, [4]byte{8, 8, 8, 8}, 54000, 53, 1+uint32(cSplit), 1, TCPFlagPSH|TCPFlagACK, cStream[cSplit:]),
 		buildEthernetIPv4TCPFrame([4]byte{8, 8, 8, 8}, [4]byte{10, 0, 0, 1}, 53, 54000, 1, 1+uint32(len(cStream)), TCPFlagPSH|TCPFlagACK, sStream[:sSplit]),
 		buildEthernetIPv4TCPFrame([4]byte{8, 8, 8, 8}, [4]byte{10, 0, 0, 1}, 53, 54000, 1+uint32(sSplit), 1+uint32(len(cStream)), TCPFlagPSH|TCPFlagACK, sStream[sSplit:]),
@@ -253,10 +254,23 @@ func TestDNSTCPReassemblyAndDomainStatsNoDoubleCount(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	budget := scanReadBudget{r: bytes.NewReader(raw), remaining: int64(len(raw))}
+	if _, err := c.DNSFromReaderAt(&budget); err != nil {
+		t.Fatalf("DNS exceeded a single walk of the fixture: %v", err)
+	}
 	checkReaderParity(t, raw, c.DNS, c.DNSFromReaderAt)
 	recs, err := c.DNS(raw)
-	if err != nil || len(recs) != 2 {
-		t.Fatalf("DNS(multi-segment TCP) = (%d, %v), want 2", len(recs), err)
+	if err != nil || len(recs) != 3 {
+		t.Fatalf("DNS(multi-segment TCP) = (%d, %v), want 3", len(recs), err)
+	}
+	packets, err := c.Packets(raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for i, want := range []int{0, 1, 3} {
+		if recs[i].PacketIndex != want || recs[i].TimestampNs != packets[want].TimestampNs {
+			t.Fatalf("record %d: packet %d, time %d", i, recs[i].PacketIndex, recs[i].TimestampNs)
+		}
 	}
 	if has, err := c.HasDNSQuery(raw, "c2.example.com"); err != nil || !has {
 		t.Fatalf("HasDNSQuery(multi-segment TCP) = (%v, %v), want true", has, err)

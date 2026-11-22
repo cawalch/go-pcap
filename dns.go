@@ -1,10 +1,13 @@
 package pcap
 
 import (
+	"cmp"
 	"encoding/binary"
+	"errors"
 	"fmt"
 	"math"
 	"net/netip"
+	"slices"
 	"strings"
 )
 
@@ -94,6 +97,7 @@ type DNSMessage struct {
 
 // DNSRecord associates a parsed [DNSMessage] with its packet and flow indices
 // in a [Capture].
+// For TCP, PacketIndex and TimestampNs identify the packet containing the first length-prefix byte.
 type DNSRecord struct {
 	PacketIndex int
 	FlowIndex   int
@@ -496,7 +500,7 @@ func scanDNS(source ipFrameSource) ([]DNSRecord, error) {
 	var table flowIndexTable
 	var defrag ipFragAccumulator
 	var records []DNSRecord
-	var hasTCPDNS bool
+	var tcp tcpMessageCollector
 
 	err := source.walk(func(pkt PacketRecord, frame Frame, l4 []byte) error {
 
@@ -566,7 +570,7 @@ func scanDNS(source ipFrameSource) ([]DNSRecord, error) {
 			})
 
 		case IPProtoTCP:
-			hasTCPDNS = true
+			return tcp.add(pkt, frame, flowIdx, l4)
 		}
 		return nil
 	})
@@ -574,68 +578,24 @@ func scanDNS(source ipFrameSource) ([]DNSRecord, error) {
 		return nil, err
 	}
 
-	if hasTCPDNS {
-		tcpSource := ipFrameSource{
-			capture: source.capture,
-			data:    source.data,
-			reader:  source.reader,
-		}
-		if source.reader != nil {
-			tcpSource.needsPayload = func(f Frame, _ []byte) bool {
-				return f.IPProtocol == IPProtoTCP && (isDNSPort(f.SrcPort) || isDNSPort(f.DstPort))
-			}
-		}
-		streams, err := collectStreams(tcpSource)
+	err = tcp.walk(2, 12, 65535, func(dir *tcpMessageDirection, pkt messagePacket, data []byte) error {
+		msg, err := ParseDNS(data)
 		if err != nil {
-			return nil, err
+			return nil
 		}
-		for i := range streams {
-			st := &streams[i]
-			if !isDNSPort(st.SrcPort) && !isDNSPort(st.DstPort) {
-				continue
-			}
-			if err := extractDNSFromTCPStream(st.Client.Data, st.FlowIndex, st.SrcAddr, st.DstAddr, st.SrcPort, st.DstPort, &records); err != nil {
-				return nil, err
-			}
-			if err := extractDNSFromTCPStream(st.Server.Data, st.FlowIndex, st.DstAddr, st.SrcAddr, st.DstPort, st.SrcPort, &records); err != nil {
-				return nil, err
-			}
-		}
-	}
-
-	return records, nil
-}
-
-func extractDNSFromTCPStream(
-	stream []byte,
-	flowIndex int,
-	srcAddr, dstAddr netip.Addr,
-	srcPort, dstPort uint16,
-	records *[]DNSRecord,
-) error {
-	for off := 0; off+2 <= len(stream); {
-		dnsLen := int(binary.BigEndian.Uint16(stream[off : off+2]))
-		if dnsLen < 12 || off+2+dnsLen > len(stream) {
-			break
-		}
-		msg, err := ParseDNS(stream[off+2 : off+2+dnsLen])
-		off += 2 + dnsLen
-		if err != nil {
-			continue
-		}
-		if len(*records) >= MaxDNSMessagesPerScan {
+		if len(records) >= MaxDNSMessagesPerScan {
 			return fmt.Errorf("%w: exceeds %d messages", ErrDNSLimit, MaxDNSMessagesPerScan)
 		}
-		*records = append(*records, DNSRecord{
-			FlowIndex: flowIndex,
-			SrcAddr:   srcAddr,
-			DstAddr:   dstAddr,
-			SrcPort:   srcPort,
-			DstPort:   dstPort,
-			Message:   msg,
-		})
+		records = append(records, DNSRecord{PacketIndex: pkt.index, TimestampNs: pkt.timestamp, FlowIndex: dir.flowIndex, SrcAddr: dir.src.Addr(), DstAddr: dir.dst.Addr(), SrcPort: dir.src.Port(), DstPort: dir.dst.Port(), Message: msg})
+		return nil
+	})
+	if err != nil {
+		return nil, err
 	}
-	return nil
+	if len(tcp.directions) > 0 {
+		slices.SortStableFunc(records, func(a, b DNSRecord) int { return cmp.Compare(a.PacketIndex, b.PacketIndex) })
+	}
+	return records, nil
 }
 
 // HasDNSQuery reports whether any DNS message in the capture contains a question
@@ -651,7 +611,7 @@ func (c *Capture) HasDNSQuery(data []byte, qname string) (bool, error) {
 	r := SafeReader{data: data, size: int64(len(data))}
 	var defrag ipFragAccumulator
 	found := false
-	var hasTCPDNS bool
+	var tcp tcpMessageCollector
 
 	err := c.walkPackets(&r, func(pkt PacketRecord) error {
 		payload, err := r.Slice(pkt.PayloadOffset, pkt.PayloadLength)
@@ -677,8 +637,7 @@ func (c *Capture) HasDNSQuery(data []byte, qname string) (bool, error) {
 			return nil
 		}
 		if frame.IPProtocol == IPProtoTCP {
-			hasTCPDNS = true
-			return nil
+			return tcp.add(pkt, frame, 0, payload[frame.PayloadOffset:frame.PayloadOffset+frame.PayloadLength])
 		}
 		if frame.IPProtocol != IPProtoUDP {
 			return nil
@@ -696,36 +655,16 @@ func (c *Capture) HasDNSQuery(data []byte, qname string) (bool, error) {
 	if found {
 		return true, nil
 	}
-	if hasTCPDNS {
-		streams, err := c.Streams(data)
-		if err != nil {
-			return false, err
+	err = tcp.walk(2, 12, 65535, func(_ *tcpMessageDirection, _ messagePacket, data []byte) error {
+		if dnsPayloadHasQuery(data, target) {
+			return errStopWalk
 		}
-		for i := range streams {
-			st := &streams[i]
-			if !isDNSPort(st.SrcPort) && !isDNSPort(st.DstPort) {
-				continue
-			}
-			if tcpDNSStreamHasQuery(st.Client.Data, target) || tcpDNSStreamHasQuery(st.Server.Data, target) {
-				return true, nil
-			}
-		}
+		return nil
+	})
+	if errors.Is(err, errStopWalk) {
+		return true, nil
 	}
-	return false, nil
-}
-
-func tcpDNSStreamHasQuery(stream []byte, target string) bool {
-	for off := 0; off+2 <= len(stream); {
-		dnsLen := int(binary.BigEndian.Uint16(stream[off : off+2]))
-		if dnsLen < 12 || off+2+dnsLen > len(stream) {
-			break
-		}
-		if dnsPayloadHasQuery(stream[off+2:off+2+dnsLen], target) {
-			return true
-		}
-		off += 2 + dnsLen
-	}
-	return false
+	return false, err
 }
 
 func dnsPayloadHasQuery(payload []byte, target string) bool {
