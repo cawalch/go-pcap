@@ -39,3 +39,15 @@ func (lc *LiveCapture) Close() error {
 	lc.fd = -1
 	return syscall.Close(fd)
 }
+
+func (lc *LiveCapture) snapshotFD() (int, bool) {
+	if lc == nil {
+		return -1, false
+	}
+	lc.statsMu.Lock()
+	defer lc.statsMu.Unlock()
+	if lc.fd < 0 || lc.buf == nil {
+		return -1, false
+	}
+	return lc.fd, true
+}

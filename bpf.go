@@ -214,6 +214,11 @@ func EvalBPF(insns []BPFInstruction, frame []byte) (uint32, bool) {
 				a >>= (src & 31)
 			case 0x80:
 				a = -a
+			case 0x90:
+				if src == 0 {
+					return 0, false
+				}
+				a %= src
 			case 0xa0:
 				a ^= src
 			default:

@@ -5,6 +5,7 @@ package pcap
 import (
 	"fmt"
 	"net"
+	"sync"
 	"syscall"
 	"time"
 	"unsafe"
@@ -19,6 +20,7 @@ const (
 // LiveCapture reads live IPv4 packets from a Windows network interface using
 // standard-library raw sockets and SIO_RCVALL without Npcap or cgo.
 type LiveCapture struct {
+	mu        sync.Mutex
 	fd        syscall.Handle
 	ifaceName string
 	linkType  LinkType
@@ -129,27 +131,48 @@ func (lc *LiveCapture) SnapLen() uint32 {
 	return lc.snapLen
 }
 
+func (lc *LiveCapture) snapshotFD() (syscall.Handle, bool) {
+	if lc == nil {
+		return syscall.InvalidHandle, false
+	}
+	lc.mu.Lock()
+	defer lc.mu.Unlock()
+	if lc.fd == syscall.InvalidHandle || lc.buf == nil {
+		return syscall.InvalidHandle, false
+	}
+	return lc.fd, true
+}
+
 // ReadPacket reads the next live IPv4 packet from the Windows raw socket,
 // evaluating any configured BPF filter in userspace via [EvalBPF].
 func (lc *LiveCapture) ReadPacket() (PacketRecord, []byte, error) {
-	if lc == nil || lc.fd == syscall.InvalidHandle {
+	fd, ok := lc.snapshotFD()
+	if !ok {
 		return PacketRecord{}, nil, ErrInvalidHeader
 	}
 	for {
-		n, _, err := syscall.Recvfrom(lc.fd, lc.buf, 0)
+		n, _, err := syscall.Recvfrom(fd, lc.buf, 0)
 		if err != nil {
 			return PacketRecord{}, nil, err
 		}
 		if n <= 0 {
+			fd, ok = lc.snapshotFD()
+			if !ok {
+				return PacketRecord{}, nil, ErrInvalidHeader
+			}
 			continue
 		}
 		pkt := lc.buf[:n]
+		capLen := uint32(n)
 		if len(lc.filter) > 0 {
-			if _, ok := EvalBPF(lc.filter, pkt); !ok {
+			snap, ok := EvalBPF(lc.filter, pkt)
+			if !ok || snap == 0 {
 				continue
 			}
+			if snap < capLen {
+				capLen = snap
+			}
 		}
-		capLen := uint32(n)
 		if capLen > lc.snapLen {
 			capLen = lc.snapLen
 		}
@@ -169,7 +192,12 @@ func (lc *LiveCapture) ReadPacket() (PacketRecord, []byte, error) {
 
 // Close closes the underlying Windows raw socket handle.
 func (lc *LiveCapture) Close() error {
-	if lc == nil || lc.fd == syscall.InvalidHandle {
+	if lc == nil {
+		return nil
+	}
+	lc.mu.Lock()
+	defer lc.mu.Unlock()
+	if lc.fd == syscall.InvalidHandle || lc.buf == nil {
 		return nil
 	}
 	fd := lc.fd

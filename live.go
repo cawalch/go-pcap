@@ -41,6 +41,9 @@ func (o LiveOptions) normalize() (LiveOptions, error) {
 	if o.BufferSize <= 0 {
 		o.BufferSize = DefaultLiveBufferSize
 	}
+	if o.BufferSize > MaxSnapLen {
+		return o, fmt.Errorf("%w: buffer size %d exceeds %d", ErrInvalidHeader, o.BufferSize, MaxSnapLen)
+	}
 	if len(o.BPFFilter) > MaxBPFFilterInstructions {
 		return o, fmt.Errorf("%w: BPF filter length %d exceeds %d", ErrInvalidHeader, len(o.BPFFilter), MaxBPFFilterInstructions)
 	}

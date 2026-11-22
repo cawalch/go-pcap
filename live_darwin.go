@@ -4,6 +4,7 @@ package pcap
 
 import (
 	"fmt"
+	"runtime"
 	"sync"
 	"syscall"
 	"unsafe"
@@ -35,6 +36,9 @@ func OpenLive(ifaceName string, opts LiveOptions) (*LiveCapture, error) {
 	if ifaceName == "" {
 		return nil, fmt.Errorf("%w: empty interface name", ErrInvalidHeader)
 	}
+	if len(ifaceName) >= syscall.IFNAMSIZ {
+		return nil, fmt.Errorf("%w: interface name %q exceeds %d bytes", ErrInvalidHeader, ifaceName, syscall.IFNAMSIZ-1)
+	}
 	normOpts, err := opts.normalize()
 	if err != nil {
 		return nil, err
@@ -56,7 +60,7 @@ func OpenLive(ifaceName string, opts LiveOptions) (*LiveCapture, error) {
 		return nil, fmt.Errorf("opening /dev/bpf device: %w", openErr)
 	}
 
-	bufLen := normOpts.BufferSize
+	bufLen := uint32(normOpts.BufferSize)
 	_, _, errno := syscall.Syscall(syscall.SYS_IOCTL, uintptr(fd), syscall.BIOCSBLEN, uintptr(unsafe.Pointer(&bufLen)))
 	if errno != 0 {
 		_ = syscall.Close(fd)
@@ -112,15 +116,16 @@ func OpenLive(ifaceName string, opts LiveOptions) (*LiveCapture, error) {
 			Insns: &insns[0],
 		}
 		_, _, errno = syscall.Syscall(syscall.SYS_IOCTL, uintptr(fd), syscall.BIOCSETF, uintptr(unsafe.Pointer(&prog)))
+		runtime.KeepAlive(insns)
 		if errno != 0 {
 			_ = syscall.Close(fd)
 			return nil, fmt.Errorf("ioctl BIOCSETF: %w", errno)
 		}
 	}
 
-	var actualBufLen int
+	var actualBufLen uint32
 	_, _, errno = syscall.Syscall(syscall.SYS_IOCTL, uintptr(fd), syscall.BIOCGBLEN, uintptr(unsafe.Pointer(&actualBufLen)))
-	if errno != 0 || actualBufLen <= 0 {
+	if errno != 0 || actualBufLen == 0 {
 		actualBufLen = bufLen
 	}
 
@@ -169,15 +174,20 @@ func (lc *LiveCapture) SnapLen() uint32 {
 // byte slice aliases the LiveCapture's internal read buffer and remains valid
 // until the next call to ReadPacket.
 func (lc *LiveCapture) ReadPacket() (PacketRecord, []byte, error) {
-	if lc == nil || lc.fd < 0 {
+	fd, ok := lc.snapshotFD()
+	if !ok {
 		return PacketRecord{}, nil, ErrInvalidHeader
 	}
 	for lc.queueIdx >= len(lc.queued) {
-		n, err := syscall.Read(lc.fd, lc.buf)
+		n, err := syscall.Read(fd, lc.buf)
 		if err != nil {
 			return PacketRecord{}, nil, err
 		}
 		if n == 0 {
+			fd, ok = lc.snapshotFD()
+			if !ok {
+				return PacketRecord{}, nil, ErrInvalidHeader
+			}
 			continue
 		}
 		records, err := ParseBPFBuffer(lc.buf[:n], lc.linkType)

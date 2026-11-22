@@ -3,8 +3,10 @@
 package pcap
 
 import (
+	"encoding/binary"
 	"fmt"
 	"net"
+	"runtime"
 	"sync"
 	"syscall"
 	"time"
@@ -26,7 +28,9 @@ type LiveCapture struct {
 }
 
 func htons(v uint16) uint16 {
-	return (v << 8) | (v >> 8)
+	var b [2]byte
+	binary.NativeEndian.PutUint16(b[:], v)
+	return binary.BigEndian.Uint16(b[:])
 }
 
 // OpenLive opens a live packet capture handle on ifaceName using an AF_PACKET
@@ -59,9 +63,16 @@ func OpenLive(ifaceName string, opts LiveOptions) (*LiveCapture, error) {
 		return nil, err
 	}
 
+	if normOpts.BufferSize > 0 {
+		_ = syscall.SetsockoptInt(fd, syscall.SOL_SOCKET, syscall.SO_RCVBUF, normOpts.BufferSize)
+	}
+
 	if normOpts.Timeout > 0 {
 		tv := syscall.NsecToTimeval(normOpts.Timeout.Nanoseconds())
-		_ = syscall.SetsockoptTimeval(fd, syscall.SOL_SOCKET, syscall.SO_RCVTIMEO, &tv)
+		if err := syscall.SetsockoptTimeval(fd, syscall.SOL_SOCKET, syscall.SO_RCVTIMEO, &tv); err != nil {
+			_ = syscall.Close(fd)
+			return nil, fmt.Errorf("setsockopt SO_RCVTIMEO: %w", err)
+		}
 	}
 
 	if len(normOpts.BPFFilter) > 0 {
@@ -78,7 +89,9 @@ func OpenLive(ifaceName string, opts LiveOptions) (*LiveCapture, error) {
 			Len:    uint16(len(insns)),
 			Filter: &insns[0],
 		}
-		if err := attachLinuxBPFFilter(fd, &fprog); err != nil {
+		err := attachLinuxBPFFilter(fd, &fprog)
+		runtime.KeepAlive(insns)
+		if err != nil {
 			_ = syscall.Close(fd)
 			return nil, fmt.Errorf("setsockopt SO_ATTACH_FILTER: %w", err)
 		}
@@ -119,10 +132,11 @@ func (lc *LiveCapture) SnapLen() uint32 {
 
 // ReadPacket reads the next live packet from the AF_PACKET socket.
 func (lc *LiveCapture) ReadPacket() (PacketRecord, []byte, error) {
-	if lc == nil || lc.fd < 0 {
+	fd, ok := lc.snapshotFD()
+	if !ok {
 		return PacketRecord{}, nil, ErrInvalidHeader
 	}
-	n, _, err := syscall.Recvfrom(lc.fd, lc.buf, 0)
+	n, _, err := syscall.Recvfrom(fd, lc.buf, 0)
 	if err != nil {
 		return PacketRecord{}, nil, err
 	}

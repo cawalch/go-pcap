@@ -3,6 +3,7 @@
 package pcap
 
 import (
+	"runtime"
 	"syscall"
 	"unsafe"
 )
@@ -10,19 +11,24 @@ import (
 const sysSetsockoptCall = 14
 
 func attachLinuxBPFFilter(fd int, fprog *syscall.SockFprog) error {
-	args := [5]uintptr{
-		uintptr(fd),
-		uintptr(syscall.SOL_SOCKET),
-		uintptr(syscall.SO_ATTACH_FILTER),
-		uintptr(unsafe.Pointer(fprog)),
-		unsafe.Sizeof(*fprog),
+	args := struct {
+		fd, level, option uintptr
+		fprog             *syscall.SockFprog
+		size              uintptr
+	}{
+		fd:     uintptr(fd),
+		level:  uintptr(syscall.SOL_SOCKET),
+		option: uintptr(syscall.SO_ATTACH_FILTER),
+		fprog:  fprog,
+		size:   unsafe.Sizeof(*fprog),
 	}
 	_, _, errno := syscall.Syscall(
 		syscall.SYS_SOCKETCALL,
 		sysSetsockoptCall,
-		uintptr(unsafe.Pointer(&args[0])),
+		uintptr(unsafe.Pointer(&args)),
 		0,
 	)
+	runtime.KeepAlive(fprog)
 	if errno != 0 {
 		return errno
 	}
