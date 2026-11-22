@@ -554,3 +554,50 @@ func BenchmarkPacketFingerprints(b *testing.B) {
 		})
 	}
 }
+
+// BenchmarkFlowCommunityID scans 512 packets across 128 TCP flows. Each
+// WithIDs case also materializes the ID for every returned summary.
+func BenchmarkFlowCommunityID(b *testing.B) {
+	var frames [][]byte
+	for range 4 {
+		for i := range 128 {
+			frames = append(frames, buildEthernetIPv4TCPFrame([4]byte{10, 0, 0, 1}, [4]byte{10, 0, 0, 2}, uint16(10000+i), 443, 1, 0, TCPFlagACK, nil))
+		}
+	}
+	raw := buildClassicPCAP(binary.LittleEndian, false, LinkTypeEthernet, 65535, frames)
+	r := bytes.NewReader(raw)
+	for _, reader := range []string{"Slice", "ReaderAt"} {
+		for _, mode := range []string{"Flows", "WithIDs"} {
+			b.Run(reader+"/"+mode, func(b *testing.B) {
+				var scan func() ([]FlowSummary, error)
+				if reader == "ReaderAt" {
+					c, err := NewFromReaderAt(r, r.Size())
+					if err != nil {
+						b.Fatal(err)
+					}
+					scan = func() ([]FlowSummary, error) { return c.FlowsFromReaderAt(r) }
+				} else {
+					c, err := New(raw)
+					if err != nil {
+						b.Fatal(err)
+					}
+					scan = func() ([]FlowSummary, error) { return c.Flows(raw) }
+				}
+				b.ReportAllocs()
+				for b.Loop() {
+					flows, err := scan()
+					if err != nil || len(flows) != 128 {
+						b.Fatalf("%d flows, %v", len(flows), err)
+					}
+					if mode == "WithIDs" {
+						for i := range flows {
+							if len(flows[i].CommunityID(0)) != 30 {
+								b.Fatal("missing Community ID")
+							}
+						}
+					}
+				}
+			})
+		}
+	}
+}

@@ -54,6 +54,7 @@ type Frame struct {
 	IPVersion       uint8
 	IPProtocol      uint8
 	TTL             uint8
+	hasPorts        bool
 	IPID            uint32
 	IPFragOffset    uint16 // Fragment offset in bytes (8-byte units * 8)
 	IPMoreFragments bool
@@ -319,6 +320,7 @@ func decodeIPv4(r *SafeReader, offset int64, f *Frame) {
 	moreFragments := (fragWord & 0x2000) != 0
 	fragOffset := (fragWord & 0x1fff) * 8
 
+	f.hasPorts = false
 	f.IPVersion = 4
 	f.IPID = uint32(ipID)
 	f.IPFragOffset = fragOffset
@@ -366,6 +368,7 @@ func decodeIPv6(r *SafeReader, offset int64, f *Frame) {
 		f.Anomalies.IPTotalLengthExceedsFrame = true
 	}
 
+	f.hasPorts = false
 	f.IPVersion = 6
 	f.TTL = hopLimit
 	f.IPProtocol = nextHeader
@@ -448,6 +451,7 @@ func decodeTransport(r *SafeReader, offset, ipBound int64, proto uint8, f *Frame
 			return
 		}
 		tcp := r.data[offset : offset+20]
+		f.hasPorts = true
 		f.SrcPort = binary.BigEndian.Uint16(tcp[0:2])
 		f.DstPort = binary.BigEndian.Uint16(tcp[2:4])
 		f.TCPSeq = binary.BigEndian.Uint32(tcp[4:8])
@@ -476,6 +480,7 @@ func decodeTransport(r *SafeReader, offset, ipBound int64, proto uint8, f *Frame
 			f.Anomalies.TruncatedLayer = true
 			return
 		}
+		f.hasPorts = true
 		f.SrcPort = binary.BigEndian.Uint16(r.data[offset : offset+2])
 		f.DstPort = binary.BigEndian.Uint16(r.data[offset+2 : offset+4])
 		f.pushLayer(LayerUDP, offset, 8)
@@ -635,6 +640,8 @@ type FlowSummary struct {
 	ContainerID      string
 	HasProcessID     bool
 	HasUserID        bool
+	// PortsUnavailable reports that no packet in the summary supplied transport ports.
+	PortsUnavailable bool
 	Anomalies        FrameAnomalies
 }
 
@@ -765,11 +772,15 @@ func (c *Capture) Flows(data []byte) ([]FlowSummary, error) {
 				ContainerID:      pkt.ContainerID,
 				HasProcessID:     pkt.HasProcessID,
 				HasUserID:        pkt.HasUserID,
+				PortsUnavailable: !frame.hasPorts,
 			})
 			hsTimes = append(hsTimes, tcpHandshakeTime{})
 		}
 
 		flow := &flows[idx]
+		if flow.PortsUnavailable && frame.hasPorts {
+			flow.PortsUnavailable = false
+		}
 		hst := &hsTimes[idx]
 		flow.PacketCount++
 		if pkt.TimestampNs < flow.FirstTimestampNs {

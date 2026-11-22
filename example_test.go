@@ -164,3 +164,13 @@ func ExampleDNSLabelEntropy() {
 	// Output:
 	// normal=0.0 high_entropy=true
 }
+
+func ExampleFlowSummary_CommunityID() {
+	f := pcap.FlowSummary{
+		Protocol: pcap.IPProtoTCP,
+		SrcAddr:  netip.MustParseAddr("1.2.3.4"), SrcPort: 1122,
+		DstAddr: netip.MustParseAddr("5.6.7.8"), DstPort: 3344,
+	}
+	fmt.Println(f.CommunityID(0))
+	// Output: 1:wCb3OG7yAFWelaUydu0D+125CLM=
+}

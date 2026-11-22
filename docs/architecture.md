@@ -59,7 +59,7 @@ Schedule compiler bounds-check work when those measurements justify it.
 ### Protocol and integration proposals
 
 Add protocol fields when a caller can use the observation and the parser can
-bound the work. Community ID is a candidate for cross-tool flow correlation.
+bound the work. Flow summaries expose on-demand Community ID v1 for TCP and UDP correlation.
 HTTP/3 depends on a separate decision about QUIC 1-RTT decryption and stream
 reconstruction. Consumers interpret observations such as TCP timestamps, ICMP
 statistics and advertised address bindings in their deployment context.
