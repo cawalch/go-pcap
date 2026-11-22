@@ -79,9 +79,7 @@ Use `errors.Is` with `ErrNotPCAP`, `ErrInvalidMagic`, `ErrInvalidHeader`,
 `ErrInvalidSMB`, `ErrInterfaceLimit`, `ErrPacketLimit`, `ErrFlowLimit`,
 `ErrSecretLimit`, `ErrOptionLimit`, `ErrReassemblyLimit`, `ErrDNSLimit`,
 `ErrTLSLimit`, `ErrQUICLimit`, `ErrHTTPLimit`, `ErrSSHLimit`, `ErrSMBLimit`,
-`ErrOutOfBounds`, or `ErrIntegerOverflow` to classify failures. See
-[Workload comparisons and parser audit](workloads-and-audit.md) for worst-case
-complexity bounds, adversarial input handling, and benchmark measurements.
+`ErrOutOfBounds`, or `ErrIntegerOverflow` to classify failures.
 
 ## Inspect truncation and anomalies
 

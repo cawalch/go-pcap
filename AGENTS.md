@@ -23,7 +23,7 @@ Before writing new code, evaluate options in order and stop at the first match:
 
 - Keep PCAP/PcapNG parsing, live OS capture (`syscall`), L2–L7 frame/flow
   dissection, fingerprinting (JA4+), and offline TLS/QUIC decryption in the
-  root module; keep third-party comparisons in `benchmarks/`.
+  root module.
 - Keep scanner-specific schemas, YARA adapters, and rule semantics in consuming
   projects (such as `go-yara`).
 - Do not change exported APIs without updating docstrings, examples, and

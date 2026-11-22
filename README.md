@@ -223,7 +223,6 @@ install Go.
 
 - [API reference](https://pkg.go.dev/github.com/cawalch/go-pcap)
 - [Parsing guide](docs/parsing.md)
-- [Workload comparisons and parser audit](docs/workloads-and-audit.md)
 - [Architecture, roadmap, and YARA integration](docs/architecture.md)
 - [Release guide](docs/releases.md)
 - [Changelog](CHANGELOG.md)
