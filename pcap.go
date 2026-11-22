@@ -2,6 +2,7 @@ package pcap
 
 import (
 	"bytes"
+	"compress/gzip"
 	"encoding/binary"
 	"errors"
 	"fmt"
@@ -172,6 +173,32 @@ func Open(filename string) (*Capture, error) {
 		return nil, err
 	}
 	return New(data)
+}
+
+// DecompressCapture returns plain input unchanged or decodes gzip input into a
+// new slice. The combined output of all gzip members is limited to
+// [MaxDecompressedCaptureBytes]. Invalid gzip data and over-limit streams
+// return no data. Pass the returned slice to [New] and subsequent capture
+// methods so packet offsets refer to the decompressed bytes.
+func DecompressCapture(data []byte) ([]byte, error) {
+	if len(data) < 2 || data[0] != 0x1f || data[1] != 0x8b {
+		return data, nil
+	}
+	r, err := gzip.NewReader(bytes.NewReader(data))
+	if err != nil {
+		return nil, err
+	}
+	plain, err := io.ReadAll(io.LimitReader(r, MaxDecompressedCaptureBytes+1))
+	if closeErr := r.Close(); err == nil {
+		err = closeErr
+	}
+	if len(plain) > MaxDecompressedCaptureBytes {
+		return nil, fmt.Errorf("%w: decompressed capture exceeds %d bytes", ErrPacketLimit, MaxDecompressedCaptureBytes)
+	}
+	if err != nil {
+		return nil, err
+	}
+	return plain, nil
 }
 
 // New parses a classic PCAP or PcapNG container from data.
