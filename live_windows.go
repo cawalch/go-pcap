@@ -17,11 +17,15 @@ const (
 	rcvallOn        uint32   = 1
 )
 
+var procCancelIoEx = syscall.NewLazyDLL("kernel32.dll").NewProc("CancelIoEx")
+
 // LiveCapture reads live IPv4 packets from a Windows network interface using
 // standard-library raw sockets and SIO_RCVALL without Npcap or cgo.
 type LiveCapture struct {
 	mu        sync.Mutex
 	fd        syscall.Handle
+	closed    bool
+	refs      int
 	ifaceName string
 	linkType  LinkType
 	snapLen   uint32
@@ -131,35 +135,57 @@ func (lc *LiveCapture) SnapLen() uint32 {
 	return lc.snapLen
 }
 
-func (lc *LiveCapture) snapshotFD() (syscall.Handle, bool) {
+func (lc *LiveCapture) acquireFD() (syscall.Handle, bool) {
 	if lc == nil {
 		return syscall.InvalidHandle, false
 	}
 	lc.mu.Lock()
 	defer lc.mu.Unlock()
-	if lc.fd == syscall.InvalidHandle || lc.buf == nil {
+	if lc.closed || lc.fd == syscall.InvalidHandle || lc.buf == nil {
 		return syscall.InvalidHandle, false
 	}
+	lc.refs++
 	return lc.fd, true
+}
+
+func (lc *LiveCapture) releaseFD() {
+	lc.mu.Lock()
+	lc.refs--
+	var closeHandle syscall.Handle
+	if lc.closed && lc.refs == 0 && lc.fd != syscall.InvalidHandle {
+		closeHandle = lc.fd
+		lc.fd = syscall.InvalidHandle
+	}
+	lc.mu.Unlock()
+	if closeHandle != 0 {
+		_ = syscall.Closesocket(closeHandle)
+	}
+}
+
+func (lc *LiveCapture) isClosed() bool {
+	lc.mu.Lock()
+	closed := lc.closed
+	lc.mu.Unlock()
+	return closed
 }
 
 // ReadPacket reads the next live IPv4 packet from the Windows raw socket,
 // evaluating any configured BPF filter in userspace via [EvalBPF].
 func (lc *LiveCapture) ReadPacket() (PacketRecord, []byte, error) {
-	fd, ok := lc.snapshotFD()
+	fd, ok := lc.acquireFD()
 	if !ok {
 		return PacketRecord{}, nil, ErrInvalidHeader
 	}
+	defer lc.releaseFD()
 	for {
+		if lc.isClosed() {
+			return PacketRecord{}, nil, ErrInvalidHeader
+		}
 		n, _, err := syscall.Recvfrom(fd, lc.buf, 0)
 		if err != nil {
 			return PacketRecord{}, nil, err
 		}
 		if n <= 0 {
-			fd, ok = lc.snapshotFD()
-			if !ok {
-				return PacketRecord{}, nil, ErrInvalidHeader
-			}
 			continue
 		}
 		pkt := lc.buf[:n]
@@ -190,19 +216,27 @@ func (lc *LiveCapture) ReadPacket() (PacketRecord, []byte, error) {
 	}
 }
 
-// Close closes the underlying Windows raw socket handle.
+// Close closes the underlying Windows raw socket handle and cancels any
+// blocked ReadPacket call without releasing the handle while a read is active.
 func (lc *LiveCapture) Close() error {
 	if lc == nil {
 		return nil
 	}
 	lc.mu.Lock()
-	defer lc.mu.Unlock()
-	if lc.fd == syscall.InvalidHandle || lc.buf == nil {
+	if lc.closed || lc.fd == syscall.InvalidHandle || lc.buf == nil {
+		lc.mu.Unlock()
 		return nil
 	}
+	lc.closed = true
 	fd := lc.fd
-	lc.fd = syscall.InvalidHandle
-	return syscall.Closesocket(fd)
+	if lc.refs == 0 {
+		lc.fd = syscall.InvalidHandle
+		lc.mu.Unlock()
+		return syscall.Closesocket(fd)
+	}
+	lc.mu.Unlock()
+	_, _, _ = procCancelIoEx.Call(uintptr(fd), 0)
+	return nil
 }
 
 // Stats returns [ErrLiveCaptureUnsupported] because this backend lacks capture counters.

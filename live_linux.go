@@ -6,6 +6,7 @@ import (
 	"encoding/binary"
 	"fmt"
 	"net"
+	"os"
 	"runtime"
 	"sync"
 	"syscall"
@@ -17,12 +18,13 @@ const LinkTypeUnknown LinkType = 0xffff
 // LiveCapture reads live packets from an OS network interface using standard
 // library AF_PACKET syscalls on Linux.
 type LiveCapture struct {
-	statsMu   sync.Mutex // serializes Stats and Close
+	statsMu   sync.Mutex // serializes Stats accumulation
 	stats     LiveStats
-	fd        int
+	file      *os.File
 	ifaceName string
 	linkType  LinkType
 	snapLen   uint32
+	timeout   time.Duration
 	buf       []byte
 	pktIndex  int
 }
@@ -49,7 +51,7 @@ func OpenLive(ifaceName string, opts LiveOptions) (*LiveCapture, error) {
 	}
 
 	proto := int(htons(syscall.ETH_P_ALL))
-	fd, err := syscall.Socket(syscall.AF_PACKET, syscall.SOCK_RAW, proto)
+	fd, err := syscall.Socket(syscall.AF_PACKET, syscall.SOCK_RAW|syscall.SOCK_NONBLOCK|syscall.SOCK_CLOEXEC, proto)
 	if err != nil {
 		return nil, err
 	}
@@ -65,14 +67,6 @@ func OpenLive(ifaceName string, opts LiveOptions) (*LiveCapture, error) {
 
 	if normOpts.BufferSize > 0 {
 		_ = syscall.SetsockoptInt(fd, syscall.SOL_SOCKET, syscall.SO_RCVBUF, normOpts.BufferSize)
-	}
-
-	if normOpts.Timeout > 0 {
-		tv := syscall.NsecToTimeval(normOpts.Timeout.Nanoseconds())
-		if err := syscall.SetsockoptTimeval(fd, syscall.SOL_SOCKET, syscall.SO_RCVTIMEO, &tv); err != nil {
-			_ = syscall.Close(fd)
-			return nil, fmt.Errorf("setsockopt SO_RCVTIMEO: %w", err)
-		}
 	}
 
 	if len(normOpts.BPFFilter) > 0 {
@@ -98,10 +92,11 @@ func OpenLive(ifaceName string, opts LiveOptions) (*LiveCapture, error) {
 	}
 
 	return &LiveCapture{
-		fd:        fd,
+		file:      os.NewFile(uintptr(fd), ifaceName),
 		ifaceName: ifaceName,
 		linkType:  LinkTypeEthernet,
 		snapLen:   normOpts.SnapLen,
+		timeout:   normOpts.Timeout,
 		buf:       make([]byte, normOpts.SnapLen),
 	}, nil
 }
@@ -132,11 +127,15 @@ func (lc *LiveCapture) SnapLen() uint32 {
 
 // ReadPacket reads the next live packet from the AF_PACKET socket.
 func (lc *LiveCapture) ReadPacket() (PacketRecord, []byte, error) {
-	fd, ok := lc.snapshotFD()
-	if !ok {
+	if lc == nil || lc.file == nil || len(lc.buf) == 0 {
 		return PacketRecord{}, nil, ErrInvalidHeader
 	}
-	n, _, err := syscall.Recvfrom(fd, lc.buf, 0)
+	if lc.timeout > 0 {
+		if err := lc.file.SetReadDeadline(time.Now().Add(lc.timeout)); err != nil {
+			return PacketRecord{}, nil, err
+		}
+	}
+	n, err := lc.file.Read(lc.buf)
 	if err != nil {
 		return PacketRecord{}, nil, err
 	}
@@ -157,11 +156,11 @@ func (lc *LiveCapture) ReadPacket() (PacketRecord, []byte, error) {
 	return rec, lc.buf[:capLen], nil
 }
 
-func (lc *LiveCapture) statsDelta() (LiveStats, error) {
+func (lc *LiveCapture) statsDelta(fd int) (LiveStats, error) {
 	// PACKET_STATISTICS returns two native uint32 counters and resets them.
 	var counters [2]uint32
 	size := uint32(8)
-	if errno := getPacketStatistics(lc.fd, &counters, &size); errno != 0 {
+	if errno := getPacketStatistics(fd, &counters, &size); errno != 0 {
 		return LiveStats{}, errno
 	}
 	if size != 8 {

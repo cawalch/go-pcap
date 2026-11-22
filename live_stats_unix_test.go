@@ -5,6 +5,7 @@ package pcap
 import (
 	"errors"
 	"net"
+	"os"
 	"runtime"
 	"syscall"
 	"testing"
@@ -12,10 +13,49 @@ import (
 )
 
 func TestLiveStatsInvalidHandle(t *testing.T) {
-	for _, lc := range []*LiveCapture{nil, {}, {fd: -1}} {
+	for _, lc := range []*LiveCapture{nil, {}} {
 		if _, err := lc.Stats(); !errors.Is(err, ErrInvalidHeader) {
 			t.Fatalf("Stats() error = %v, want ErrInvalidHeader", err)
 		}
+	}
+}
+
+func TestLiveCaptureConcurrentCloseUnblocksReadPacket(t *testing.T) {
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = w.Close() }()
+
+	lc := &LiveCapture{
+		file:     r,
+		linkType: LinkTypeEthernet,
+		snapLen:  DefaultLiveSnapLen,
+		buf:      make([]byte, 4096),
+	}
+
+	done := make(chan error, 1)
+	go func() {
+		_, _, readErr := lc.ReadPacket()
+		done <- readErr
+	}()
+
+	time.Sleep(10 * time.Millisecond)
+	if err := lc.Close(); err != nil {
+		t.Fatalf("Close() error = %v", err)
+	}
+	// Second Close is idempotent.
+	if err := lc.Close(); err != nil {
+		t.Fatalf("second Close() error = %v", err)
+	}
+
+	select {
+	case readErr := <-done:
+		if readErr == nil {
+			t.Fatal("ReadPacket() succeeded after concurrent Close(), want error")
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("ReadPacket() remained blocked after concurrent Close()")
 	}
 }
 

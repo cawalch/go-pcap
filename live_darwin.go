@@ -4,6 +4,8 @@ package pcap
 
 import (
 	"fmt"
+	"io"
+	"os"
 	"runtime"
 	"sync"
 	"syscall"
@@ -13,9 +15,9 @@ import (
 // LiveCapture reads live packets from an OS network interface using standard
 // library syscalls (/dev/bpf* on macOS).
 type LiveCapture struct {
-	statsMu   sync.Mutex // serializes Stats and Close
+	statsMu   sync.Mutex // serializes Stats accumulation
 	stats     LiveStats
-	fd        int
+	file      *os.File
 	ifaceName string
 	linkType  LinkType
 	snapLen   uint32
@@ -45,10 +47,11 @@ func OpenLive(ifaceName string, opts LiveOptions) (*LiveCapture, error) {
 	}
 
 	fd := -1
+	var dev string
 	var openErr error
 	for i := range 256 {
-		dev := fmt.Sprintf("/dev/bpf%d", i)
-		fd, openErr = syscall.Open(dev, syscall.O_RDONLY, 0)
+		dev = fmt.Sprintf("/dev/bpf%d", i)
+		fd, openErr = syscall.Open(dev, syscall.O_RDONLY|syscall.O_CLOEXEC, 0)
 		if openErr == nil {
 			break
 		}
@@ -135,8 +138,13 @@ func OpenLive(ifaceName string, opts LiveOptions) (*LiveCapture, error) {
 		dlt = uint32(LinkTypeEthernet)
 	}
 
+	if err := syscall.SetNonblock(fd, true); err != nil {
+		_ = syscall.Close(fd)
+		return nil, fmt.Errorf("setting non-blocking mode on %s: %w", dev, err)
+	}
+
 	return &LiveCapture{
-		fd:        fd,
+		file:      os.NewFile(uintptr(fd), dev),
 		ifaceName: ifaceName,
 		linkType:  LinkType(dlt & 0xffff),
 		snapLen:   normOpts.SnapLen,
@@ -174,21 +182,16 @@ func (lc *LiveCapture) SnapLen() uint32 {
 // byte slice aliases the LiveCapture's internal read buffer and remains valid
 // until the next call to ReadPacket.
 func (lc *LiveCapture) ReadPacket() (PacketRecord, []byte, error) {
-	fd, ok := lc.snapshotFD()
-	if !ok {
+	if lc == nil || lc.file == nil || len(lc.buf) == 0 {
 		return PacketRecord{}, nil, ErrInvalidHeader
 	}
 	for lc.queueIdx >= len(lc.queued) {
-		n, err := syscall.Read(fd, lc.buf)
+		n, err := lc.file.Read(lc.buf)
 		if err != nil {
 			return PacketRecord{}, nil, err
 		}
 		if n == 0 {
-			fd, ok = lc.snapshotFD()
-			if !ok {
-				return PacketRecord{}, nil, ErrInvalidHeader
-			}
-			continue
+			return PacketRecord{}, nil, io.EOF
 		}
 		records, err := ParseBPFBuffer(lc.buf[:n], lc.linkType)
 		if err != nil {
@@ -210,9 +213,9 @@ func (lc *LiveCapture) ReadPacket() (PacketRecord, []byte, error) {
 	return rec, payload, nil
 }
 
-func (lc *LiveCapture) statsDelta() (LiveStats, error) {
+func (lc *LiveCapture) statsDelta(fd int) (LiveStats, error) {
 	var raw syscall.BpfStat
-	_, _, errno := syscall.Syscall(syscall.SYS_IOCTL, uintptr(lc.fd), syscall.BIOCGSTATS, uintptr(unsafe.Pointer(&raw)))
+	_, _, errno := syscall.Syscall(syscall.SYS_IOCTL, uintptr(fd), syscall.BIOCGSTATS, uintptr(unsafe.Pointer(&raw)))
 	if errno != 0 {
 		return LiveStats{}, errno
 	}
