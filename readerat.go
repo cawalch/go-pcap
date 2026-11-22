@@ -6,10 +6,96 @@ import (
 	"fmt"
 	"io"
 	"iter"
+	"sync"
 )
 
+const fileWindowSize = 64 << 10
+
+var fileWindowBuffers = sync.Pool{New: func() any { return new([fileWindowSize]byte) }}
+
+// A scan owns its window until the walk finishes or the consumer breaks.
+// File descriptor providers include *os.File and file-backed instrumentation.
+// Other ReaderAt implementations keep their exact requested ranges.
+type windowedReaderAt struct {
+	r                        io.ReaderAt
+	size, off, readAheadLeft int64
+	buf                      *[fileWindowSize]byte
+	valid                    int
+}
+
+func fileWindow(r io.ReaderAt, size, extra int64) *windowedReaderAt {
+	if _, ok := r.(interface{ Fd() uintptr }); !ok || size <= 0 || extra <= 0 {
+		return nil
+	}
+	return &windowedReaderAt{r: r, size: size, readAheadLeft: extra, buf: fileWindowBuffers.Get().(*[fileWindowSize]byte)}
+}
+
+func (w *windowedReaderAt) release() {
+	clear(w.buf[:])
+	fileWindowBuffers.Put(w.buf)
+}
+
+// ReadAt serves cached bytes first. A backwards miss (such as an EPB frame
+// preceding already-read options) or a large read goes directly to the file.
+func (w *windowedReaderAt) ReadAt(p []byte, off int64) (int, error) {
+	if len(p) == 0 {
+		return 0, nil
+	}
+	if off < 0 || off >= w.size {
+		return 0, io.EOF
+	}
+	if available := w.size - off; int64(len(p)) > available {
+		n, err := w.r.ReadAt(p[:available], off)
+		if err == nil {
+			err = io.EOF
+		}
+		return n, err
+	}
+	var copied int
+	if off >= w.off && off-w.off < int64(w.valid) {
+		copied = copy(p, w.buf[off-w.off:int64(w.valid)])
+		if copied == len(p) {
+			return copied, nil
+		}
+		off += int64(copied)
+		p = p[copied:]
+	}
+	if off < w.off || len(p) >= fileWindowSize || w.readAheadLeft == 0 {
+		n, err := w.r.ReadAt(p, off)
+		return copied + n, err
+	}
+	want := int64(len(p))
+	spare := min(int64(fileWindowSize)-want, w.size-off-want, w.readAheadLeft)
+	w.readAheadLeft -= spare
+	n, err := w.r.ReadAt(w.buf[:want+spare], off)
+	w.off, w.valid = off, n
+	n = copy(p, w.buf[:n])
+	if n == len(p) {
+		return copied + n, nil
+	}
+	if err == nil {
+		err = io.EOF
+	}
+	return copied + n, err
+}
+
+// Exact L7 reads cover each classic record at most once. PcapNG also
+// re-reads at most four header bytes per block (minimum block size 12).
+// Give prefetch only the remaining allowance, preserving sparse scans that
+// already need the budget. Cache hits still count toward retained input.
+func (c *Capture) scanReadAhead() int64 {
+	if c.fileSize >= MaxReaderAtScanBytes {
+		return 0
+	}
+	extra := int64(MaxReaderAtScanBytes) - c.fileSize
+	if c.Format == FormatPCAPNG {
+		extra -= c.fileSize / 3
+	}
+	return extra
+}
+
 // NewFromReaderAt parses a classic PCAP or PcapNG container from an [io.ReaderAt]
-// of total byte length size. Both formats skip captured frame bytes.
+// of total byte length size. File-backed scans can prefetch up to 64 KiB at a time.
 func NewFromReaderAt(r io.ReaderAt, size int64) (*Capture, error) {
 	if r == nil {
 		return nil, fmt.Errorf("%w: nil ReaderAt", ErrInvalidHeader)
@@ -20,6 +106,10 @@ func NewFromReaderAt(r io.ReaderAt, size int64) (*Capture, error) {
 	var magicBuf [4]byte
 	if err := readExactAt(r, magicBuf[:], 0, size); err != nil {
 		return nil, fmt.Errorf("%w: %w", ErrNotPCAP, err)
+	}
+	if w := fileWindow(r, size, size); w != nil {
+		defer w.release()
+		r = w
 	}
 	magic := binary.LittleEndian.Uint32(magicBuf[:])
 	switch magic {
@@ -38,10 +128,25 @@ func NewFromReaderAt(r io.ReaderAt, size int64) (*Capture, error) {
 	}
 }
 
-// PacketSeqFromReaderAt yields packet metadata in capture order without reading
-// frame bytes. Breaking the loop stops the scan. A read or parse error is
+// PacketSeqFromReaderAt yields packet metadata in capture order. File-backed
+// scans may read ahead. Breaking the loop stops iteration. A read or parse error is
 // yielded once, after any preceding complete records.
 func (c *Capture) PacketSeqFromReaderAt(r io.ReaderAt) iter.Seq2[PacketRecord, error] {
+	return func(yield func(PacketRecord, error) bool) {
+		if err := c.validateContainer(); err != nil {
+			yield(PacketRecord{}, err)
+			return
+		}
+		source := r
+		if w := fileWindow(r, c.fileSize, c.fileSize); w != nil {
+			defer w.release()
+			source = w
+		}
+		c.packetRecords(source)(yield)
+	}
+}
+
+func (c *Capture) packetRecords(r io.ReaderAt) iter.Seq2[PacketRecord, error] {
 	return func(yield func(PacketRecord, error) bool) {
 		err := c.walkPacketsFromReaderAt(r, func(pkt PacketRecord) error {
 			if !yield(pkt, nil) {
@@ -58,15 +163,14 @@ func (c *Capture) PacketSeqFromReaderAt(r io.ReaderAt) iter.Seq2[PacketRecord, e
 // PacketsFromReaderAt collects the records from [Capture.PacketSeqFromReaderAt].
 func (c *Capture) PacketsFromReaderAt(r io.ReaderAt) ([]PacketRecord, error) {
 	var packets []PacketRecord
-	err := c.walkPacketsFromReaderAt(r, func(pkt PacketRecord) error {
+	for pkt, err := range c.PacketSeqFromReaderAt(r) {
+		if err != nil {
+			return nil, err
+		}
 		if packets == nil && c.PacketCount > 0 {
 			packets = make([]PacketRecord, 0, min(c.PacketCount, MaxPackets))
 		}
 		packets = append(packets, pkt)
-		return nil
-	})
-	if err != nil {
-		return nil, err
 	}
 	return packets, nil
 }
@@ -120,6 +224,13 @@ func (c *Capture) PacketPayloadFromReaderAt(r io.ReaderAt, pkt PacketRecord) ([]
 // using a 256-byte prefix for common transport headers. When the prefix is
 // insufficient it extends the read under [MaxReaderAtScanBytes].
 func (c *Capture) FlowsFromReaderAt(r io.ReaderAt) ([]FlowSummary, error) {
+	if err := c.validateContainer(); err != nil {
+		return nil, err
+	}
+	if w := fileWindow(r, c.fileSize, c.scanReadAhead()); w != nil {
+		defer w.release()
+		r = w
+	}
 	type tcpHandshakeTime struct {
 		synNs      int64
 		synAckNs   int64
@@ -133,7 +244,7 @@ func (c *Capture) FlowsFromReaderAt(r io.ReaderAt) ([]FlowSummary, error) {
 	var header [256]byte
 	var scratch []byte
 	budget := scanReadBudget{r: r, remaining: MaxReaderAtScanBytes}
-	for pkt, err := range c.PacketSeqFromReaderAt(r) {
+	for pkt, err := range c.packetRecords(r) {
 		if err != nil {
 			return nil, err
 		}
@@ -375,6 +486,10 @@ func extendFramePrefix(budget *scanReadBudget, size int64, pkt PacketRecord, f *
 func (s ipFrameSource) walkReaderAt(visit func(PacketRecord, Frame, []byte) error) error {
 	if s.reader == nil {
 		return fmt.Errorf("%w: nil ReaderAt", ErrInvalidHeader)
+	}
+	if w := fileWindow(s.reader, s.capture.fileSize, s.capture.scanReadAhead()); w != nil {
+		defer w.release()
+		s.reader = w
 	}
 	var header [256]byte
 	var scratch []byte

@@ -4,6 +4,8 @@ import (
 	"bytes"
 	"encoding/binary"
 	"fmt"
+	"io"
+	"os"
 	"testing"
 )
 
@@ -265,6 +267,19 @@ func BenchmarkCaptureStreams(b *testing.B) {
 	}
 }
 
+// Embed the file so counting preserves the file-backed reader's capabilities.
+type measuredFile struct {
+	*os.File
+	calls, bytesRead int64
+}
+
+func (r *measuredFile) ReadAt(p []byte, off int64) (int, error) {
+	n, err := r.File.ReadAt(p, off)
+	r.calls++
+	r.bytesRead += int64(n)
+	return n, err
+}
+
 type measuredReaderAt struct {
 	*bytes.Reader
 	calls, bytesRead int64
@@ -330,6 +345,14 @@ func BenchmarkReaderAtScan(b *testing.B) {
 // Most of the bytes are unrelated UDP traffic. Each scanner also has a real
 // record to find, so the benchmark includes protocol parsing and output.
 func BenchmarkReaderAtProtocols(b *testing.B) {
+	benchmarkReaderAtProtocols(b, false)
+}
+
+func BenchmarkReaderAtFileProtocols(b *testing.B) {
+	benchmarkReaderAtProtocols(b, true)
+}
+
+func benchmarkReaderAtProtocols(b *testing.B, file bool) {
 	src, dst := [4]byte{10, 0, 0, 1}, [4]byte{10, 0, 0, 2}
 	noise := buildEthernetIPv4UDPFrame(src, dst, 1234, 5678, make([]byte, 1440))
 	frames := make([][]byte, 512)
@@ -352,7 +375,15 @@ func BenchmarkReaderAtProtocols(b *testing.B) {
 		}
 		for _, proto := range []string{"DNS", "TLS", "QUIC"} {
 			b.Run(format+"/"+proto, func(b *testing.B) {
-				r := &measuredReaderAt{Reader: bytes.NewReader(raw)}
+				mem := &measuredReaderAt{Reader: bytes.NewReader(raw)}
+				var r io.ReaderAt = mem
+				calls, bytesRead := &mem.calls, &mem.bytesRead
+				if file {
+					f := tempCaptureFile(b, raw)
+					disk := &measuredFile{File: f}
+					r = disk
+					calls, bytesRead = &disk.calls, &disk.bytesRead
+				}
 				b.ReportAllocs()
 				for b.Loop() {
 					switch proto {
@@ -367,8 +398,8 @@ func BenchmarkReaderAtProtocols(b *testing.B) {
 						b.Fatal(err)
 					}
 				}
-				b.ReportMetric(float64(r.calls)/float64(b.N), "reads/op")
-				b.ReportMetric(float64(r.bytesRead)/float64(b.N), "read-B/op")
+				b.ReportMetric(float64(*calls)/float64(b.N), "reads/op")
+				b.ReportMetric(float64(*bytesRead)/float64(b.N), "read-B/op")
 			})
 		}
 	}

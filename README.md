@@ -63,7 +63,7 @@ The library doesn't perform active network probing, certificate revocation
 checks, or operating-system trust store validation. For large files, use `NewFromReaderAt` for container
 metadata and `Capture.PacketPayloadFromReaderAt` for individual payloads.
 Use `Capture.PacketSeqFromReaderAt` to iterate packet records in either format
-without reading frame bytes. Flow aggregation reads frame prefixes. DNS, TLS
+without collecting a record slice. File-backed scans can prefetch 64 KiB at a time. Flow aggregation reads frame prefixes. DNS, TLS
 and QUIC scan headers and selected payloads under a 64 MiB read budget per
 call, including on larger files. See the [parsing guide](docs/parsing.md#parse-capture-containers). To write PcapNG files or capture live packets from a local
 interface using standard-library system calls (`CGO_ENABLED=0`), use
