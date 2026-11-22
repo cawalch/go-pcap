@@ -196,3 +196,38 @@ func ExampleDecompressCapture() {
 		fmt.Println(pkt.Index, pkt.CaptureLen)
 	}
 }
+
+func ExampleNewPCAPWriter() {
+	var buf bytes.Buffer
+	w, err := pcap.NewPCAPWriter(&buf, pcap.LinkTypeEthernet, 65535)
+	if err != nil {
+		log.Fatal(err)
+	}
+	if err := w.WritePacket(123456789, buildExampleEthernetUDPFrame()); err != nil {
+		log.Fatal(err)
+	}
+	c, err := pcap.New(buf.Bytes())
+	if err != nil {
+		log.Fatal(err)
+	}
+	fmt.Println(c.Format, c.PacketCount, c.NanoTimestamp)
+	// Output: pcap 1 true
+}
+
+func ExamplePCAPNGWriter_AddInterface() {
+	var buf bytes.Buffer
+	w, err := pcap.NewPCAPNGWriter(&buf, pcap.PCAPNGWriterOptions{InterfaceName: "eth0"})
+	if err != nil {
+		log.Fatal(err)
+	}
+	id, err := w.AddInterface(pcap.PCAPNGWriterOptions{LinkType: pcap.LinkTypeIPv4, InterfaceName: "raw-ip"})
+	if err != nil {
+		log.Fatal(err)
+	}
+	ipPacket := buildExampleEthernetUDPFrame()[14:]
+	if err := w.WritePacket(pcap.PacketRecord{InterfaceID: id}, ipPacket); err != nil {
+		log.Fatal(err)
+	}
+	fmt.Println(id)
+	// Output: 1
+}
