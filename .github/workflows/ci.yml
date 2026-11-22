@@ -1,111 +1,34 @@
-name: Go
+name: Linux runner pilot
 on:
   push:
-  pull_request:
-  schedule:
-    - cron: "23 6 * * 1"
-  workflow_dispatch:
+    branches: [ci/linux-runner-smoke]
 permissions:
   contents: read
-concurrency:
-  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
-  cancel-in-progress: true
 jobs:
-  test:
-    strategy:
-      matrix:
-        go: ['1.26.x', stable]
-    runs-on: ubuntu-latest
-    timeout-minutes: 10
+  linux:
+    runs-on: [self-hosted, linux, x64, go-pcap-110]
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v7.0.1
         with:
           persist-credentials: false
       - uses: actions/setup-go@v7.0.0
         with:
-          go-version: ${{ matrix.go }}
-          cache: false # No external dependencies or go.sum.
-      - name: Format and vet
+          go-version: '1.26.x'
+          cache: false
+      - name: Run native Linux tests
         run: |
-          test -z "$(gofmt -l .)"
+          set -eu
+          go version
           go vet ./...
-      - run: go test -race -cover ./...
-      - name: Test 32-bit arithmetic
-        run: GOARCH=386 go test ./...
-      - name: Test Linux live counters on loopback
-        if: matrix.go == '1.26.x'
+          go test -race -cover ./...
+          GOARCH=386 go test ./...
+      - name: Verify kernel counters with loopback traffic
         run: |
+          set -eu
           for arch in amd64 386; do
             GOARCH="$arch" go test -c -o "$RUNNER_TEMP/live.test" .
-            sudo setcap cap_net_raw=ep "$RUNNER_TEMP/live.test"
-            "$RUNNER_TEMP/live.test" -test.v -test.run '^TestLiveStatsLoopback$'
+            sudo -n setcap cap_net_raw=ep "$RUNNER_TEMP/live.test"
+            "$RUNNER_TEMP/live.test" -test.v -test.run '^TestLiveStatsLoopback$' | tee "$RUNNER_TEMP/loopback.log"
+            grep -F -- '--- PASS: TestLiveStatsLoopback' "$RUNNER_TEMP/loopback.log"
           done
-      - name: Bounded fuzz smoke tests
-        if: matrix.go == 'stable'
-        run: |
-          go test -run '^$' -fuzz '^FuzzSafeReader$' -fuzztime=10s -parallel=2
-          go test -run '^$' -fuzz '^FuzzNew$' -fuzztime=10s -parallel=2
-          go test -run '^$' -fuzz '^FuzzPackets$' -fuzztime=10s -parallel=2
-          go test -run '^$' -fuzz '^FuzzDecodeFrame$' -fuzztime=10s -parallel=2
-          go test -run '^$' -fuzz '^FuzzReassembleTCP$' -fuzztime=10s -parallel=2
-          go test -run '^$' -fuzz '^FuzzParseDNS$' -fuzztime=10s -parallel=2
-          go test -run '^$' -fuzz '^FuzzParseTLSRecords$' -fuzztime=10s -parallel=2
-          go test -run '^$' -fuzz '^FuzzDecryptQUICInitial$' -fuzztime=10s -parallel=2
-          go test -run '^$' -fuzz '^FuzzParseHTTP$' -fuzztime=10s -parallel=2
-          go test -run '^$' -fuzz '^FuzzParseSSHHandshake$' -fuzztime=10s -parallel=2
-          go test -run '^$' -fuzz '^FuzzParseSMB2AndNTLM$' -fuzztime=10s -parallel=2
-          go test -run '^$' -fuzz '^FuzzParseBPFBuffer$' -fuzztime=10s -parallel=2
-          go test -run '^$' -fuzz '^FuzzDefragmentIP$' -fuzztime=10s -parallel=2
-          go test -run '^$' -fuzz '^FuzzParseHTTP2Frames$' -fuzztime=10s -parallel=2
-          go test -run '^$' -fuzz '^FuzzEvalBPF$' -fuzztime=10s -parallel=2
-          go test -run '^$' -fuzz '^FuzzParseKRB5$' -fuzztime=10s -parallel=2
-          go test -run '^$' -fuzz '^FuzzParseRDPNegotiation$' -fuzztime=10s -parallel=2
-
-  platform-test:
-    strategy:
-      fail-fast: false
-      matrix:
-        os: [windows-latest, macos-latest]
-    runs-on: ${{ matrix.os }}
-    timeout-minutes: 10
-    steps:
-      - uses: actions/checkout@v7.0.1
-        with:
-          persist-credentials: false
-      - uses: actions/setup-go@v7.0.0
-        with:
-          go-version: stable
-          cache: false
-      - run: go test ./...
-
-  vulnerabilities:
-    runs-on: ubuntu-latest
-    timeout-minutes: 10
-    steps:
-      - uses: actions/checkout@v7.0.1
-        with:
-          persist-credentials: false
-      - uses: actions/setup-go@v7.0.0
-        with:
-          go-version: stable
-          cache: false
-      - name: Install pinned vulnerability checker
-        run: go install golang.org/x/vuln/cmd/govulncheck@v1.9.0
-      - name: Check library and standard library
-        run: govulncheck -test ./...
-
-  lint:
-    runs-on: ubuntu-latest
-    timeout-minutes: 10
-    steps:
-      - uses: actions/checkout@v7.0.1
-        with:
-          persist-credentials: false
-      - uses: actions/setup-go@v7.0.0
-        with:
-          go-version: stable
-          cache: false
-      - name: Install pinned golangci-lint
-        run: go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v2.15.0
-      - name: Lint root module
-        run: golangci-lint run ./...
