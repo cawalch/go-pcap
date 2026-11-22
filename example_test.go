@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log"
 	"net/netip"
+	"os"
 
 	"github.com/cawalch/go-pcap"
 )
@@ -173,4 +174,25 @@ func ExampleFlowSummary_CommunityID() {
 	}
 	fmt.Println(f.CommunityID(0))
 	// Output: 1:wCb3OG7yAFWelaUydu0D+125CLM=
+}
+
+func ExampleDecompressCapture() {
+	input, err := os.ReadFile("traffic.pcapng.gz")
+	if err != nil {
+		log.Fatal(err)
+	}
+	data, err := pcap.DecompressCapture(input)
+	if err != nil {
+		log.Fatal(err)
+	}
+	c, err := pcap.New(data)
+	if err != nil {
+		log.Fatal(err)
+	}
+	for pkt, err := range c.PacketSeq(data) {
+		if err != nil {
+			log.Fatal(err)
+		}
+		fmt.Println(pkt.Index, pkt.CaptureLen)
+	}
 }

@@ -15,6 +15,13 @@ Interface Statistics Block (`ISB`) counters, Darwin Process Event Block (`DPEB`)
 entries, and Decryption Secrets Block (`DSB`) payloads without retaining the
 input buffer. It records `int64(len(data))` as `Capture.FileSize`.
 
+For a `.pcap.gz` or `.pcapng.gz` buffer, call `DecompressCapture(input)`
+before `New`. Pass the returned bytes to `Packets`, `PacketPayload`, and
+other slice methods. Plain input is returned by reference. For gzip, the
+helper checks member trailers and enforces a combined 64 MiB output limit.
+An oversized stream returns `ErrPacketLimit`. Decompression errors return no
+partial buffer. Use `New` to validate the resulting capture format.
+
 A truncated capture succeeds as long as its initial container header (the
 24-byte classic PCAP header or the first PcapNG Section Header Block) is valid.
 When a trailing packet record or PcapNG block extends past `data`, `New` stops

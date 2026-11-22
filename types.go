@@ -229,21 +229,22 @@ func (p LayerProto) String() string {
 
 // Work and output limits.
 const (
-	MaxInterfaces            = 256
-	MaxPackets               = 1_048_576
-	MaxFlows                 = 65_536
-	MaxDecryptionSecrets     = 256
-	MaxDecryptionSecretBytes = 4 << 20 // 4 MiB across all DSB blocks
-	MaxNameResolutionRecords = 16_384
-	MaxInterfaceStats        = 1024
-	MaxProcessEvents         = 16_384
-	MaxOptionsPerBlock       = 64
-	MaxOptionStringBytes     = 4096
-	MaxSnapLen               = 16 << 20 // 16 MiB
-	MaxFrameLayers           = 8
-	MaxVLANTags              = 4
-	MaxMPLSLabels            = 8
-	MaxIPv6ExtHeaders        = 8
+	MaxDecompressedCaptureBytes = 64 << 20 // 64 MiB of output across gzip members.
+	MaxInterfaces               = 256
+	MaxPackets                  = 1_048_576
+	MaxFlows                    = 65_536
+	MaxDecryptionSecrets        = 256
+	MaxDecryptionSecretBytes    = 4 << 20 // 4 MiB across all DSB blocks
+	MaxNameResolutionRecords    = 16_384
+	MaxInterfaceStats           = 1024
+	MaxProcessEvents            = 16_384
+	MaxOptionsPerBlock          = 64
+	MaxOptionStringBytes        = 4096
+	MaxSnapLen                  = 16 << 20 // 16 MiB
+	MaxFrameLayers              = 8
+	MaxVLANTags                 = 4
+	MaxMPLSLabels               = 8
+	MaxIPv6ExtHeaders           = 8
 
 	// TCP stream reassembly limits.
 	MaxSegmentsPerFlow  = 4096
