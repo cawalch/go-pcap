@@ -120,24 +120,6 @@ func DecodeFrame(data []byte, linkType LinkType) (Frame, error) {
 		f.pushLayer(LayerEthernet, 0, 14)
 		offset = 14
 
-		for isVLANEtherType(f.EtherType) {
-			if int(f.VLANCount) >= MaxVLANTags {
-				f.Anomalies.VLANDepthExceeded = true
-				return f, nil
-			}
-			if r.Size()-offset < 4 {
-				f.Anomalies.TruncatedLayer = true
-				return f, nil
-			}
-			tci, _ := r.ReadUint16BE(offset)
-			nextEther, _ := r.ReadUint16BE(offset + 2)
-			f.VLANTags[f.VLANCount] = tci & 0x0fff
-			f.VLANCount++
-			f.EtherType = nextEther
-			f.pushLayer(LayerVLAN, offset, 4)
-			offset += 4
-		}
-
 	case LinkTypeLinuxSLL:
 		if r.Size() < 16 {
 			return Frame{}, fmt.Errorf("%w: Linux SLL header shorter than 16 bytes", ErrInvalidFrame)
@@ -195,18 +177,45 @@ func DecodeFrame(data []byte, linkType LinkType) (Frame, error) {
 		return Frame{}, fmt.Errorf("%w: unsupported link type %d", ErrInvalidFrame, linkType)
 	}
 
-	dispatchEtherType(r, offset, &f)
+	dispatchEtherType(r, offset, r.Size(), &f)
 	return f, nil
 }
 
-func dispatchEtherType(r *SafeReader, offset int64, f *Frame) {
+func peelVLANTags(r *SafeReader, offset, bound int64, f *Frame) (int64, bool) {
+	for isVLANEtherType(f.EtherType) {
+		if int(f.VLANCount) >= MaxVLANTags {
+			f.Anomalies.VLANDepthExceeded = true
+			return offset, false
+		}
+		if bound-offset < 4 {
+			f.Anomalies.TruncatedLayer = true
+			return offset, false
+		}
+		tci := binary.BigEndian.Uint16(r.data[offset : offset+2])
+		nextEther := binary.BigEndian.Uint16(r.data[offset+2 : offset+4])
+		f.VLANTags[f.VLANCount] = tci & 0x0fff
+		f.VLANCount++
+		f.EtherType = nextEther
+		f.pushLayer(LayerVLAN, offset, 4)
+		offset += 4
+	}
+	return offset, true
+}
+
+func dispatchEtherType(r *SafeReader, offset, bound int64, f *Frame) {
+	var ok bool
+	offset, ok = peelVLANTags(r, offset, bound, f)
+	if !ok {
+		return
+	}
+
 	// Peel PPPoE Session (0x8864) or MPLS label stacks (0x8847 / 0x8848) before L3 dispatch.
 	if f.EtherType == EtherTypePPPoESession {
-		if r.Size()-offset < 8 {
+		if bound-offset < 8 {
 			f.Anomalies.TruncatedLayer = true
 			return
 		}
-		pppProto, _ := r.ReadUint16BE(offset + 6)
+		pppProto := binary.BigEndian.Uint16(r.data[offset+6 : offset+8])
 		f.pushLayer(LayerPPPoE, offset, 8)
 		offset += 8
 		switch pppProto {
@@ -216,8 +225,10 @@ func dispatchEtherType(r *SafeReader, offset int64, f *Frame) {
 			f.EtherType = EtherTypeIPv6
 		default:
 			f.PayloadOffset = uint32(offset)
-			if r.Size() > offset {
-				f.PayloadLength = uint32(r.Size() - offset)
+			if bound > offset {
+				f.PayloadLength = uint32(bound - offset)
+			} else {
+				f.PayloadLength = 0
 			}
 			return
 		}
@@ -231,7 +242,7 @@ func dispatchEtherType(r *SafeReader, offset int64, f *Frame) {
 				f.Anomalies.MPLSDepthExceeded = true
 				return
 			}
-			if r.Size()-offset < 4 {
+			if bound-offset < 4 {
 				f.Anomalies.TruncatedLayer = true
 				return
 			}
@@ -243,7 +254,7 @@ func dispatchEtherType(r *SafeReader, offset int64, f *Frame) {
 			}
 		}
 		f.pushLayer(LayerMPLS, mplsStart, offset-mplsStart)
-		if r.Size() <= offset {
+		if bound <= offset {
 			f.Anomalies.TruncatedLayer = true
 			return
 		}
@@ -254,28 +265,31 @@ func dispatchEtherType(r *SafeReader, offset int64, f *Frame) {
 			f.EtherType = EtherTypeIPv6
 		default:
 			f.PayloadOffset = uint32(offset)
-			f.PayloadLength = uint32(r.Size() - offset)
+			f.PayloadLength = uint32(bound - offset)
 			return
 		}
 	}
 
 	switch f.EtherType {
 	case EtherTypeIPv4:
-		decodeIPv4(r, offset, f)
+		decodeIPv4(r, offset, bound, f)
 	case EtherTypeIPv6:
-		decodeIPv6(r, offset, f)
+		decodeIPv6(r, offset, bound, f)
 	case EtherTypeARP:
-		avail := r.Size() - offset
+		avail := bound - offset
 		if avail < 28 {
 			f.Anomalies.TruncatedLayer = true
 			return
 		}
 		f.pushLayer(LayerARP, offset, 28)
 		f.PayloadOffset = uint32(offset + 28)
+		f.PayloadLength = 0
 	default:
 		f.PayloadOffset = uint32(offset)
-		if r.Size() > offset {
-			f.PayloadLength = uint32(r.Size() - offset)
+		if bound > offset {
+			f.PayloadLength = uint32(bound - offset)
+		} else {
+			f.PayloadLength = 0
 		}
 	}
 }
@@ -284,8 +298,24 @@ func isVLANEtherType(et uint16) bool {
 	return et == EtherTypeVLAN || et == EtherTypeQinQ || et == EtherTypeQinQLegacy
 }
 
-func decodeIPv4(r *SafeReader, offset int64, f *Frame) {
-	avail := r.Size() - offset
+func resetTransportFields(f *Frame) {
+	f.hasPorts = false
+	f.SrcPort = 0
+	f.DstPort = 0
+	f.TCPSeq = 0
+	f.TCPAck = 0
+	f.TCPFlags = 0
+	f.TCPWindow = 0
+	f.TCPOptionsOffset = 0
+	f.TCPOptionsLength = 0
+	f.ICMPType = 0
+	f.ICMPCode = 0
+	f.PayloadOffset = 0
+	f.PayloadLength = 0
+}
+
+func decodeIPv4(r *SafeReader, offset, bound int64, f *Frame) {
+	avail := bound - offset
 	if avail < 20 {
 		f.Anomalies.TruncatedLayer = true
 		return
@@ -308,8 +338,8 @@ func decodeIPv4(r *SafeReader, offset int64, f *Frame) {
 		f.Anomalies.InvalidIPHeaderLength = true
 		return
 	}
-	ipBound := r.Size()
-	if offset+totalLen <= r.Size() {
+	ipBound := bound
+	if offset+totalLen <= bound {
 		ipBound = offset + totalLen
 	} else {
 		f.Anomalies.IPTotalLengthExceedsFrame = true
@@ -320,7 +350,7 @@ func decodeIPv4(r *SafeReader, offset int64, f *Frame) {
 	moreFragments := (fragWord & 0x2000) != 0
 	fragOffset := (fragWord & 0x1fff) * 8
 
-	f.hasPorts = false
+	resetTransportFields(f)
 	f.IPVersion = 4
 	f.IPID = uint32(ipID)
 	f.IPFragOffset = fragOffset
@@ -338,6 +368,8 @@ func decodeIPv4(r *SafeReader, offset int64, f *Frame) {
 		f.PayloadOffset = uint32(l4Offset)
 		if l4Length > 0 {
 			f.PayloadLength = uint32(l4Length)
+		} else {
+			f.PayloadLength = 0
 		}
 		return
 	}
@@ -345,8 +377,8 @@ func decodeIPv4(r *SafeReader, offset int64, f *Frame) {
 	decodeTransport(r, l4Offset, ipBound, f.IPProtocol, f)
 }
 
-func decodeIPv6(r *SafeReader, offset int64, f *Frame) {
-	avail := r.Size() - offset
+func decodeIPv6(r *SafeReader, offset, bound int64, f *Frame) {
+	avail := bound - offset
 	if avail < 40 {
 		f.Anomalies.TruncatedLayer = true
 		return
@@ -356,20 +388,23 @@ func decodeIPv6(r *SafeReader, offset int64, f *Frame) {
 		f.Anomalies.InvalidIPHeaderLength = true
 		return
 	}
-	payloadLenU16, _ := r.ReadUint16BE(offset + 4)
+	payloadLenU16 := binary.BigEndian.Uint16(r.data[offset+4 : offset+6])
 	nextHeader := r.data[offset+6]
 	hopLimit := r.data[offset+7]
 
-	ipBound := r.Size()
+	ipBound := bound
 	declaredEnd := offset + 40 + int64(payloadLenU16)
-	if declaredEnd <= r.Size() {
+	if declaredEnd <= bound {
 		ipBound = declaredEnd
 	} else {
 		f.Anomalies.IPTotalLengthExceedsFrame = true
 	}
 
-	f.hasPorts = false
+	resetTransportFields(f)
 	f.IPVersion = 6
+	f.IPID = 0
+	f.IPFragOffset = 0
+	f.IPMoreFragments = false
 	f.TTL = hopLimit
 	f.IPProtocol = nextHeader
 	f.SrcAddr = netip.AddrFrom16([16]byte(r.data[offset+8 : offset+24]))
@@ -420,6 +455,8 @@ func decodeIPv6(r *SafeReader, offset int64, f *Frame) {
 			f.PayloadOffset = uint32(cur)
 			if ipBound > cur {
 				f.PayloadLength = uint32(ipBound - cur)
+			} else {
+				f.PayloadLength = 0
 			}
 			return
 		}
@@ -441,6 +478,7 @@ func decodeTransport(r *SafeReader, offset, ipBound int64, proto uint8, f *Frame
 	avail := ipBound - offset
 	if avail <= 0 {
 		f.PayloadOffset = uint32(offset)
+		f.PayloadLength = 0
 		return
 	}
 
@@ -483,9 +521,23 @@ func decodeTransport(r *SafeReader, offset, ipBound int64, proto uint8, f *Frame
 		f.hasPorts = true
 		f.SrcPort = binary.BigEndian.Uint16(r.data[offset : offset+2])
 		f.DstPort = binary.BigEndian.Uint16(r.data[offset+2 : offset+4])
+		udpLen := int64(binary.BigEndian.Uint16(r.data[offset+4 : offset+6]))
+		udpBound := ipBound
+		if udpLen > 0 {
+			if udpLen < 8 {
+				f.Anomalies.TruncatedLayer = true
+				udpBound = offset + 8
+			} else if udpLen > avail {
+				if !f.Anomalies.IPTotalLengthExceedsFrame {
+					f.Anomalies.TruncatedLayer = true
+				}
+			} else {
+				udpBound = offset + udpLen
+			}
+		}
 		f.pushLayer(LayerUDP, offset, 8)
 		udpPayloadOff := offset + 8
-		udpPayloadLen := avail - 8
+		udpPayloadLen := udpBound - udpPayloadOff
 		f.PayloadOffset = uint32(udpPayloadOff)
 		f.PayloadLength = uint32(udpPayloadLen)
 
@@ -494,7 +546,9 @@ func decodeTransport(r *SafeReader, offset, ipBound int64, proto uint8, f *Frame
 		if int(f.LayerCount)+2 <= MaxFrameLayers {
 			if f.DstPort == 4789 && udpPayloadLen >= 8+14 && r.data[udpPayloadOff] == 0x08 {
 				f.pushLayer(LayerVXLAN, udpPayloadOff, 8)
-				decodeInnerEthernet(r, udpPayloadOff+8, f)
+				f.PayloadOffset = 0
+				f.PayloadLength = 0
+				decodeInnerEthernet(r, udpPayloadOff+8, udpBound, f)
 			} else if f.DstPort == 6081 && udpPayloadLen >= 8 {
 				optLen := int64(r.data[udpPayloadOff]&0x3f) * 4
 				geneveHdrLen := 8 + optLen
@@ -504,10 +558,14 @@ func decodeTransport(r *SafeReader, offset, ipBound int64, proto uint8, f *Frame
 					innerOff := udpPayloadOff + geneveHdrLen
 					switch protoType {
 					case EtherTypeTransparentBr:
-						decodeInnerEthernet(r, innerOff, f)
+						f.PayloadOffset = 0
+						f.PayloadLength = 0
+						decodeInnerEthernet(r, innerOff, udpBound, f)
 					case EtherTypeIPv4, EtherTypeIPv6:
+						f.PayloadOffset = 0
+						f.PayloadLength = 0
 						f.EtherType = protoType
-						dispatchEtherType(r, innerOff, f)
+						dispatchEtherType(r, innerOff, udpBound, f)
 					}
 				}
 			}
@@ -575,42 +633,28 @@ func decodeGRE(r *SafeReader, offset, ipBound int64, f *Frame) {
 	}
 	switch protoType {
 	case EtherTypeTransparentBr:
-		decodeInnerEthernet(r, innerOff, f)
-	case EtherTypeIPv4, EtherTypeIPv6, EtherTypeMPLSUnicast, EtherTypeMPLSMulticast, EtherTypePPPoESession:
+		f.PayloadOffset = 0
+		f.PayloadLength = 0
+		decodeInnerEthernet(r, innerOff, ipBound, f)
+	case EtherTypeIPv4, EtherTypeIPv6, EtherTypeMPLSUnicast, EtherTypeMPLSMulticast, EtherTypePPPoESession, EtherTypeVLAN, EtherTypeQinQ, EtherTypeQinQLegacy:
+		f.PayloadOffset = 0
+		f.PayloadLength = 0
 		f.EtherType = protoType
-		dispatchEtherType(r, innerOff, f)
+		dispatchEtherType(r, innerOff, ipBound, f)
 	default:
 		f.PayloadOffset = uint32(innerOff)
 		f.PayloadLength = uint32(ipBound - innerOff)
 	}
 }
 
-func decodeInnerEthernet(r *SafeReader, offset int64, f *Frame) {
-	if r.Size()-offset < 14 {
+func decodeInnerEthernet(r *SafeReader, offset, bound int64, f *Frame) {
+	if bound-offset < 14 {
 		f.Anomalies.TruncatedLayer = true
 		return
 	}
 	f.EtherType = binary.BigEndian.Uint16(r.data[offset+12 : offset+14])
 	f.pushLayer(LayerEthernet, offset, 14)
-	cur := offset + 14
-	for isVLANEtherType(f.EtherType) {
-		if int(f.VLANCount) >= MaxVLANTags {
-			f.Anomalies.VLANDepthExceeded = true
-			return
-		}
-		if r.Size()-cur < 4 {
-			f.Anomalies.TruncatedLayer = true
-			return
-		}
-		tci := binary.BigEndian.Uint16(r.data[cur : cur+2])
-		nextEther := binary.BigEndian.Uint16(r.data[cur+2 : cur+4])
-		f.VLANTags[f.VLANCount] = tci & 0x0fff
-		f.VLANCount++
-		f.EtherType = nextEther
-		f.pushLayer(LayerVLAN, cur, 4)
-		cur += 4
-	}
-	dispatchEtherType(r, cur, f)
+	dispatchEtherType(r, offset+14, bound, f)
 }
 
 // TCPTimestamp holds the raw timestamp option from one observed TCP segment.
