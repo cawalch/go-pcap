@@ -15,35 +15,45 @@ design scope.
 - Read classic PCAP (little-endian and big-endian, microsecond and nanosecond
   timestamps) and PcapNG containers, including Section Header Blocks (SHBs),
   Interface Description Blocks (IDBs), Enhanced Packet Blocks (EPBs), Simple
-  Packet Blocks (SPBs), and Decryption Secrets Blocks (DSBs).
+  Packet Blocks (SPBs), Decryption Secrets Blocks (DSBs), Name Resolution Blocks
+  (NRBs), Interface Statistics Blocks (ISBs), and Darwin Process Event Blocks
+  (DPEBs).
 - Extract PcapNG DSB payloads (such as embedded Transport Layer Security (TLS)
-  key logs) and EPB process attribution (process ID, thread ID, interface names,
-  and packet flags).
+  key logs), NRB IPv4 and IPv6 hostname mappings, ISB capture counters, and EPB
+  process attribution (process ID, thread ID, user ID, process name, command
+  arguments, and container ID).
 - Inspect declared capture extents, truncation state, and structural container
   anomalies without retaining the input buffer.
-- Decode Layer 2 through Layer 4 (L2–L4) frames (`Ethernet`, `802.1Q` and
-  `802.1ad` virtual local area networks (VLANs), `Linux SLL` and `SLL2`, BSD
-  `Loopback`/`Null`, `Raw IP`, `IPv4`, `IPv6` with extension headers, `TCP`,
-  `UDP`, and `ICMPv4`/`ICMPv6`) without heap allocations.
-- Aggregate deterministic 5-tuple flow summaries, compute FoxIO `JA4T` and
-  `JA4TS` TCP SYN fingerprints, and reassemble bounded directional TCP byte
-  streams with sequence-gap and overlap-conflict anomaly detection.
+- Decode Layer 2 through Layer 4 (L2–L4) frames and tunnel encapsulations
+  (`Ethernet`, `802.1Q` and `802.1ad` virtual local area networks (VLANs),
+  Multi-Protocol Label Switching (`MPLS`), Point-to-Point Protocol over Ethernet
+  (`PPPoE`), Generic Routing Encapsulation (`GRE`), Virtual Extensible LAN
+  (`VXLAN`), Generic Network Virtualization Encapsulation (`Geneve`), `Linux SLL`
+  and `SLL2`, BSD `Loopback`/`Null`, `Raw IP`, `IPv4`, `IPv6` with extension
+  headers, `TCP`, `UDP`, and `ICMPv4`/`ICMPv6`) without heap allocations.
+- Aggregate deterministic 5-tuple flow summaries, compute FoxIO `JA4T`, `JA4TS`,
+  and `JA4L` (latency and hop-count distance) TCP fingerprints, and reassemble
+  bounded directional TCP byte streams with sequence-gap and overlap-conflict
+  anomaly detection.
 - Decode Domain Name System (DNS) messages over UDP and TCP with bounded RFC
-  1035 label compression pointer resolution.
-- Decode TLS 1.2 and TLS 1.3 handshakes and X.509 certificate chains, and
-  compute FoxIO `JA4`, `JA4S`, and `JA4X` fingerprints.
+  1035 label compression pointer resolution, and compute per-domain DNS
+  tunneling metrics (`DNSLabelEntropy` and `Capture.DNSDomainStats`).
+- Decode TLS 1.2 and TLS 1.3 handshakes and X.509 certificate chains (including
+  encrypted TLS 1.3 server certificates when `SERVER_HANDSHAKE_TRAFFIC_SECRET` is
+  present), and compute FoxIO `JA4`, `JA4S`, and `JA4X` fingerprints.
 - Decrypt Quick UDP Internet Connections (QUIC) v1 (RFC 9001) and v2 (RFC 9369)
   Initial UDP packets, reassemble multi-packet `CRYPTO` frames, and extract the
   embedded TLS 1.3 `ClientHello` and `JA4` fingerprint.
-- Decrypt TLS 1.3 application streams offline using PcapNG DSBs or caller-supplied
-  `SSLKEYLOGFILE` material.
-- Decode HTTP/1.x requests and responses across cleartext and decrypted TLS 1.3
+- Decrypt TLS 1.2 (`CLIENT_RANDOM` master secrets) and TLS 1.3 application
+  streams offline using PcapNG DSBs or caller-supplied `SSLKEYLOGFILE` material.
+- Decode HTTP/1.x requests and responses across cleartext and decrypted TLS
   streams, compute FoxIO `JA4H` fingerprints, and carve `Content-Length` or
   `chunked` body payloads.
-- Decode Secure Shell (SSH) handshakes (`HASSH` and `HASSHServer`), Server
-  Message Block (SMB) v2/v3 and NT LAN Manager Security Support Provider
-  (NTLMSSP) negotiation tokens, and statistical Command-and-Control (C2) beacon
-  periodicity and Producer-Consumer Ratio (PCR) metrics.
+- Decode Secure Shell (SSH) handshakes (`HASSH`, `HASSHServer`, and FoxIO
+  `JA4SSH`), Server Message Block (SMB) v2/v3 and NT LAN Manager Security
+  Support Provider (NTLMSSP) negotiation tokens, and statistical
+  Command-and-Control (C2) beacon periodicity and Producer-Consumer Ratio (PCR)
+  metrics.
 
 The library doesn't perform active network probing, certificate revocation
 checks, or operating-system trust store validation. For large files, use
@@ -68,7 +78,9 @@ records a version that identifies the selected commit.
 ## Parse a capture
 
 The following program reads a PCAP or PcapNG file, prints its container
-metadata, and summarizes its network flows. Save it as `main.go`:
+metadata and 5-tuple flows, and lists any TLS handshakes and HTTP requests
+(including HTTP requests decrypted from embedded PcapNG DSB key logs). Save it
+as `main.go`:
 
 ```go
 package main
@@ -95,17 +107,41 @@ func main() {
 		log.Fatal(err)
 	}
 
-	fmt.Printf("Format: %s (packets: %d, truncated: %v)\n",
-		capture.Format, capture.PacketCount, capture.InputTruncated())
+	fmt.Printf("Format: %s (packets: %d, secrets: %d, truncated: %v)\n",
+		capture.Format, capture.PacketCount, len(capture.Secrets), capture.InputTruncated())
 
 	flows, err := capture.Flows(data)
 	if err != nil {
 		log.Fatal(err)
 	}
 	for _, flow := range flows {
-		fmt.Printf("proto=%d %s:%d -> %s:%d packets=%d bytes=%d\n",
+		fmt.Printf("Flow proto=%d %s:%d -> %s:%d packets=%d bytes=%d ja4t=%s\n",
 			flow.Protocol, flow.SrcAddr, flow.SrcPort, flow.DstAddr, flow.DstPort,
-			flow.PacketCount, flow.ClientBytes+flow.ServerBytes)
+			flow.PacketCount, flow.ClientBytes+flow.ServerBytes, flow.ClientJA4T)
+	}
+
+	tlsRecords, err := capture.TLS(data)
+	if err != nil {
+		log.Fatal(err)
+	}
+	for _, rec := range tlsRecords {
+		if rec.Handshake.HasClientHello {
+			ch := rec.Handshake.ClientHello
+			fmt.Printf("TLS %s:%d -> %s:%d sni=%s ja4=%s\n",
+				rec.SrcAddr, rec.SrcPort, rec.DstAddr, rec.DstPort, ch.SNI, ch.JA4)
+		}
+	}
+
+	httpRecords, err := capture.HTTP(data)
+	if err != nil {
+		log.Fatal(err)
+	}
+	for _, rec := range httpRecords {
+		if !rec.IsResponse {
+			fmt.Printf("HTTP %s %s%s (decrypted=%v, body=%d bytes, ja4h=%s)\n",
+				rec.Request.Method, rec.Request.Host, rec.Request.Path,
+				rec.IsDecrypted, rec.Request.BodyLength, rec.Request.JA4H)
+		}
 	}
 }
 ```
@@ -116,10 +152,11 @@ To run the program, replace `sample.pcapng` with the path to your capture file:
 go run . sample.pcapng
 ```
 
-`New` validates the capture container, records interface descriptors and
-decryption secrets, and scans block bounds. To read packets, flows, streams, or
-protocol records, call the corresponding method with the original bytes. For
-container metadata alone, `Open(path)` reads the entire file and calls `New`.
+`New` validates the capture container, records interface descriptors, name
+resolution entries, interface statistics, process events, and decryption
+secrets, and scans block bounds. To read packets, flows, streams, or protocol
+records, call the corresponding method with the original bytes. For container
+metadata alone, `Open(path)` reads the entire file and calls `New`.
 
 ## Use the parsed metadata
 
@@ -134,24 +171,26 @@ input is shorter than its declared packet records or PcapNG blocks. If you have
 only a stream prefix, use `NewWithLength` to supply the full stream length.
 
 The [parsing guide](docs/parsing.md) explains buffer ownership, work limits,
-errors, and protocol dissectors.
+errors, and protocol dissectors. Use the
+[API reference](https://pkg.go.dev/github.com/cawalch/go-pcap) for individual
+types and methods.
 
 | Task | API | Details |
 | --- | --- | --- |
-| Parse container metadata, interfaces, and DSB secrets | `New`, `NewWithLength`, `NewFromReaderAt`, `Open` | [Container parsing](docs/parsing.md#parse-capture-containers) |
-| Write PcapNG blocks, DSB secrets, and process-tagged packets | `NewPCAPNGWriter`, `PCAPNGWriter.WritePacket`, `PCAPNGWriter.WriteDecryptionSecrets` | [Write PcapNG](docs/parsing.md#write-pcapng-captures) |
+| Parse container metadata, interfaces, NRBs, ISBs, and DSB secrets | `New`, `NewWithLength`, `NewFromReaderAt`, `Open` | [Container parsing](docs/parsing.md#parse-capture-containers) |
+| Write PcapNG blocks, NRBs, ISBs, DSB secrets, and process-tagged packets | `NewPCAPNGWriter`, `PCAPNGWriter.WritePacket`, `PCAPNGWriter.WriteDecryptionSecrets`, `PCAPNGWriter.WriteNameResolution`, `PCAPNGWriter.WriteInterfaceStats` | [Write PcapNG](docs/parsing.md#write-pcapng-captures) |
 | Capture live interface packets without CGO or libpcap | `OpenLive`, `LiveCapture.ReadPacket`, `ParseBPFBuffer` | [Live capture](docs/parsing.md#capture-live-interface-traffic) |
 | Check truncation, extents, and container anomalies | `Capture.DeclaredExtent`, `Capture.InputTruncated`, `Capture.Anomalies` | [Bounds and anomalies](docs/parsing.md#inspect-truncation-and-anomalies) |
-| Enumerate bounded packet records and payload slices | `Capture.PacketSeq`, `Capture.Packets`, `Capture.PacketPayload`, `Capture.PacketsFromReaderAt` | [Packet records](docs/parsing.md#read-packet-records) |
-| Decode L2–L4 frames and compute JA4T fingerprints | `DecodeFrame`, `Frame.JA4T`, `JA4T` | [Frame decoding](docs/parsing.md#decode-l2-l4-frames) |
+| Stream or enumerate bounded packet records and payload slices | `Capture.PacketSeq`, `Capture.Packets`, `Capture.PacketPayload`, `Capture.PacketsFromReaderAt` | [Packet records](docs/parsing.md#read-packet-records) |
+| Decode L2–L4 frames, tunnels, and JA4T/JA4L fingerprints | `DecodeFrame`, `Frame.JA4T`, `JA4T`, `JA4L` | [Frame decoding](docs/parsing.md#decode-l2-l4-frames-and-tunnels) |
 | Aggregate deterministic 5-tuple flows | `Capture.Flows` | [Flow aggregation](docs/parsing.md#aggregate-5-tuple-flows) |
 | Reassemble bounded TCP byte streams | `Capture.Streams`, `ReassembleTCP` | [TCP reassembly](docs/parsing.md#reassemble-tcp-streams) |
-| Parse DNS queries and resource records | `Capture.DNS`, `Capture.HasDNSQuery`, `ParseDNS` | [DNS messages](docs/parsing.md#parse-dns-messages) |
+| Parse DNS messages and compute DNS tunneling metrics | `Capture.DNS`, `Capture.HasDNSQuery`, `Capture.DNSDomainStats`, `ParseDNS`, `DNSLabelEntropy` | [DNS messages](docs/parsing.md#parse-dns-messages-and-tunneling-metrics) |
 | Parse TLS handshakes, X.509 certificates, and JA4/JA4S/JA4X | `Capture.TLS`, `Capture.TLSWithKeyLog`, `Capture.HasTLSJA4`, `Capture.HasTLSSNI`, `ParseTLSRecords`, `JA4XFromDER` | [TLS handshakes](docs/parsing.md#parse-tls-handshakes-and-ja4-fingerprints) |
 | Decrypt QUIC v1/v2 Initial packets and extract inner TLS 1.3 JA4 | `Capture.QUIC`, `Capture.HasQUICJA4`, `Capture.HasQUICSNI`, `DecryptQUICInitial`, `ParseQUICInitialPacket` | [QUIC Initial](docs/parsing.md#decrypt-quic-initial-packets) |
-| Decrypt TLS 1.3 streams offline via PcapNG DSB or keylog | `Capture.DecryptedTLSStreams`, `Capture.TLSKeyLog`, `DecryptTLS13Records`, `ParseTLSKeyLog` | [TLS decryption](docs/parsing.md#decrypt-tls-13-streams-offline) |
+| Decrypt TLS 1.2 and TLS 1.3 streams offline via PcapNG DSB or keylog | `Capture.DecryptedTLSStreams`, `Capture.TLSKeyLog`, `DecryptTLS13Records`, `DecryptTLS12Records`, `ParseTLSKeyLog` | [TLS decryption](docs/parsing.md#decrypt-tls-12-and-tls-13-streams-offline) |
 | Parse HTTP/1.x, compute JA4H, and carve payloads | `Capture.HTTP`, `ParseHTTPRequest`, `ParseHTTPResponse` | [HTTP and carving](docs/parsing.md#parse-http-messages-and-carve-payloads) |
-| Parse SSH handshakes and compute HASSH and HASSHServer | `Capture.SSH`, `ParseSSHHandshake` | [SSH handshakes](docs/parsing.md#parse-ssh-handshakes-and-hassh) |
+| Parse SSH handshakes and compute HASSH, HASSHServer, and JA4SSH | `Capture.SSH`, `ParseSSHHandshake`, `JA4SSH` | [SSH handshakes](docs/parsing.md#parse-ssh-handshakes-and-hassh) |
 | Parse SMB2/3 and NTLMSSP negotiation and challenge metadata | `Capture.SMB`, `ParseSMB2Message`, `ParseNTLMSSP` | [SMB2 and NTLM](docs/parsing.md#parse-smb2-and-ntlmssp-messages) |
 | Compute C2 beacon timing regularity and flow PCR scores | `Capture.Beacons`, `ComputeBeaconStats` | [Beacon analytics](docs/parsing.md#compute-c2-beacon-and-flow-statistics) |
 
@@ -175,6 +214,7 @@ install Go.
 
 ## References
 
+- [API reference](https://pkg.go.dev/github.com/cawalch/go-pcap)
 - [Parsing guide](docs/parsing.md)
 - [Workload comparisons and parser audit](docs/workloads-and-audit.md)
 - [Architecture, roadmap, and YARA integration](docs/architecture.md)

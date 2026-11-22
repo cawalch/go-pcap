@@ -1,28 +1,17 @@
 package pcap_test
 
 import (
+	"bytes"
 	"encoding/binary"
 	"fmt"
 	"log"
+	"net/netip"
 
 	"github.com/cawalch/go-pcap"
 )
 
-func ExampleNew() {
-	// Build a minimal classic PCAP buffer containing one Ethernet/IPv4/UDP packet.
-	buf := make([]byte, 24+16+14+20+8+4)
-	binary.LittleEndian.PutUint32(buf[0:4], pcap.PCAPMagicMicroLE)
-	binary.LittleEndian.PutUint16(buf[4:6], 2)
-	binary.LittleEndian.PutUint16(buf[6:8], 4)
-	binary.LittleEndian.PutUint32(buf[16:20], 65535)
-	binary.LittleEndian.PutUint32(buf[20:24], uint32(pcap.LinkTypeEthernet))
-
-	pktLen := uint32(14 + 20 + 8 + 4)
-	binary.LittleEndian.PutUint32(buf[24:28], 1700000000)
-	binary.LittleEndian.PutUint32(buf[32:36], pktLen)
-	binary.LittleEndian.PutUint32(buf[36:40], pktLen)
-
-	frame := buf[40:]
+func buildExampleEthernetUDPFrame() []byte {
+	frame := make([]byte, 14+20+8+4)
 	binary.BigEndian.PutUint16(frame[12:14], pcap.EtherTypeIPv4)
 	ip := frame[14:34]
 	ip[0] = 0x45
@@ -37,20 +26,140 @@ func ExampleNew() {
 	binary.BigEndian.PutUint16(udp[2:4], 53)
 	binary.BigEndian.PutUint16(udp[4:6], 12)
 	copy(frame[42:], []byte("ping"))
+	return frame
+}
 
-	capture, err := pcap.New(buf)
+func buildExamplePCAPNG() []byte {
+	var buf bytes.Buffer
+	writer, err := pcap.NewPCAPNGWriter(&buf, pcap.PCAPNGWriterOptions{
+		LinkType:      pcap.LinkTypeEthernet,
+		SnapLen:       65535,
+		InterfaceName: "en0",
+	})
 	if err != nil {
 		log.Fatal(err)
 	}
-	flows, err := capture.Flows(buf)
+	err = writer.WriteNameResolution([]pcap.NameResolutionRecord{
+		{Addr: netip.MustParseAddr("198.51.100.53"), Names: []string{"ns1.example.com"}},
+	})
 	if err != nil {
 		log.Fatal(err)
 	}
-	fmt.Printf("format=%s packets=%d flow=%s:%d->%s:%d bytes=%d\n",
+	err = writer.WritePacket(pcap.PacketRecord{
+		TimestampNs:  1700000000000000000,
+		ProcessID:    4242,
+		ProcessName:  "dig",
+		HasProcessID: true,
+	}, buildExampleEthernetUDPFrame())
+	if err != nil {
+		log.Fatal(err)
+	}
+	return buf.Bytes()
+}
+
+func ExampleNew() {
+	data := buildExamplePCAPNG()
+	capture, err := pcap.New(data)
+	if err != nil {
+		log.Fatal(err)
+	}
+	flows, err := capture.Flows(data)
+	if err != nil {
+		log.Fatal(err)
+	}
+	fmt.Printf("format=%s packets=%d host=%s proc=%s(%d) flow=%s:%d->%s:%d bytes=%d\n",
 		capture.Format, capture.PacketCount,
+		capture.NameRecords[0].Names[0],
+		flows[0].ProcessName, flows[0].ProcessID,
 		flows[0].SrcAddr, flows[0].SrcPort,
 		flows[0].DstAddr, flows[0].DstPort,
 		flows[0].ClientBytes)
 	// Output:
-	// format=pcap packets=1 flow=192.0.2.10:55000->198.51.100.53:53 bytes=4
+	// format=pcapng packets=1 host=ns1.example.com proc=dig(4242) flow=192.0.2.10:55000->198.51.100.53:53 bytes=4
+}
+
+func ExampleNewFromReaderAt() {
+	data := buildExamplePCAPNG()
+	r := bytes.NewReader(data)
+	capture, err := pcap.NewFromReaderAt(r, int64(len(data)))
+	if err != nil {
+		log.Fatal(err)
+	}
+	packets, err := capture.PacketsFromReaderAt(r)
+	if err != nil {
+		log.Fatal(err)
+	}
+	fmt.Printf("format=%s packets=%d pid=%d\n",
+		capture.Format, len(packets), packets[0].ProcessID)
+	// Output:
+	// format=pcapng packets=1 pid=4242
+}
+
+func ExampleCapture_PacketSeq() {
+	data := buildExamplePCAPNG()
+	capture, err := pcap.New(data)
+	if err != nil {
+		log.Fatal(err)
+	}
+	for pkt, err := range capture.PacketSeq(data) {
+		if err != nil {
+			log.Fatal(err)
+		}
+		payload, err := capture.PacketPayload(data, pkt)
+		if err != nil {
+			log.Fatal(err)
+		}
+		frame, err := pcap.DecodeFrame(payload, pkt.LinkType)
+		if err != nil {
+			log.Fatal(err)
+		}
+		fmt.Printf("pkt=%d ipv=%d proto=%d payload=%s\n",
+			pkt.Index, frame.IPVersion, frame.IPProtocol,
+			payload[frame.PayloadOffset:frame.PayloadOffset+frame.PayloadLength])
+	}
+	// Output:
+	// pkt=0 ipv=4 proto=17 payload=ping
+}
+
+func ExampleParseHTTPRequest() {
+	raw := []byte("POST /submit HTTP/1.1\r\n" +
+		"Host: api.example.com\r\n" +
+		"User-Agent: Go-http-client/1.1\r\n" +
+		"Accept-Language: en-US\r\n" +
+		"Cookie: session=abc\r\n" +
+		"Content-Length: 5\r\n" +
+		"\r\n" +
+		"hello")
+
+	req, _, err := pcap.ParseHTTPRequest(raw)
+	if err != nil {
+		log.Fatal(err)
+	}
+	fmt.Printf("method=%s host=%s body=%s ja4h=%s\n",
+		req.Method, req.Host, req.Body, req.JA4H[:12])
+	// Output:
+	// method=POST host=api.example.com body=hello ja4h=po11cn04enus
+}
+
+func ExampleJA4T() {
+	// TCP options: MSS (2) = 1460, SACK Permitted (4), Timestamps (8), NOP (1), Window Scale (3) = 8.
+	opts := []byte{
+		2, 4, 0x05, 0xb4,
+		4, 2,
+		8, 10, 0, 0, 0, 1, 0, 0, 0, 0,
+		1,
+		3, 3, 8,
+	}
+	fp, ok := pcap.JA4T(64240, opts)
+	fmt.Printf("ok=%t ja4t=%s ja4l=%s\n", ok, fp, pcap.JA4L(2_400_000, 64))
+	// Output:
+	// ok=true ja4t=64240_2-4-8-1-3_1460_8 ja4l=1200_64
+}
+
+func ExampleDNSLabelEntropy() {
+	normal := pcap.DNSLabelEntropy("www.example.com")
+	tunnel := pcap.DNSLabelEntropy("4b8f9a1c0d2e3f4a5b6c7d8e9f0a1b2c.example.com")
+	fmt.Printf("normal=%.1f high_entropy=%t\n", normal, tunnel > 3.5)
+	// Output:
+	// normal=0.0 high_entropy=true
 }
