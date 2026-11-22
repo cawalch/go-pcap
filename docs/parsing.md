@@ -25,10 +25,10 @@ known, call `NewWithLength(data, streamLength)`. For large files on disk, call
 `NewFromReaderAt(r, size)` to parse container metadata without reading the
 entire capture into a single byte slice. For PcapNG, the scanner reads each
 complete block, including packet bodies. `PacketsFromReaderAt` collects a
-packet record slice. `FlowsFromReaderAt` then reads a 256-byte prefix (or the whole frame when shorter). When the prefix
-cannot resolve all flow headers and lengths, it reads the remaining bytes into
-a reusable frame buffer. Both reads count toward the 64 MiB flow budget. The metadata scan incurs
-additional I/O. `DNSFromReaderAt`, `TLSFromReaderAt`, and `QUICFromReaderAt`
+packet record slice. `FlowsFromReaderAt` starts with a 256-byte prefix or the
+whole frame when shorter. It reads additional bytes into a reusable buffer
+when needed to resolve flow headers and lengths. All frame reads count toward
+the 64 MiB flow budget. The metadata scan incurs additional I/O. `DNSFromReaderAt`, `TLSFromReaderAt`, and `QUICFromReaderAt`
 allocate a file-sized buffer and read the full capture. They return an error
 wrapping `ErrPacketLimit` when the file exceeds 64 MiB.
 

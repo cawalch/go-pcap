@@ -237,13 +237,26 @@ func TestReaderAtFlowParity(t *testing.T) {
 		frames = append(frames, f)
 	}
 	// A 256-byte hop-by-hop header places TCP beyond the initial prefix.
-	v6 := make([]byte, 14+40+256+20)
+	v6 := make([]byte, 14+40+256+20+1440)
 	binary.BigEndian.PutUint16(v6[12:], EtherTypeIPv6)
 	v6[14] = 0x60
-	binary.BigEndian.PutUint16(v6[18:], 276)
+	binary.BigEndian.PutUint16(v6[18:], uint16(len(v6)-54))
 	v6[54], v6[55] = IPProtoTCP, 31
 	copy(v6[310:], frames[0][34:54])
 	frames = append(frames, v6)
+
+	// Classic PCAP metadata and all flow headers are available. Reading the
+	// application payload past byte 512 of the frame would return EOF.
+	classic := buildClassicPCAP(binary.LittleEndian, false, LinkTypeEthernet, 65535, [][]byte{v6})
+	r := bytes.NewReader(classic[:pcapGlobalHeaderSize+pcapPacketHeaderSize+512])
+	c, err := NewFromReaderAt(r, int64(len(classic)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	deep, err := c.FlowsFromReaderAt(r)
+	if err != nil || len(deep) != 1 || deep[0].ClientBytes != 1440 || deep[0].DstPort != 443 {
+		t.Fatalf("deep header flow: %+v, %v", deep, err)
+	}
 	for _, raw := range [][]byte{buildClassicPCAP(binary.LittleEndian, false, LinkTypeEthernet, 65535, frames), buildPCAPNGFixture(binary.LittleEndian, nil, frames)} {
 		buf, err := New(raw)
 		if err != nil {

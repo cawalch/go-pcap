@@ -90,7 +90,7 @@ func (c *Capture) PacketPayloadFromReaderAt(r io.ReaderAt, pkt PacketRecord) ([]
 
 // FlowsFromReaderAt aggregates deterministic 5-tuple flows from an [io.ReaderAt]
 // using a 256-byte prefix for common transport headers. When the prefix is
-// insufficient it reads the remaining frame bytes under [MaxReaderAtScanBytes].
+// insufficient it extends the read under [MaxReaderAtScanBytes].
 func (c *Capture) FlowsFromReaderAt(r io.ReaderAt) ([]FlowSummary, error) {
 	packets, err := c.PacketsFromReaderAt(r)
 	if err != nil {
@@ -130,20 +130,27 @@ func (c *Capture) FlowsFromReaderAt(r io.ReaderAt) ([]FlowSummary, error) {
 
 		payload := hdrBuf[:readLen]
 		frame, err := DecodeFrame(payload, pkt.LinkType)
-		if readLen < pkt.PayloadLength && !completeFlowPrefix(&frame, payload, pkt.PayloadLength) {
-			tail := pkt.PayloadLength - readLen
+		for readLen < pkt.PayloadLength && err == nil && !completeFlowPrefix(&frame, payload, pkt.PayloadLength) {
+			next := pkt.PayloadLength
+			// Read just beyond an incomplete header before fetching the rest
+			// of a long frame. Charge each byte once, including retries.
+			if frame.Anomalies.TruncatedLayer {
+				next = min(next, 2*readLen)
+			}
+			tail := next - readLen
 			if tail > MaxReaderAtScanBytes-totalRead {
 				return nil, fmt.Errorf("%w: ReaderAt scan exceeds %d bytes", ErrPacketLimit, MaxReaderAtScanBytes)
 			}
-			if int64(cap(scratch)) < pkt.PayloadLength {
-				scratch = make([]byte, pkt.PayloadLength)
+			if int64(cap(scratch)) < next {
+				scratch = make([]byte, next)
 			}
-			payload = scratch[:pkt.PayloadLength]
-			copy(payload, hdrBuf[:])
+			copy(scratch[:readLen], payload)
+			payload = scratch[:next]
 			if err := readExactAt(r, payload[readLen:], pkt.PayloadOffset+readLen, c.fileSize); err != nil {
 				return nil, err
 			}
 			totalRead += tail
+			readLen = next
 			frame, err = DecodeFrame(payload, pkt.LinkType)
 		}
 		if err != nil || frame.IPVersion == 0 {
@@ -246,6 +253,9 @@ func (c *Capture) FlowsFromReaderAt(r io.ReaderAt) ([]FlowSummary, error) {
 // contains a complete, unencapsulated TCP or UDP header. An outer tunnel can
 // have an independent length anomaly, so decode those frames in full.
 func completeFlowPrefix(f *Frame, prefix []byte, captured int64) bool {
+	if f.IPVersion == 0 && !f.Anomalies.TruncatedLayer {
+		return true
+	}
 	layers := f.LayerSlices()
 	if len(layers) < 2 {
 		return false
