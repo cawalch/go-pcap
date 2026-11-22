@@ -5,6 +5,7 @@ import (
 	"encoding/binary"
 	"errors"
 	"net/netip"
+	"reflect"
 	"slices"
 	"testing"
 )
@@ -363,6 +364,131 @@ func TestPCAPNGSectionInterfaces(t *testing.T) {
 		}
 		if _, err := NewFromReaderAt(bytes.NewReader(bad.Bytes()), int64(bad.Len())); !errors.Is(err, ErrInvalidBlock) {
 			t.Fatalf("short ReaderAt SPB: %v", err)
+		}
+	}
+}
+
+type readAtFunc func([]byte, int64) (int, error)
+
+func (f readAtFunc) ReadAt(p []byte, off int64) (int, error) { return f(p, off) }
+
+func TestPacketSeqFromReaderAt(t *testing.T) {
+	frames := [][]byte{{1, 2, 3, 4, 5}, {6, 7, 8}}
+	for _, order := range []binary.ByteOrder{binary.BigEndian, binary.LittleEndian} {
+		for _, format := range []string{"PCAP", "PcapNG"} {
+			t.Run(format+"/"+order.String(), func(t *testing.T) {
+				var raw []byte
+				if format == "PCAP" {
+					raw = buildClassicPCAP(order, true, LinkTypeEthernet, 65535, frames)
+				} else {
+					buf := bytes.NewBuffer(buildPCAPNGFixture(order, []byte("secret"), frames))
+					body := make([]byte, 4)
+					order.PutUint32(body, 5)
+					appendPCAPNGBlock(buf, order, BlockTypeSimplePacket, append(body, frames[0]...))
+					raw = buf.Bytes()
+				}
+				c, err := New(raw)
+				if err != nil {
+					t.Fatal(err)
+				}
+				want, err := c.Packets(raw)
+				if err != nil {
+					t.Fatal(err)
+				}
+				src := bytes.NewReader(raw)
+				limit := int64(len(raw))
+				injected := errors.New("next record read")
+				r := readAtFunc(func(p []byte, off int64) (int, error) {
+					if off+int64(len(p)) > limit {
+						return 0, injected
+					}
+					for _, pkt := range want {
+						n := pkt.PayloadLength
+						if format == "PcapNG" {
+							n = (n + 3) &^ 3
+						}
+						if off < pkt.PayloadOffset+n && off+int64(len(p)) > pkt.PayloadOffset {
+							t.Fatalf("read [%d,%d) intersects packet %d", off, off+int64(len(p)), pkt.Index)
+						}
+					}
+					return src.ReadAt(p, off)
+				})
+				meta, err := NewFromReaderAt(r, int64(len(raw)))
+				if err != nil || !reflect.DeepEqual(c, meta) {
+					t.Fatalf("metadata mismatch: got %+v, want %+v (err %v)", meta, c, err)
+				}
+				got, err := meta.PacketsFromReaderAt(r)
+				if err != nil || !slices.Equal(got, want) {
+					t.Fatalf("packets = %+v, want %+v (err %v)", got, want, err)
+				}
+				limit = want[1].PayloadOffset - pcapPacketHeaderSize
+				if format == "PcapNG" {
+					limit = want[1].PayloadOffset - 28
+				}
+				var first []PacketRecord
+				for pkt, err := range meta.PacketSeqFromReaderAt(r) {
+					if err != nil {
+						t.Fatal(err)
+					}
+					first = append(first, pkt)
+					break
+				}
+				if !slices.Equal(first, want[:1]) {
+					t.Fatalf("first = %+v", first)
+				}
+				var prefix []PacketRecord
+				var errs []error
+				for pkt, err := range meta.PacketSeqFromReaderAt(r) {
+					if err != nil {
+						errs = append(errs, err)
+					} else {
+						prefix = append(prefix, pkt)
+					}
+				}
+				if !slices.Equal(prefix, want[:1]) || len(errs) != 1 || !errors.Is(errs[0], injected) {
+					t.Fatalf("prefix = %+v, errors = %v", prefix, errs)
+				}
+				if got, err := meta.PacketsFromReaderAt(r); got != nil || !errors.Is(err, injected) {
+					t.Fatalf("collector = %+v, %v", got, err)
+				}
+			})
+		}
+	}
+}
+
+func TestReaderAtMalformedPacketParity(t *testing.T) {
+	order := binary.LittleEndian
+	base := buildPCAPNGFixture(order, nil, nil)
+	raw := buildPCAPNGFixture(order, nil, [][]byte{{1, 2, 3}})
+	for _, tc := range []struct {
+		name   string
+		offset int
+		value  uint32
+		want   error
+	}{
+		{"interface", 8, 2, ErrInvalidPacket},
+		{"capture length", 20, 1024, ErrInvalidBlock},
+		{"option length", 32, 0xffff0001, ErrOptionLimit},
+		{"trailer", len(raw) - len(base) - 4, 12, ErrInvalidBlock},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			data := bytes.Clone(raw)
+			order.PutUint32(data[len(base)+tc.offset:], tc.value)
+			_, sliceErr := New(data)
+			_, readerErr := NewFromReaderAt(bytes.NewReader(data), int64(len(data)))
+			if !errors.Is(sliceErr, tc.want) || !errors.Is(readerErr, tc.want) {
+				t.Fatalf("slice %v, reader %v, want %v", sliceErr, readerErr, tc.want)
+			}
+		})
+	}
+	for n := len(base); n < len(raw); n++ {
+		c, err := New(raw[:n])
+		if err != nil {
+			t.Fatal(err)
+		}
+		got, err := NewFromReaderAt(bytes.NewReader(raw[:n]), int64(n))
+		if err != nil || !reflect.DeepEqual(c, got) {
+			t.Fatalf("cut at %d: got %+v, want %+v (err %v)", n, got, c, err)
 		}
 	}
 }
