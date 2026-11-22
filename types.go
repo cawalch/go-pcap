@@ -267,6 +267,7 @@ const (
 	MaxTLSSignatureSchemes  = 128
 	MaxTLSALPNProtocols     = 32
 	MaxTLSCertificates      = 16
+	MaxTLSCertSANsPerKind   = 64 // Maximum DNS names and IP addresses retained per certificate, independently.
 	MaxTLSHandshakesPerScan = 16_384
 	MaxTLSKeyLogEntries     = 4096
 

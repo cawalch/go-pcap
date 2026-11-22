@@ -120,21 +120,7 @@ func TestTLS13EncryptedServerCertificateDecryptionViaDSB(t *testing.T) {
 	// inside an outer ApplicationData (23) record using SERVER_HANDSHAKE_TRAFFIC_SECRET.
 	chRec := buildTLS13ClientHelloRecord("tls13-cert.example.com", "h2")
 
-	// Build a TLS 1.3 ServerHello (without an unencrypted Certificate record).
-	var shBody bytes.Buffer
-	shBody.Write([]byte{0x03, 0x03})
-	shBody.Write(bytes.Repeat([]byte{0x24}, 32))
-	shBody.WriteByte(0)
-	shBody.Write([]byte{0x13, 0x01}) // TLS_AES_128_GCM_SHA256
-	shBody.WriteByte(0)
-	var shExt bytes.Buffer
-	shExt.Write([]byte{0x00, 0x2b, 0x00, 0x02, 0x03, 0x04})
-	shExt.Write([]byte{0x00, 0x10, 0x00, 0x05, 0x00, 0x03, 0x02, 'h', '2'})
-	var shExtLen [2]byte
-	binary.BigEndian.PutUint16(shExtLen[:], uint16(shExt.Len()))
-	shBody.Write(shExtLen[:])
-	shBody.Write(shExt.Bytes())
-	shRec := wrapTLSHandshakeRecord(TLSHandshakeServerHello, shBody.Bytes())
+	shRec := buildTLSServerHelloRecord()
 
 	// Build a self-signed X.509 certificate and format a RFC 8446 §4.4.2 TLS 1.3 Certificate handshake message:
 	// msgType (11) + 3-byte msgLen + 1-byte contextLen (0) + 3-byte certListLen + (3-byte certLen + DER + 2-byte extLen (0)).
