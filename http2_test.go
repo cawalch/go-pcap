@@ -79,6 +79,38 @@ func TestParseHTTP2FramesAndCaptureHTTP2(t *testing.T) {
 	if _, err := ParseHTTP2Frames([]byte("GET / HTTP/1.1\r\n\r\n")); !errors.Is(err, ErrInvalidHTTP) {
 		t.Fatalf("ParseHTTP2Frames(HTTP/1.1) err = %v, want ErrInvalidHTTP", err)
 	}
+
+	// Server stream starting with >6 SETTINGS, extension frame (ALTSVC 0x0a),
+	// per-stream WINDOW_UPDATE (ignored), connection WINDOW_UPDATE, stream-0 DATA (ignored),
+	// and stream-1 DATA must all parse cleanly.
+	var srv bytes.Buffer
+	var bigSettings [48]byte // 8 settings (> 36 bytes)
+	for i := range 8 {
+		binary.BigEndian.PutUint16(bigSettings[i*6:i*6+2], uint16(i+1))
+		binary.BigEndian.PutUint32(bigSettings[i*6+2:i*6+6], uint32(100+i))
+	}
+	srv.Write(buildHTTP2Frame(HTTP2FrameSettings, 0, 0, bigSettings[:]))
+	srv.Write(buildHTTP2Frame(0x0a, 0, 0, []byte("altsvc-ext"))) // extension frame
+	var perStreamWU, connWU [4]byte
+	binary.BigEndian.PutUint32(perStreamWU[:], 1111)
+	binary.BigEndian.PutUint32(connWU[:], 2222)
+	srv.Write(buildHTTP2Frame(HTTP2FrameWindowUpdate, 0, 1, perStreamWU[:]))
+	srv.Write(buildHTTP2Frame(HTTP2FrameWindowUpdate, 0, 0, connWU[:]))
+	srv.Write(buildHTTP2Frame(HTTP2FrameData, 0, 0, []byte("invalid-stream-0")))
+	srv.Write(buildHTTP2Frame(HTTP2FrameData, 0, 1, []byte("after-ext")))
+
+	srvSum, err := ParseHTTP2Frames(srv.Bytes())
+	if err != nil {
+		t.Fatalf("ParseHTTP2Frames(server >6 settings + ext) err = %v", err)
+	}
+	if len(srvSum.Settings) != 8 || srvSum.WindowUpdate != 2222 || len(srvSum.Streams) != 1 || string(srvSum.Streams[0].Data) != "after-ext" {
+		t.Fatalf("srvSum = %+v", srvSum)
+	}
+
+	// Non-empty SETTINGS ACK on server stream must be rejected.
+	if _, err := ParseHTTP2Frames(buildHTTP2Frame(HTTP2FrameSettings, 0x01, 0, bigSettings[:6])); !errors.Is(err, ErrInvalidHTTP) {
+		t.Fatalf("ParseHTTP2Frames(non-empty SETTINGS ACK) err = %v, want ErrInvalidHTTP", err)
+	}
 }
 
 // Include cleartext and encrypted traffic in the same packet order for each

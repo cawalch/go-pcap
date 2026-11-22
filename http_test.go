@@ -2,6 +2,7 @@ package pcap
 
 import (
 	"bytes"
+	"encoding/binary"
 	"errors"
 	"strings"
 	"testing"
@@ -92,5 +93,47 @@ func TestJA4HLargeCookieParity(t *testing.T) {
 	const want = "ge11cn010000_4a823118b9ba_5521d8d1ef21_cda9743fbd5c"
 	if err != nil || req.CookieCount != 3 || req.JA4H != want {
 		t.Fatalf("got %q (%d cookies), %v; want %q", req.JA4H, req.CookieCount, err, want)
+	}
+}
+
+func TestHTTPKeepAlivePipeliningAndChunkedTrailers(t *testing.T) {
+	clientStream := []byte(
+		"GET /first HTTP/1.1\r\nHost: keepalive.example\r\n\r\n" +
+			"POST /second HTTP/1.1\r\nHost: keepalive.example\r\nContent-Length: 4\r\n\r\nBODY",
+	)
+	serverStream := []byte(
+		"HTTP/1.1 204 No Content\r\nServer: srv\r\n\r\n" +
+			"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n2\r\nok\r\n0\r\nX-Trailer: done\r\n\r\n" +
+			"HTTP/1.1 200 OK\r\nContent-Length: 3\r\n\r\nend",
+	)
+
+	f1 := buildEthernetIPv4TCPFrame([4]byte{10, 0, 0, 1}, [4]byte{10, 0, 0, 2}, 45000, 80, 1, 1, TCPFlagPSH|TCPFlagACK, clientStream)
+	f2 := buildEthernetIPv4TCPFrame([4]byte{10, 0, 0, 2}, [4]byte{10, 0, 0, 1}, 80, 45000, 1, 1+uint32(len(clientStream)), TCPFlagPSH|TCPFlagACK, serverStream)
+	raw := buildClassicPCAP(binary.LittleEndian, false, LinkTypeEthernet, 65535, [][]byte{f1, f2})
+	c, err := New(raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	recs, err := c.HTTP(raw)
+	if err != nil {
+		t.Fatalf("Capture.HTTP() error = %v", err)
+	}
+	if len(recs) != 5 {
+		t.Fatalf("Capture.HTTP() len = %d, want 5 (%+v)", len(recs), recs)
+	}
+	if recs[0].IsResponse || recs[0].Request.Path != "/first" || len(recs[0].Request.Body) != 0 {
+		t.Fatalf("rec[0] = %+v, want bodyless GET /first", recs[0])
+	}
+	if recs[1].IsResponse || recs[1].Request.Path != "/second" || string(recs[1].Request.Body) != "BODY" {
+		t.Fatalf("rec[1] = %+v, want POST /second with BODY", recs[1])
+	}
+	if !recs[2].IsResponse || recs[2].Response.StatusCode != 204 || len(recs[2].Response.Body) != 0 {
+		t.Fatalf("rec[2] = %+v, want bodyless 204", recs[2])
+	}
+	if !recs[3].IsResponse || string(recs[3].Response.Body) != "ok" {
+		t.Fatalf("rec[3] = %+v, want chunked response with trailer", recs[3])
+	}
+	if !recs[4].IsResponse || string(recs[4].Response.Body) != "end" {
+		t.Fatalf("rec[4] = %+v, want trailing 200 end", recs[4])
 	}
 }

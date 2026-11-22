@@ -85,7 +85,7 @@ func ParseHTTP2Frames(stream []byte) (HTTP2Summary, error) {
 		firstFlags := stream[offset+4]
 		firstStream := binary.BigEndian.Uint32(stream[offset+5:offset+9]) & 0x7fffffff
 		firstLen := int(stream[offset])<<16 | int(stream[offset+1])<<8 | int(stream[offset+2])
-		if firstType != HTTP2FrameSettings || firstStream != 0 || (firstFlags&^0x01) != 0 || firstLen%6 != 0 || firstLen > 36 {
+		if firstType != HTTP2FrameSettings || firstStream != 0 || (firstFlags&^0x01) != 0 || firstLen%6 != 0 || firstLen > MaxHTTP2Settings*6 || ((firstFlags&0x01) != 0 && firstLen != 0) {
 			return HTTP2Summary{}, fmt.Errorf("%w: stream does not begin with HTTP/2 preface or SETTINGS frame", ErrInvalidHTTP)
 		}
 	}
@@ -101,7 +101,7 @@ func ParseHTTP2Frames(stream []byte) (HTTP2Summary, error) {
 		streamID := binary.BigEndian.Uint32(stream[offset+5:offset+9]) & 0x7fffffff
 		offset += 9
 
-		if fType > HTTP2FrameContinuation || fLen > MaxHTTP2FramePayload || offset+fLen > len(stream) {
+		if fLen > MaxHTTP2FramePayload || offset+fLen > len(stream) {
 			break
 		}
 		payload := stream[offset : offset+fLen]
@@ -110,8 +110,8 @@ func ParseHTTP2Frames(stream []byte) (HTTP2Summary, error) {
 
 		switch fType {
 		case HTTP2FrameSettings:
-			// Ignore SETTINGS ACK frames (flag 0x01 with empty payload).
-			if (fFlags&0x01) == 0 && len(out.Settings) == 0 && len(payload)%6 == 0 {
+			// Ignore SETTINGS ACK frames (flag 0x01 with empty payload) and non-connection streams.
+			if streamID == 0 && (fFlags&0x01) == 0 && len(out.Settings) == 0 && len(payload)%6 == 0 {
 				count := min(len(payload)/6, MaxHTTP2Settings)
 				out.Settings = make([]HTTP2Setting, count)
 				var fpBuf [128]byte
@@ -131,11 +131,14 @@ func ParseHTTP2Frames(stream []byte) (HTTP2Summary, error) {
 			}
 
 		case HTTP2FrameWindowUpdate:
-			if len(payload) == 4 && out.WindowUpdate == 0 {
+			if streamID == 0 && len(payload) == 4 && out.WindowUpdate == 0 {
 				out.WindowUpdate = binary.BigEndian.Uint32(payload) & 0x7fffffff
 			}
 
 		case HTTP2FrameData:
+			if streamID == 0 {
+				break
+			}
 			dataPayload := payload
 			if (fFlags & 0x08) != 0 {
 				// PADDED flag: 1-byte Pad Length prefix.
@@ -184,20 +187,27 @@ func (c *Capture) HTTP2(data []byte) ([]HTTP2Record, error) {
 	}
 	var records []HTTP2Record
 	for i := range streams {
-		appendHTTP2FromTCPStream(&streams[i], false, &records)
+		if err := appendHTTP2FromTCPStream(&streams[i], false, &records); err != nil {
+			return nil, err
+		}
 	}
 	if keys, err := c.TLSKeyLog(nil); err == nil && len(keys.Entries) > 0 {
 		decStreams := decryptTLSStreams(streams, keys)
 		for i := range decStreams {
-			appendHTTP2FromTCPStream(&decStreams[i], true, &records)
+			if err := appendHTTP2FromTCPStream(&decStreams[i], true, &records); err != nil {
+				return nil, err
+			}
 		}
 	}
 	return records, nil
 }
 
-func appendHTTP2FromTCPStream(st *TCPStream, isDecrypted bool, records *[]HTTP2Record) {
+func appendHTTP2FromTCPStream(st *TCPStream, isDecrypted bool, records *[]HTTP2Record) error {
 	if len(st.Client.Data) >= 9 {
 		if sum, err := ParseHTTP2Frames(st.Client.Data); err == nil {
+			if len(*records) >= MaxHTTPMessagesPerScan {
+				return fmt.Errorf("%w: exceeds %d HTTP/2 records", ErrHTTPLimit, MaxHTTPMessagesPerScan)
+			}
 			*records = append(*records, HTTP2Record{
 				FlowIndex:   st.FlowIndex,
 				SrcAddr:     st.SrcAddr,
@@ -212,6 +222,9 @@ func appendHTTP2FromTCPStream(st *TCPStream, isDecrypted bool, records *[]HTTP2R
 	}
 	if len(st.Server.Data) >= 9 {
 		if sum, err := ParseHTTP2Frames(st.Server.Data); err == nil {
+			if len(*records) >= MaxHTTPMessagesPerScan {
+				return fmt.Errorf("%w: exceeds %d HTTP/2 records", ErrHTTPLimit, MaxHTTPMessagesPerScan)
+			}
 			*records = append(*records, HTTP2Record{
 				FlowIndex:   st.FlowIndex,
 				SrcAddr:     st.DstAddr,
@@ -224,4 +237,5 @@ func appendHTTP2FromTCPStream(st *TCPStream, isDecrypted bool, records *[]HTTP2R
 			})
 		}
 	}
+	return nil
 }
