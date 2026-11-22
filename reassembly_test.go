@@ -122,3 +122,23 @@ func TestReassemblyReservationWithGapsAndRetransmissions(t *testing.T) {
 		t.Fatalf("reassembly: %+v, %d bytes, %v", buf, used, err)
 	}
 }
+
+func TestCollectStreamsSkipsFragmentedAndTruncatedTCP(t *testing.T) {
+	fragTCP := buildEthernetIPv4FragmentFrame([4]byte{10, 0, 0, 1}, [4]byte{10, 0, 0, 2}, IPProtoTCP, 0x1111, 0, true, []byte("fragmented_tcp_bytes"))
+	badTCP := buildEthernetIPv4TCPFrame([4]byte{10, 0, 0, 1}, [4]byte{10, 0, 0, 2}, 1234, 80, 1, 1, TCPFlagACK, []byte("bad"))
+	badTCP[34+12] = 3 << 4 // invalid data offset (< 5)
+	goodTCP := buildEthernetIPv4TCPFrame([4]byte{10, 0, 0, 3}, [4]byte{10, 0, 0, 4}, 40000, 443, 10, 1, TCPFlagACK, []byte("valid"))
+
+	raw := buildClassicPCAP(binary.LittleEndian, false, LinkTypeEthernet, 65535, [][]byte{fragTCP, badTCP, goodTCP})
+	c, err := New(raw)
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+	streams, err := c.Streams(raw)
+	if err != nil {
+		t.Fatalf("Streams() error = %v", err)
+	}
+	if len(streams) != 1 || streams[0].SrcPort != 40000 || streams[0].DstPort != 443 || string(streams[0].Client.Data) != "valid" {
+		t.Fatalf("Streams() = %+v, want only the valid TCP stream", streams)
+	}
+}
