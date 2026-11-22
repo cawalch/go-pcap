@@ -10,8 +10,9 @@ import (
 )
 
 var (
-	smb2Magic  = []byte{0xfe, 'S', 'M', 'B'}
-	ntlmsspSig = []byte("NTLMSSP\x00")
+	smb2Magic          = []byte{0xfe, 'S', 'M', 'B'}
+	smb3TransformMagic = []byte{0xfd, 'S', 'M', 'B'}
+	ntlmsspSig         = []byte("NTLMSSP\x00")
 )
 
 // NTLM A/V pair IDs (MS-NLMP §2.2.2.1).
@@ -41,20 +42,25 @@ type NTLMInfo struct {
 	DNSTreeName         string
 }
 
-// SMB2Message contains metadata parsed from an SMB2/3 Negotiate or Session
-// Setup packet and any embedded NTLMSSP authentication token.
+// SMB2Message contains observed SMB2 command or SMB3 encrypted transform metadata.
+// For transforms, only IsEncrypted, OriginalMessageSize and SessionID apply.
 type SMB2Message struct {
-	Command         uint16
-	Status          uint32
-	IsResponse      bool
-	MessageID       uint64
-	SessionID       uint64
-	DialectRevision uint16
-	SecurityMode    uint16
-	SigningEnabled  bool
-	SigningRequired bool
-	HasNTLM         bool
-	NTLM            NTLMInfo
+	Command             uint16
+	Status              uint32
+	IsResponse          bool
+	IsEncrypted         bool
+	TreeID              uint32 // Synchronous header tree ID; zero for asynchronous headers.
+	OriginalMessageSize uint32 // Plaintext size declared in a transform header.
+	ShareName           string // Full UNC path from a TREE_CONNECT request.
+	FileName            string // CREATE request name, including pipe names on IPC shares.
+	MessageID           uint64
+	SessionID           uint64
+	DialectRevision     uint16
+	SecurityMode        uint16
+	SigningEnabled      bool
+	SigningRequired     bool
+	HasNTLM             bool
+	NTLM                NTLMInfo
 }
 
 // SMB2Record associates a parsed [SMB2Message] with its 5-tuple TCP flow in a
@@ -68,28 +74,57 @@ type SMB2Record struct {
 	Message   SMB2Message
 }
 
-// ParseSMB2Message parses an SMB2/3 message (with or without a 4-byte NetBIOS
-// Session Service header) and extracts dialect, signing, and embedded NTLMSSP
-// challenge/authentication metadata.
+// ParseSMB2Message parses the first command or encrypted transform in a raw
+// or NetBIOS-framed message. [Capture.SMB] emits every command in a compound.
 func ParseSMB2Message(buf []byte) (SMB2Message, error) {
-	if len(buf) >= 4 && buf[0] == 0x00 && !bytes.HasPrefix(buf, smb2Magic) {
-		nbLen := int(buf[1])<<16 | int(buf[2])<<8 | int(buf[3])
-		if nbLen > MaxSMB2PacketBytes {
-			return SMB2Message{}, fmt.Errorf("%w: NetBIOS frame length %d exceeds %d", ErrSMBLimit, nbLen, MaxSMB2PacketBytes)
-		}
-		if 4+nbLen <= len(buf) {
-			buf = buf[4 : 4+nbLen]
-		} else {
-			buf = buf[4:]
-		}
+	frame, _, err := splitSMBFrame(buf)
+	if err != nil {
+		return SMB2Message{}, err
 	}
+	msg, _, err := parseSMBCommand(frame)
+	return msg, err
+}
 
+func splitSMBFrame(buf []byte) (frame, rest []byte, err error) {
+	if len(buf) >= 4 && buf[0] == 0 {
+		n := int(buf[1])<<16 | int(buf[2])<<8 | int(buf[3])
+		if n > MaxSMB2PacketBytes {
+			return nil, nil, fmt.Errorf("%w: NetBIOS frame length %d", ErrSMBLimit, n)
+		}
+		if n > len(buf)-4 {
+			return nil, nil, fmt.Errorf("%w: truncated NetBIOS frame", ErrInvalidSMB)
+		}
+		return buf[4 : 4+n], buf[4+n:], nil
+	}
+	return buf, nil, nil
+}
+
+func parseSMBCommand(buf []byte) (SMB2Message, []byte, error) {
+	if bytes.HasPrefix(buf, smb3TransformMagic) {
+		if len(buf) < 52 {
+			return SMB2Message{}, nil, fmt.Errorf("%w: truncated SMB3 transform header", ErrInvalidSMB)
+		}
+		return SMB2Message{
+			IsEncrypted:         true,
+			OriginalMessageSize: binary.LittleEndian.Uint32(buf[36:40]),
+			SessionID:           binary.LittleEndian.Uint64(buf[44:52]),
+		}, nil, nil
+	}
 	if len(buf) < 64 || !bytes.HasPrefix(buf, smb2Magic) {
-		return SMB2Message{}, fmt.Errorf("%w: missing 64-byte SMB2 header", ErrInvalidSMB)
+		return SMB2Message{}, nil, fmt.Errorf("%w: missing 64-byte SMB2 header", ErrInvalidSMB)
 	}
 	structSize := binary.LittleEndian.Uint16(buf[4:6])
 	if structSize != 64 {
-		return SMB2Message{}, fmt.Errorf("%w: invalid SMB2 header structure size %d", ErrInvalidSMB, structSize)
+		return SMB2Message{}, nil, fmt.Errorf("%w: invalid SMB2 header structure size %d", ErrInvalidSMB, structSize)
+	}
+
+	var rest []byte
+	if next := binary.LittleEndian.Uint32(buf[20:24]); next != 0 {
+		if next < 64 || next%8 != 0 || uint64(next)+64 > uint64(len(buf)) {
+			return SMB2Message{}, nil, fmt.Errorf("%w: invalid compound command offset %d", ErrInvalidSMB, next)
+		}
+		rest = buf[next:]
+		buf = buf[:next]
 	}
 
 	status := binary.LittleEndian.Uint32(buf[8:12])
@@ -107,6 +142,9 @@ func ParseSMB2Message(buf []byte) (SMB2Message, error) {
 		SessionID:  sessionID,
 	}
 
+	if flags&2 == 0 {
+		msg.TreeID = binary.LittleEndian.Uint32(buf[36:40])
+	}
 	body := buf[64:]
 	switch command {
 	case SMB2CommandNegotiate:
@@ -123,6 +161,38 @@ func ParseSMB2Message(buf []byte) (SMB2Message, error) {
 		msg.SigningEnabled = (msg.SecurityMode & 0x0001) != 0
 		msg.SigningRequired = (msg.SecurityMode & 0x0002) != 0
 
+	case SMB2CommandTreeConnect:
+		if !isResp {
+			if len(body) < 8 || binary.LittleEndian.Uint16(body) != 9 {
+				return SMB2Message{}, rest, fmt.Errorf("%w: invalid TREE_CONNECT request", ErrInvalidSMB)
+			}
+			minOffset := 72
+			if binary.LittleEndian.Uint16(body[2:4])&4 != 0 {
+				minOffset += 16 // TREE_CONNECT extension prefix.
+			}
+			var err error
+			msg.ShareName, err = smbRequestName(buf, body[4:8], minOffset)
+			if err != nil {
+				return SMB2Message{}, rest, err
+			}
+		}
+	case SMB2CommandCreate:
+		if !isResp {
+			if len(body) < 57 || binary.LittleEndian.Uint16(body) != 57 {
+				return SMB2Message{}, rest, fmt.Errorf("%w: invalid CREATE request", ErrInvalidSMB)
+			}
+			if binary.LittleEndian.Uint16(body[46:48]) != 0 {
+				if binary.LittleEndian.Uint16(body[44:46])%8 != 0 {
+					return SMB2Message{}, rest, fmt.Errorf("%w: unaligned CREATE name", ErrInvalidSMB)
+				}
+				var err error
+				msg.FileName, err = smbRequestName(buf, body[44:48], 120)
+				if err != nil {
+					return SMB2Message{}, rest, err
+				}
+			}
+		}
+
 	case SMB2CommandSessionSetup:
 		if !isResp && len(body) >= 24 {
 			msg.SecurityMode = uint16(body[3])
@@ -138,7 +208,19 @@ func ParseSMB2Message(buf []byte) (SMB2Message, error) {
 		}
 	}
 
-	return msg, nil
+	return msg, rest, nil
+}
+
+func smbRequestName(buf, descriptor []byte, minOffset int) (string, error) {
+	offset := int(binary.LittleEndian.Uint16(descriptor))
+	size := int(binary.LittleEndian.Uint16(descriptor[2:]))
+	if offset < minOffset || size == 0 || size%2 != 0 || offset+size > len(buf) {
+		return "", fmt.Errorf("%w: invalid UTF-16 name range", ErrInvalidSMB)
+	}
+	if size > MaxOptionStringBytes {
+		return "", fmt.Errorf("%w: name length %d", ErrSMBLimit, size)
+	}
+	return decodeUTF16LE(buf[offset : offset+size]), nil
 }
 
 // ParseNTLMSSP parses a raw NTLMSSP (Type 1 Negotiate, Type 2 Challenge, or
@@ -263,8 +345,8 @@ func parseNTLMAvPairs(av []byte, info *NTLMInfo) {
 	}
 }
 
-// SMB extracts SMB2/3 Negotiate and Session Setup messages (including embedded
-// NTLMSSP tokens) across all reassembled TCP streams in the capture.
+// SMB extracts SMB2 commands, embedded NTLMSSP metadata and SMB3 encrypted
+// transform headers across the reassembled TCP streams in a capture.
 func (c *Capture) SMB(data []byte) ([]SMB2Record, error) {
 	streams, err := c.Streams(data)
 	if err != nil {
@@ -290,38 +372,30 @@ func extractSMB2FromStream(
 	srcPort, dstPort uint16,
 	records *[]SMB2Record,
 ) error {
-	offset := 0
-	for offset+68 <= len(stream) {
-		var frame []byte
-		if stream[offset] == 0x00 && bytes.Equal(stream[offset+4:offset+8], smb2Magic) {
-			nbLen := int(stream[offset+1])<<16 | int(stream[offset+2])<<8 | int(stream[offset+3])
-			if nbLen < 64 || nbLen > MaxSMB2PacketBytes || offset+4+nbLen > len(stream) {
-				break
-			}
-			frame = stream[offset+4 : offset+4+nbLen]
-			offset += 4 + nbLen
-		} else if bytes.Equal(stream[offset:offset+4], smb2Magic) {
-			frame = stream[offset:]
-			offset = len(stream)
-		} else {
+	for len(stream) >= 4 {
+		frame, rest, err := splitSMBFrame(stream)
+		if err != nil || (!bytes.HasPrefix(frame, smb2Magic) && !bytes.HasPrefix(frame, smb3TransformMagic)) {
 			break
 		}
-
-		msg, err := ParseSMB2Message(frame)
-		if err != nil {
-			continue
+		stream = rest
+		for len(frame) > 0 {
+			msg, next, err := parseSMBCommand(frame)
+			frame = next
+			if err != nil {
+				continue
+			}
+			if len(*records) >= MaxSMBRecordsPerScan {
+				return fmt.Errorf("%w: exceeds %d SMB2 records", ErrSMBLimit, MaxSMBRecordsPerScan)
+			}
+			*records = append(*records, SMB2Record{
+				FlowIndex: flowIndex,
+				SrcAddr:   srcAddr,
+				DstAddr:   dstAddr,
+				SrcPort:   srcPort,
+				DstPort:   dstPort,
+				Message:   msg,
+			})
 		}
-		if len(*records) >= MaxSMBRecordsPerScan {
-			return fmt.Errorf("%w: exceeds %d SMB2 records", ErrSMBLimit, MaxSMBRecordsPerScan)
-		}
-		*records = append(*records, SMB2Record{
-			FlowIndex: flowIndex,
-			SrcAddr:   srcAddr,
-			DstAddr:   dstAddr,
-			SrcPort:   srcPort,
-			DstPort:   dstPort,
-			Message:   msg,
-		})
 	}
 	return nil
 }

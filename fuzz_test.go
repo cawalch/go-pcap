@@ -193,6 +193,9 @@ func FuzzParseSSHHandshake(f *testing.F) {
 
 func FuzzParseSMB2AndNTLM(f *testing.F) {
 	f.Add(buildSMB2SessionSetupNTLMChallenge())
+	f.Add(smbSessionFrame(smbNameRequest(SMB2CommandTreeConnect, `\\server\share`)))
+	f.Add(smbNameRequest(SMB2CommandCreate, "srvsvc"))
+	f.Add(smbSessionFrame(smbTransformPacket()))
 
 	f.Fuzz(func(t *testing.T, data []byte) {
 		_, _ = ParseSMB2Message(data)

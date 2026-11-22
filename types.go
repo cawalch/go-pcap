@@ -350,6 +350,7 @@ const (
 	SMB2CommandNegotiate    uint16 = 0x0000
 	SMB2CommandSessionSetup uint16 = 0x0001
 	SMB2CommandTreeConnect  uint16 = 0x0003
+	SMB2CommandCreate       uint16 = 0x0005
 
 	NTLMNegotiateMessage    uint32 = 1
 	NTLMChallengeMessage    uint32 = 2
