@@ -5,6 +5,7 @@ package pcap
 import (
 	"fmt"
 	"net"
+	"sync"
 	"syscall"
 	"time"
 )
@@ -14,6 +15,8 @@ const LinkTypeUnknown LinkType = 0xffff
 // LiveCapture reads live packets from an OS network interface using standard
 // library AF_PACKET syscalls on Linux.
 type LiveCapture struct {
+	statsMu   sync.Mutex // serializes Stats and Close
+	stats     LiveStats
 	fd        int
 	ifaceName string
 	linkType  LinkType
@@ -140,12 +143,15 @@ func (lc *LiveCapture) ReadPacket() (PacketRecord, []byte, error) {
 	return rec, lc.buf[:capLen], nil
 }
 
-// Close closes the underlying AF_PACKET socket descriptor.
-func (lc *LiveCapture) Close() error {
-	if lc == nil || lc.fd < 0 {
-		return nil
+func (lc *LiveCapture) statsDelta() (LiveStats, error) {
+	// PACKET_STATISTICS returns two native uint32 counters and resets them.
+	var counters [2]uint32
+	size := uint32(8)
+	if errno := getPacketStatistics(lc.fd, &counters, &size); errno != 0 {
+		return LiveStats{}, errno
 	}
-	fd := lc.fd
-	lc.fd = -1
-	return syscall.Close(fd)
+	if size != 8 {
+		return LiveStats{}, fmt.Errorf("PACKET_STATISTICS: unexpected size %d", size)
+	}
+	return LiveStats{PacketsReceived: uint64(counters[0]), PacketsDropped: uint64(counters[1])}, nil
 }

@@ -176,3 +176,8 @@ func (lc *LiveCapture) Close() error {
 	lc.fd = syscall.InvalidHandle
 	return syscall.Closesocket(fd)
 }
+
+// Stats returns [ErrLiveCaptureUnsupported] because this backend lacks capture counters.
+func (lc *LiveCapture) Stats() (LiveStats, error) {
+	return LiveStats{}, ErrLiveCaptureUnsupported
+}

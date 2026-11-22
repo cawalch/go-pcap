@@ -408,3 +408,19 @@ interface using standard-library `syscall` descriptors (`/dev/bpf*` on macOS,
 `libpcap`. Use `BPFFilterTCPPort`, `BPFFilterUDPPort`, `BPFFilterIPProtocol`,
 and `BPFFilterIPv4Host` to construct classic BPF filter programs, or `EvalBPF`
 to evaluate a classic BPF program in memory.
+
+Call `live.Stats()` before closing the handle to check kernel packet loss:
+
+```go
+stats, err := live.Stats()
+if err != nil {
+    return err
+}
+fmt.Printf("received=%d dropped=%d\n", stats.PacketsReceived, stats.PacketsDropped)
+```
+
+Linux and macOS report per-handle totals since opening. You can poll while
+reading packets. Each kernel counter is 32 bits, so poll before it advances by
+2³² packets. The received count follows the backend's filter accounting. The
+drop count measures capture-buffer loss. Windows and other backends without
+counters return `ErrLiveCaptureUnsupported`.

@@ -4,6 +4,7 @@ package pcap
 
 import (
 	"fmt"
+	"sync"
 	"syscall"
 	"unsafe"
 )
@@ -11,6 +12,8 @@ import (
 // LiveCapture reads live packets from an OS network interface using standard
 // library syscalls (/dev/bpf* on macOS).
 type LiveCapture struct {
+	statsMu   sync.Mutex // serializes Stats and Close
+	stats     LiveStats
 	fd        int
 	ifaceName string
 	linkType  LinkType
@@ -197,12 +200,15 @@ func (lc *LiveCapture) ReadPacket() (PacketRecord, []byte, error) {
 	return rec, payload, nil
 }
 
-// Close closes the underlying BPF file descriptor.
-func (lc *LiveCapture) Close() error {
-	if lc == nil || lc.fd < 0 {
-		return nil
+func (lc *LiveCapture) statsDelta() (LiveStats, error) {
+	var raw syscall.BpfStat
+	_, _, errno := syscall.Syscall(syscall.SYS_IOCTL, uintptr(lc.fd), syscall.BIOCGSTATS, uintptr(unsafe.Pointer(&raw)))
+	if errno != 0 {
+		return LiveStats{}, errno
 	}
-	fd := lc.fd
-	lc.fd = -1
-	return syscall.Close(fd)
+	// BPF returns cumulative 32-bit counters. Subtract modulo 2^32.
+	return LiveStats{
+		PacketsReceived: uint64(raw.Recv - uint32(lc.stats.PacketsReceived)),
+		PacketsDropped:  uint64(raw.Drop - uint32(lc.stats.PacketsDropped)),
+	}, nil
 }
