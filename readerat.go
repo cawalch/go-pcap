@@ -21,18 +21,21 @@ type windowedReaderAt struct {
 	size, off, readAheadLeft int64
 	buf                      *[fileWindowSize]byte
 	valid                    int
+	started                  bool
 }
 
 func fileWindow(r io.ReaderAt, size, extra int64) *windowedReaderAt {
 	if _, ok := r.(interface{ Fd() uintptr }); !ok || size <= 0 || extra <= 0 {
 		return nil
 	}
-	return &windowedReaderAt{r: r, size: size, readAheadLeft: extra, buf: fileWindowBuffers.Get().(*[fileWindowSize]byte)}
+	return &windowedReaderAt{r: r, size: size, readAheadLeft: extra}
 }
 
 func (w *windowedReaderAt) release() {
-	clear(w.buf[:])
-	fileWindowBuffers.Put(w.buf)
+	if w.buf != nil {
+		clear(w.buf[:])
+		fileWindowBuffers.Put(w.buf)
+	}
 }
 
 // ReadAt serves cached bytes first. A backwards miss (such as an EPB frame
@@ -51,6 +54,11 @@ func (w *windowedReaderAt) ReadAt(p []byte, off int64) (int, error) {
 		}
 		return n, err
 	}
+	// A consumer that stops after its first read needs no buffer.
+	if !w.started {
+		w.started = true
+		return w.r.ReadAt(p, off)
+	}
 	var copied int
 	if off >= w.off && off-w.off < int64(w.valid) {
 		copied = copy(p, w.buf[off-w.off:int64(w.valid)])
@@ -67,6 +75,9 @@ func (w *windowedReaderAt) ReadAt(p []byte, off int64) (int, error) {
 	want := int64(len(p))
 	spare := min(int64(fileWindowSize)-want, w.size-off-want, w.readAheadLeft)
 	w.readAheadLeft -= spare
+	if w.buf == nil {
+		w.buf = fileWindowBuffers.Get().(*[fileWindowSize]byte)
+	}
 	n, err := w.r.ReadAt(w.buf[:want+spare], off)
 	w.off, w.valid = off, n
 	n = copy(p, w.buf[:n])
@@ -132,23 +143,12 @@ func NewFromReaderAt(r io.ReaderAt, size int64) (*Capture, error) {
 // scans may read ahead. Breaking the loop stops iteration. A read or parse error is
 // yielded once, after any preceding complete records.
 func (c *Capture) PacketSeqFromReaderAt(r io.ReaderAt) iter.Seq2[PacketRecord, error] {
-	return func(yield func(PacketRecord, error) bool) {
-		if err := c.validateContainer(); err != nil {
-			yield(PacketRecord{}, err)
-			return
-		}
-		source := r
-		if w := fileWindow(r, c.fileSize, c.fileSize); w != nil {
-			defer w.release()
-			source = w
-		}
-		c.packetRecords(source)(yield)
-	}
+	return c.packetRecords(r, true)
 }
 
-func (c *Capture) packetRecords(r io.ReaderAt) iter.Seq2[PacketRecord, error] {
+func (c *Capture) packetRecords(r io.ReaderAt, prefetch bool) iter.Seq2[PacketRecord, error] {
 	return func(yield func(PacketRecord, error) bool) {
-		err := c.walkPacketsFromReaderAt(r, func(pkt PacketRecord) error {
+		err := c.walkPacketsFromReaderAt(r, prefetch, func(pkt PacketRecord) error {
 			if !yield(pkt, nil) {
 				return errStopWalk
 			}
@@ -163,24 +163,31 @@ func (c *Capture) packetRecords(r io.ReaderAt) iter.Seq2[PacketRecord, error] {
 // PacketsFromReaderAt collects the records from [Capture.PacketSeqFromReaderAt].
 func (c *Capture) PacketsFromReaderAt(r io.ReaderAt) ([]PacketRecord, error) {
 	var packets []PacketRecord
-	for pkt, err := range c.PacketSeqFromReaderAt(r) {
-		if err != nil {
-			return nil, err
-		}
+	err := c.walkPacketsFromReaderAt(r, true, func(pkt PacketRecord) error {
 		if packets == nil && c.PacketCount > 0 {
 			packets = make([]PacketRecord, 0, min(c.PacketCount, MaxPackets))
 		}
 		packets = append(packets, pkt)
+		return nil
+	})
+	if err != nil {
+		return nil, err
 	}
 	return packets, nil
 }
 
-func (c *Capture) walkPacketsFromReaderAt(r io.ReaderAt, cb func(PacketRecord) error) error {
+func (c *Capture) walkPacketsFromReaderAt(r io.ReaderAt, prefetch bool, cb func(PacketRecord) error) error {
 	if err := c.validateContainer(); err != nil {
 		return err
 	}
 	if r == nil {
 		return fmt.Errorf("%w: nil ReaderAt", ErrInvalidHeader)
+	}
+	if prefetch {
+		if w := fileWindow(r, c.fileSize, c.fileSize); w != nil {
+			defer w.release()
+			r = w
+		}
 	}
 	if c.Format == FormatPCAP {
 		order := binary.ByteOrder(binary.LittleEndian)
@@ -244,7 +251,7 @@ func (c *Capture) FlowsFromReaderAt(r io.ReaderAt) ([]FlowSummary, error) {
 	var header [256]byte
 	var scratch []byte
 	budget := scanReadBudget{r: r, remaining: MaxReaderAtScanBytes}
-	for pkt, err := range c.packetRecords(r) {
+	for pkt, err := range c.packetRecords(r, false) {
 		if err != nil {
 			return nil, err
 		}
@@ -494,7 +501,7 @@ func (s ipFrameSource) walkReaderAt(visit func(PacketRecord, Frame, []byte) erro
 	var header [256]byte
 	var scratch []byte
 	budget := scanReadBudget{r: s.reader, remaining: MaxReaderAtScanBytes}
-	return s.capture.walkPacketsFromReaderAt(&budget, func(pkt PacketRecord) error {
+	return s.capture.walkPacketsFromReaderAt(&budget, false, func(pkt PacketRecord) error {
 		n := min(pkt.PayloadLength, int64(len(header)))
 		if n == 0 {
 			return nil

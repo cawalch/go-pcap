@@ -682,13 +682,14 @@ func TestFileWindow(t *testing.T) {
 			t.Fatalf("read at %d length %d: n=%d err=%v, calls=%d bytes=%d", off, length, n, err, r.calls, r.bytesRead)
 		}
 	}
-	check(0, 1, 1, fileWindowSize, nil)
-	check(100, 3, 1, fileWindowSize, nil)
+	check(0, 1, 1, 1, nil)
+	check(0, 1, 2, fileWindowSize+1, nil)
+	check(100, 3, 2, fileWindowSize+1, nil)
 	// Eight speculative bytes remain. Cross the window boundary, then seek back.
-	check(fileWindowSize-2, 5, 2, fileWindowSize+11, nil)
-	check(fileWindowSize, 11, 2, fileWindowSize+11, nil)
-	check(0, 1, 3, fileWindowSize+12, nil)
-	check(extent-2, 5, 4, fileWindowSize+14, io.EOF)
+	check(fileWindowSize-2, 5, 3, fileWindowSize+12, nil)
+	check(fileWindowSize, 11, 3, fileWindowSize+12, nil)
+	check(0, 1, 4, fileWindowSize+13, nil)
+	check(extent-2, 5, 5, fileWindowSize+15, io.EOF)
 }
 
 func TestFileReaderAtParity(t *testing.T) {
@@ -726,7 +727,11 @@ func TestFileReaderAtParity(t *testing.T) {
 			count++
 			break
 		}
-		if count != 1 || r.calls != 1 || r.bytesRead != fileWindowSize {
+		wantCalls, wantBytes := int64(1), int64(pcapPacketHeaderSize)
+		if got.Format == FormatPCAPNG {
+			wantCalls, wantBytes = 2, 12+fileWindowSize
+		}
+		if count != 1 || r.calls != wantCalls || r.bytesRead != wantBytes {
 			t.Fatalf("early stop: records=%d calls=%d bytes=%d", count, r.calls, r.bytesRead)
 		}
 	}
@@ -757,6 +762,9 @@ func TestFilePrefetchPartialRead(t *testing.T) {
 	w := fileWindow(r, 100, 100)
 	defer w.release()
 	var buf [8]byte
+	if err := readExactAt(w, buf[:1], 0, 100); err != nil {
+		t.Fatal(err)
+	}
 	if n, err := w.ReadAt(buf[:2], 0); n != 2 || err != nil || !bytes.Equal(buf[:2], data[:2]) {
 		t.Fatalf("valid prefix: %d, %v", n, err)
 	}
