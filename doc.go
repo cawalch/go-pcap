@@ -80,7 +80,8 @@
 //
 // Use [ParseSMB2Message], [ParseNTLMSSP], [Capture.SMB], [ParseKRB5],
 // [Capture.Kerberos], [ParseRDPNegotiation], and [Capture.RDP] to decode
-// SMB2/3 Negotiate and Session Setup packets, NTLMSSP challenge/authenticate
+// SMB2 share and CREATE names, SMB3 transform headers, SMB dialect and signing
+// metadata, NTLMSSP challenge/authenticate
 // tokens, Kerberos v5 AS-REQ/TGS-REQ/KRB-ERROR messages (including RC4-HMAC
 // encryption type detection), and RDP TPKT/X.224 connection negotiation PDUs.
 //

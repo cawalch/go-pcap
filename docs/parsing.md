@@ -328,6 +328,21 @@ signing flags, message/session IDs) and embedded NTLMSSP Type 1, Type 2, and
 Type 3 tokens (server challenge, target/domain/user/workstation strings, and
 NetBIOS/DNS computer and domain names from target info attribute-value pairs).
 
+For a `TREE_CONNECT` request, `Message.ShareName` gives the full UNC path.
+For a `CREATE` request, `Message.FileName` gives the wire name, including a
+named pipe such as `srvsvc` on an IPC share. An empty CREATE name opens the
+share root. Synchronous headers expose `TreeID`. To associate a CREATE with
+a share, match the TREE_CONNECT request to its response by message ID, then
+use the response tree ID within the same session and connection.
+
+Both names are length-delimited UTF-16LE. The direct parser returns
+`ErrInvalidSMB` for incomplete frames or invalid name spans and `ErrSMBLimit`
+for names exceeding 4,096 input bytes. It returns the first command from a
+compound packet. Capture scans emit each readable compound command and skip
+malformed commands. When `Message.IsEncrypted` is true, `SessionID` and
+`OriginalMessageSize` are observations from the 52-byte SMB3 transform
+header. The ciphertext stays opaque.
+
 Call `ParseKRB5(buf)` or `capture.Kerberos(data)` to decode ASN.1 DER Kerberos
 v5 `AS-REQ`, `AS-REP`, `TGS-REQ`, `TGS-REP`, and `KRB-ERROR` messages over UDP
 and TCP port 88, including client/service principal names, realm, requested
