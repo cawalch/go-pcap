@@ -370,7 +370,6 @@ func DecryptTLS12Records(
 	}
 
 	var seqNum uint64
-	var seenCCS bool
 	var appBuf bytes.Buffer
 	offset := 0
 	for offset+5 <= len(stream) {
@@ -384,14 +383,10 @@ func DecryptTLS12Records(
 		offset += 5 + recLen
 
 		if contentType == TLSRecordChangeCipherSpec {
-			seenCCS = true
 			seqNum = 0
 			continue
 		}
-		if contentType != TLSRecordApplicationData && contentType != TLSRecordHandshake && (!seenCCS || contentType != TLSRecordAlert) {
-			continue
-		}
-		if !seenCCS && contentType == TLSRecordHandshake {
+		if contentType != TLSRecordApplicationData && contentType != TLSRecordHandshake && contentType != TLSRecordAlert {
 			continue
 		}
 		// TLS 1.2 AES-GCM record payload: 8-byte explicit nonce + ciphertext + 16-byte tag.

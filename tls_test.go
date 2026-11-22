@@ -373,7 +373,7 @@ func TestTLS12OfflineStreamDecryptionViaClientRandom(t *testing.T) {
 	_ = err
 	// Encrypt using DecryptTLS12Records' exact inverse.
 	plainHTTP := []byte("GET /tls12 HTTP/1.1\r\nHost: legacy.example.com\r\n\r\n")
-	encRec := encryptTLS12AppDataRecord(t, clientWriteKey, clientSalt, 0, plainHTTP)
+	encRec := encryptTLS12Record(t, TLSRecordApplicationData, clientWriteKey, clientSalt, 0, plainHTTP)
 
 	clientStream := append(bytes.Clone(chRec), encRec...)
 	dec, err := DecryptTLS12Records(clientStream, TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256, masterSecret, clientRandom, serverRandom, true)
@@ -398,7 +398,7 @@ func TestTLS12OfflineStreamDecryptionViaClientRandom(t *testing.T) {
 	}
 }
 
-func encryptTLS12AppDataRecord(t *testing.T, writeKey []byte, salt []byte, seqNum uint64, plaintext []byte) []byte {
+func encryptTLS12Record(t *testing.T, recordType byte, writeKey []byte, salt []byte, seqNum uint64, plaintext []byte) []byte {
 	t.Helper()
 	// Derive AES-GCM directly via stdlib helper in tls_decrypt.go.
 	explicitNonce := []byte{0, 0, 0, 0, 0, 0, 0, 1}
@@ -408,14 +408,14 @@ func encryptTLS12AppDataRecord(t *testing.T, writeKey []byte, salt []byte, seqNu
 
 	var aad [13]byte
 	binary.BigEndian.PutUint64(aad[0:8], seqNum)
-	aad[8] = TLSRecordApplicationData
+	aad[8] = recordType
 	binary.BigEndian.PutUint16(aad[9:11], TLSVersion12)
 	binary.BigEndian.PutUint16(aad[11:13], uint16(len(plaintext)))
 
 	// Re-use aes.NewCipher + cipher.NewGCM through a tiny local wrapper.
 	ciphertext := sealAESGCMTest(t, writeKey, nonce[:], plaintext, aad[:])
 	recLen := uint16(len(explicitNonce) + len(ciphertext))
-	hdr := []byte{TLSRecordApplicationData, 0x03, 0x03, byte(recLen >> 8), byte(recLen)}
+	hdr := []byte{recordType, 0x03, 0x03, byte(recLen >> 8), byte(recLen)}
 	out := append(hdr, explicitNonce...)
 	return append(out, ciphertext...)
 }
@@ -457,7 +457,7 @@ func TestTLSDecryptEdgeCasesAndServerFirstOrder(t *testing.T) {
 	alertCipher := sealAESGCMTest(t, cKey, alertNonce[:], alertPlain, alertAAD[:])
 	alertRecLen := uint16(8 + len(alertCipher))
 	alertRec := append([]byte{TLSRecordAlert, 0x03, 0x03, byte(alertRecLen >> 8), byte(alertRecLen), 0, 0, 0, 0, 0, 0, 0, 0}, alertCipher...)
-	appRec := encryptTLS12AppDataRecord(t, cKey, cSalt, 1, []byte("after-alert"))
+	appRec := encryptTLS12Record(t, TLSRecordApplicationData, cKey, cSalt, 1, []byte("after-alert"))
 
 	stream12 := append(append(ccs, alertRec...), appRec...)
 	dec12, err := DecryptTLS12Records(stream12, TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256, masterSecret, clientRandom, serverRandom, true)
@@ -465,6 +465,11 @@ func TestTLSDecryptEdgeCasesAndServerFirstOrder(t *testing.T) {
 		t.Fatalf("DecryptTLS12Records(CCS+Alert+AppData) = (%q, %v), want %q", dec12, err, "after-alert")
 	}
 
+	finished := encryptTLS12Record(t, TLSRecordHandshake, cKey, cSalt, 0, []byte{20, 0, 0, 12, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12})
+	dec12, err = DecryptTLS12Records(append(finished, appRec...), TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256, masterSecret, clientRandom, serverRandom, true)
+	if err != nil || string(dec12) != "after-alert" {
+		t.Fatalf("capture starting at Finished: %q, %v", dec12, err)
+	}
 	// 3. TLS 1.3 undecryptable 0-RTT record before Handshake record must not flip inAppPhase prematurely.
 	hsSecret := bytes.Repeat([]byte{0x11}, 32)
 	appSecret := bytes.Repeat([]byte{0x22}, 32)
