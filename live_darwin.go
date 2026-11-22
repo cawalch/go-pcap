@@ -4,6 +4,9 @@ package pcap
 
 import (
 	"fmt"
+	"io"
+	"os"
+	"runtime"
 	"sync"
 	"syscall"
 	"unsafe"
@@ -12,9 +15,10 @@ import (
 // LiveCapture reads live packets from an OS network interface using standard
 // library syscalls (/dev/bpf* on macOS).
 type LiveCapture struct {
-	statsMu   sync.Mutex // serializes Stats and Close
+	statsMu   sync.Mutex // serializes Stats accumulation and closed state
 	stats     LiveStats
-	fd        int
+	closed    bool
+	file      *os.File
 	ifaceName string
 	linkType  LinkType
 	snapLen   uint32
@@ -35,16 +39,20 @@ func OpenLive(ifaceName string, opts LiveOptions) (*LiveCapture, error) {
 	if ifaceName == "" {
 		return nil, fmt.Errorf("%w: empty interface name", ErrInvalidHeader)
 	}
+	if len(ifaceName) >= syscall.IFNAMSIZ {
+		return nil, fmt.Errorf("%w: interface name %q exceeds %d bytes", ErrInvalidHeader, ifaceName, syscall.IFNAMSIZ-1)
+	}
 	normOpts, err := opts.normalize()
 	if err != nil {
 		return nil, err
 	}
 
 	fd := -1
+	var dev string
 	var openErr error
 	for i := range 256 {
-		dev := fmt.Sprintf("/dev/bpf%d", i)
-		fd, openErr = syscall.Open(dev, syscall.O_RDONLY, 0)
+		dev = fmt.Sprintf("/dev/bpf%d", i)
+		fd, openErr = syscall.Open(dev, syscall.O_RDONLY|syscall.O_CLOEXEC, 0)
 		if openErr == nil {
 			break
 		}
@@ -56,7 +64,7 @@ func OpenLive(ifaceName string, opts LiveOptions) (*LiveCapture, error) {
 		return nil, fmt.Errorf("opening /dev/bpf device: %w", openErr)
 	}
 
-	bufLen := normOpts.BufferSize
+	bufLen := uint32(normOpts.BufferSize)
 	_, _, errno := syscall.Syscall(syscall.SYS_IOCTL, uintptr(fd), syscall.BIOCSBLEN, uintptr(unsafe.Pointer(&bufLen)))
 	if errno != 0 {
 		_ = syscall.Close(fd)
@@ -112,15 +120,16 @@ func OpenLive(ifaceName string, opts LiveOptions) (*LiveCapture, error) {
 			Insns: &insns[0],
 		}
 		_, _, errno = syscall.Syscall(syscall.SYS_IOCTL, uintptr(fd), syscall.BIOCSETF, uintptr(unsafe.Pointer(&prog)))
+		runtime.KeepAlive(insns)
 		if errno != 0 {
 			_ = syscall.Close(fd)
 			return nil, fmt.Errorf("ioctl BIOCSETF: %w", errno)
 		}
 	}
 
-	var actualBufLen int
+	var actualBufLen uint32
 	_, _, errno = syscall.Syscall(syscall.SYS_IOCTL, uintptr(fd), syscall.BIOCGBLEN, uintptr(unsafe.Pointer(&actualBufLen)))
-	if errno != 0 || actualBufLen <= 0 {
+	if errno != 0 || actualBufLen == 0 {
 		actualBufLen = bufLen
 	}
 
@@ -130,8 +139,13 @@ func OpenLive(ifaceName string, opts LiveOptions) (*LiveCapture, error) {
 		dlt = uint32(LinkTypeEthernet)
 	}
 
+	if err := syscall.SetNonblock(fd, true); err != nil {
+		_ = syscall.Close(fd)
+		return nil, fmt.Errorf("setting non-blocking mode on %s: %w", dev, err)
+	}
+
 	return &LiveCapture{
-		fd:        fd,
+		file:      os.NewFile(uintptr(fd), dev),
 		ifaceName: ifaceName,
 		linkType:  LinkType(dlt & 0xffff),
 		snapLen:   normOpts.SnapLen,
@@ -169,16 +183,16 @@ func (lc *LiveCapture) SnapLen() uint32 {
 // byte slice aliases the LiveCapture's internal read buffer and remains valid
 // until the next call to ReadPacket.
 func (lc *LiveCapture) ReadPacket() (PacketRecord, []byte, error) {
-	if lc == nil || lc.fd < 0 {
+	if lc == nil || lc.file == nil || len(lc.buf) == 0 {
 		return PacketRecord{}, nil, ErrInvalidHeader
 	}
 	for lc.queueIdx >= len(lc.queued) {
-		n, err := syscall.Read(lc.fd, lc.buf)
+		n, err := lc.file.Read(lc.buf)
 		if err != nil {
 			return PacketRecord{}, nil, err
 		}
 		if n == 0 {
-			continue
+			return PacketRecord{}, nil, io.EOF
 		}
 		records, err := ParseBPFBuffer(lc.buf[:n], lc.linkType)
 		if err != nil {
@@ -200,9 +214,9 @@ func (lc *LiveCapture) ReadPacket() (PacketRecord, []byte, error) {
 	return rec, payload, nil
 }
 
-func (lc *LiveCapture) statsDelta() (LiveStats, error) {
+func (lc *LiveCapture) statsDelta(fd int) (LiveStats, error) {
 	var raw syscall.BpfStat
-	_, _, errno := syscall.Syscall(syscall.SYS_IOCTL, uintptr(lc.fd), syscall.BIOCGSTATS, uintptr(unsafe.Pointer(&raw)))
+	_, _, errno := syscall.Syscall(syscall.SYS_IOCTL, uintptr(fd), syscall.BIOCGSTATS, uintptr(unsafe.Pointer(&raw)))
 	if errno != 0 {
 		return LiveStats{}, errno
 	}

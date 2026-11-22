@@ -53,6 +53,17 @@ func TestLiveCaptureBounds(t *testing.T) {
 	if _, err := OpenLive("lo0", LiveOptions{SnapLen: MaxSnapLen + 1}); !errors.Is(err, ErrInvalidHeader) {
 		t.Fatalf("OpenLive(oversize snaplen) err = %v, want ErrInvalidHeader", err)
 	}
+	if _, err := OpenLive("lo0", LiveOptions{BufferSize: MaxSnapLen + 1}); !errors.Is(err, ErrInvalidHeader) {
+		t.Fatalf("OpenLive(oversize buffer) err = %v, want ErrInvalidHeader", err)
+	}
+	// Zero-value LiveCapture must reject ReadPacket and no-op Close without touching fd 0.
+	var zero LiveCapture
+	if _, _, err := zero.ReadPacket(); !errors.Is(err, ErrInvalidHeader) {
+		t.Fatalf("zero LiveCapture.ReadPacket() err = %v, want ErrInvalidHeader", err)
+	}
+	if err := zero.Close(); err != nil {
+		t.Fatalf("zero LiveCapture.Close() err = %v, want nil", err)
+	}
 }
 
 func TestBPFFilterBuildersAndEvalBPF(t *testing.T) {
@@ -101,5 +112,22 @@ func TestBPFFilterBuildersAndEvalBPF(t *testing.T) {
 	}
 	if _, ok := EvalBPF(divZero, tcp443); ok {
 		t.Fatal("EvalBPF(divZero) should fail safely")
+	}
+
+	// 6. EvalBPF supports BPF_MOD (0x90) and rejects modulo by zero.
+	modProg := []BPFInstruction{
+		{Code: bpfClassLD | bpfModeIMM, K: 10},
+		{Code: bpfClassALU | 0x90 | bpfSrcK, K: 6},
+		{Code: bpfClassRET | bpfRetA},
+	}
+	if snap, ok := EvalBPF(modProg, tcp443); !ok || snap != 4 {
+		t.Fatalf("EvalBPF(10 %% 6) = (%d, %v), want (4, true)", snap, ok)
+	}
+	modZero := []BPFInstruction{
+		{Code: bpfClassALU | 0x90 | bpfSrcK, K: 0},
+		{Code: bpfClassRET | bpfSrcK, K: 65535},
+	}
+	if _, ok := EvalBPF(modZero, tcp443); ok {
+		t.Fatal("EvalBPF(modZero) should fail safely")
 	}
 }
