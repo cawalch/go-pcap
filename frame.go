@@ -112,11 +112,10 @@ func DecodeFrame(data []byte, linkType LinkType) (Frame, error) {
 	var offset int64
 	switch linkType {
 	case LinkTypeEthernet:
-		if r.Size() < 14 {
+		if len(data) < 14 {
 			return Frame{}, fmt.Errorf("%w: Ethernet header shorter than 14 bytes", ErrInvalidFrame)
 		}
-		etherType, _ := r.ReadUint16BE(12)
-		f.EtherType = etherType
+		f.EtherType = binary.BigEndian.Uint16(data[12:14])
 		f.pushLayer(LayerEthernet, 0, 14)
 		offset = 14
 
@@ -290,7 +289,8 @@ func decodeIPv4(r *SafeReader, offset int64, f *Frame) {
 		f.Anomalies.TruncatedLayer = true
 		return
 	}
-	vihl := r.data[offset]
+	ip := r.data[offset : offset+20]
+	vihl := ip[0]
 	ver := vihl >> 4
 	ihl := int64(vihl&0x0f) * 4
 	if ver != 4 || ihl < 20 {
@@ -302,8 +302,7 @@ func decodeIPv4(r *SafeReader, offset int64, f *Frame) {
 		return
 	}
 
-	totalLenU16, _ := r.ReadUint16BE(offset + 2)
-	totalLen := int64(totalLenU16)
+	totalLen := int64(binary.BigEndian.Uint16(ip[2:4]))
 	if totalLen < ihl {
 		f.Anomalies.InvalidIPHeaderLength = true
 		return
@@ -315,8 +314,8 @@ func decodeIPv4(r *SafeReader, offset int64, f *Frame) {
 		f.Anomalies.IPTotalLengthExceedsFrame = true
 	}
 
-	ipID, _ := r.ReadUint16BE(offset + 4)
-	fragWord, _ := r.ReadUint16BE(offset + 6)
+	ipID := binary.BigEndian.Uint16(ip[4:6])
+	fragWord := binary.BigEndian.Uint16(ip[6:8])
 	moreFragments := (fragWord & 0x2000) != 0
 	fragOffset := (fragWord & 0x1fff) * 8
 
@@ -324,10 +323,10 @@ func decodeIPv4(r *SafeReader, offset int64, f *Frame) {
 	f.IPID = uint32(ipID)
 	f.IPFragOffset = fragOffset
 	f.IPMoreFragments = moreFragments
-	f.TTL = r.data[offset+8]
-	f.IPProtocol = r.data[offset+9]
-	f.SrcAddr = netip.AddrFrom4([4]byte(r.data[offset+12 : offset+16]))
-	f.DstAddr = netip.AddrFrom4([4]byte(r.data[offset+16 : offset+20]))
+	f.TTL = ip[8]
+	f.IPProtocol = ip[9]
+	f.SrcAddr = netip.AddrFrom4([4]byte(ip[12:16]))
+	f.DstAddr = netip.AddrFrom4([4]byte(ip[16:20]))
 	f.pushLayer(LayerIPv4, offset, ihl)
 
 	l4Offset := offset + ihl
@@ -448,13 +447,14 @@ func decodeTransport(r *SafeReader, offset, ipBound int64, proto uint8, f *Frame
 			f.Anomalies.TruncatedLayer = true
 			return
 		}
-		f.SrcPort = binary.BigEndian.Uint16(r.data[offset : offset+2])
-		f.DstPort = binary.BigEndian.Uint16(r.data[offset+2 : offset+4])
-		f.TCPSeq = binary.BigEndian.Uint32(r.data[offset+4 : offset+8])
-		f.TCPAck = binary.BigEndian.Uint32(r.data[offset+8 : offset+12])
-		dataOff := int64(r.data[offset+12]>>4) * 4
-		f.TCPFlags = r.data[offset+13]
-		f.TCPWindow = binary.BigEndian.Uint16(r.data[offset+14 : offset+16])
+		tcp := r.data[offset : offset+20]
+		f.SrcPort = binary.BigEndian.Uint16(tcp[0:2])
+		f.DstPort = binary.BigEndian.Uint16(tcp[2:4])
+		f.TCPSeq = binary.BigEndian.Uint32(tcp[4:8])
+		f.TCPAck = binary.BigEndian.Uint32(tcp[8:12])
+		dataOff := int64(tcp[12]>>4) * 4
+		f.TCPFlags = tcp[13]
+		f.TCPWindow = binary.BigEndian.Uint16(tcp[14:16])
 		if dataOff < 20 {
 			f.Anomalies.InvalidTCPDataOffset = true
 			return
