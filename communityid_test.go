@@ -49,7 +49,7 @@ func TestCommunityID(t *testing.T) {
 		frames := [][]byte{communityIDFrame(tc.proto, src, dst, tc.sport, tc.dport), communityIDFrame(tc.proto, dst, src, tc.dport, tc.sport)}
 		for range 2 {
 			for _, raw := range [][]byte{buildClassicPCAP(binary.LittleEndian, false, LinkTypeEthernet, 65535, frames), buildPCAPNGFixture(binary.BigEndian, nil, frames)} {
-				for _, f := range communityIDFlowPair(t, raw) {
+				for _, f := range singleFlowBothReaders(t, raw) {
 					for seed, want := range tc.want {
 						if got := f.CommunityID(uint16(seed)); got != want {
 							t.Fatalf("%+v seed %d: got %q, want %q", f, seed, got, want)
@@ -62,7 +62,7 @@ func TestCommunityID(t *testing.T) {
 	}
 }
 
-func communityIDFlowPair(t *testing.T, raw []byte) [2]FlowSummary {
+func singleFlowBothReaders(t *testing.T, raw []byte) [2]FlowSummary {
 	t.Helper()
 	c, err := New(raw)
 	if err != nil {
@@ -94,7 +94,7 @@ func TestCommunityIDIncomplete(t *testing.T) {
 	full := communityIDFrame(IPProtoUDP, addr, addr, 0, 0)
 	for i, frames := range [][][]byte{{full[:34]}, {full[:34], full}, {full, full[:34]}} {
 		raw := buildClassicPCAP(binary.LittleEndian, false, LinkTypeEthernet, 65535, frames)
-		for _, f := range communityIDFlowPair(t, raw) {
+		for _, f := range singleFlowBothReaders(t, raw) {
 			if got := f.CommunityID(0); (got == "") != (i == 0) {
 				t.Fatalf("case %d: %q", i, got)
 			}

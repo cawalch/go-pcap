@@ -613,6 +613,13 @@ func decodeInnerEthernet(r *SafeReader, offset int64, f *Frame) {
 	dispatchEtherType(r, cur, f)
 }
 
+// TCPTimestamp holds the raw timestamp option from one observed TCP segment.
+type TCPTimestamp struct {
+	TSval   uint32 // Timestamp value sent by this endpoint.
+	TSecr   uint32 // Timestamp echo reply sent by this endpoint.
+	Present bool   // True even when both observed values are zero.
+}
+
 // FlowSummary aggregates bidirectional packet, byte, flag, JA4T, JA4L, and
 // process metadata for a 5-tuple network flow.
 type FlowSummary struct {
@@ -631,15 +638,19 @@ type FlowSummary struct {
 	TCPFlags         uint8
 	ClientJA4T       string
 	ServerJA4TS      string
-	ClientJA4L       string
-	ServerJA4L       string
-	ProcessID        uint32
-	UserID           uint32
-	ProcessName      string
-	ProcessArgs      string
-	ContainerID      string
-	HasProcessID     bool
-	HasUserID        bool
+	// SYNTimestamp is the first valid timestamp observed on a SYN without ACK.
+	SYNTimestamp TCPTimestamp
+	// SYNACKTimestamp is the first valid timestamp observed on a SYN with ACK.
+	SYNACKTimestamp TCPTimestamp
+	ClientJA4L      string
+	ServerJA4L      string
+	ProcessID       uint32
+	UserID          uint32
+	ProcessName     string
+	ProcessArgs     string
+	ContainerID     string
+	HasProcessID    bool
+	HasUserID       bool
 	// PortsUnavailable reports that no packet in the summary supplied transport ports.
 	PortsUnavailable bool
 	Anomalies        FrameAnomalies
@@ -806,6 +817,9 @@ func (c *Capture) Flows(data []byte) ([]FlowSummary, error) {
 		if flow.ContainerID == "" && pkt.ContainerID != "" {
 			flow.ContainerID = pkt.ContainerID
 		}
+		if frame.TCPFlags&TCPFlagSYN != 0 && frame.TCPOptionsLength != 0 {
+			flow.observeTCPTimestamp(&frame, payload)
+		}
 		flow.TCPFlags |= frame.TCPFlags
 		flow.Anomalies = mergeFrameAnomalies(flow.Anomalies, frame.Anomalies)
 
@@ -863,4 +877,41 @@ func mergeFrameAnomalies(a, b FrameAnomalies) FrameAnomalies {
 		MPLSDepthExceeded:         a.MPLSDepthExceeded || b.MPLSDepthExceeded,
 		IPv6ExtLimitExceeded:      a.IPv6ExtLimitExceeded || b.IPv6ExtLimitExceeded,
 	}
+}
+
+// observeTCPTimestamp selects by handshake flags even when a SYN-ACK was
+// captured first. Keep a candidate local until the option list is validated.
+func (flow *FlowSummary) observeTCPTimestamp(frame *Frame, data []byte) {
+	dst := &flow.SYNTimestamp
+	if frame.TCPFlags&TCPFlagACK != 0 {
+		dst = &flow.SYNACKTimestamp
+	}
+	end := uint64(frame.TCPOptionsOffset) + uint64(frame.TCPOptionsLength)
+	if dst.Present || frame.TCPOptionsLength > 40 || end > uint64(len(data)) {
+		return
+	}
+	var ts TCPTimestamp
+	options := data[frame.TCPOptionsOffset:end]
+	for len(options) > 0 && options[0] != tcpOptKindEOL {
+		if options[0] == tcpOptKindNOP {
+			options = options[1:]
+			continue
+		}
+		if len(options) < 2 || options[1] < 2 || int(options[1]) > len(options) {
+			return
+		}
+		n := int(options[1])
+		if options[0] == 8 { // TCP Timestamps option
+			if n != 10 || ts.Present {
+				return
+			}
+			ts = TCPTimestamp{
+				TSval:   binary.BigEndian.Uint32(options[2:6]),
+				TSecr:   binary.BigEndian.Uint32(options[6:10]),
+				Present: true,
+			}
+		}
+		options = options[n:]
+	}
+	*dst = ts
 }

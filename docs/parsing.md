@@ -211,6 +211,20 @@ server (`DstAddr`, `DstPort`) direction; replies in the reverse direction
 increment `ServerPackets` and `ServerBytes`. For TCP flows, `Flows` records:
 
 - `ClientJA4T` and `ServerJA4TS` from the first client `SYN` and server `SYN-ACK`.
+- `SYNTimestamp` and `SYNACKTimestamp` hold the first observed timestamp option
+  for each handshake flag combination, in capture order. This also works when
+  the capture starts with a SYN-ACK. Check `Present` before reading the raw
+  `TSval` and `TSecr` values. Either value can be zero. A missing option, a
+  duplicate timestamp, or a malformed TLV boundary leaves that packet out of
+  consideration, so a retransmission can supply the first valid observation.
+  Both flow readers use the same selection. For example:
+
+  ```go
+  if ts := flow.SYNACKTimestamp; ts.Present {
+      fmt.Printf("server TSval=%d TSecr=%d\n", ts.TSval, ts.TSecr)
+  }
+  ```
+
 - `ServerJA4L` (`<half_syn_synack_rtt_us>_<server_ttl>`) and `ClientJA4L`
   (`<half_synack_ack_rtt_us>_<client_ttl>`) from the 3-way handshake timestamps
   and IP `TTL` / `HopLimit`.
