@@ -264,3 +264,92 @@ func TestReaderAtFlowParity(t *testing.T) {
 		}
 	}
 }
+
+func TestPCAPNGSectionInterfaces(t *testing.T) {
+	first := buildPCAPNGFixture(binary.LittleEndian, nil, [][]byte{{1, 2, 3}})
+	for _, order := range []binary.ByteOrder{binary.LittleEndian, binary.BigEndian} {
+		var section bytes.Buffer
+		shb := make([]byte, 16)
+		order.PutUint32(shb, PCAPNGByteOrderMagic)
+		order.PutUint16(shb[4:], 1)
+		order.PutUint64(shb[8:], ^uint64(0))
+		appendPCAPNGBlock(&section, order, BlockTypeSectionHeader, shb)
+		header := bytes.Clone(section.Bytes())
+		idb := make([]byte, 8)
+		order.PutUint16(idb, uint16(LinkTypeRaw))
+		order.PutUint32(idb[4:], 3)
+		appendPCAPNGBlock(&section, order, BlockTypeInterfaceDesc, idb)
+		epb := make([]byte, 24)
+		order.PutUint32(epb[8:], 2)
+		order.PutUint32(epb[12:], 3)
+		order.PutUint32(epb[16:], 3)
+		copy(epb[20:], []byte{4, 5, 6})
+		appendPCAPNGBlock(&section, order, BlockTypeEnhancedPacket, epb)
+		spb := make([]byte, 8)
+		order.PutUint32(spb, 10)
+		copy(spb[4:], []byte{7, 8, 9, 0})
+		appendPCAPNGBlock(&section, order, BlockTypeSimplePacket, spb)
+		isb := make([]byte, 12)
+		order.PutUint32(isb[8:], 3)
+		appendPCAPNGBlock(&section, order, BlockTypeInterfaceStats, isb)
+		raw := append(bytes.Clone(first), section.Bytes()...)
+		r := bytes.NewReader(raw)
+		c, err := New(raw)
+		if err != nil {
+			t.Fatal(err)
+		}
+		rc, err := NewFromReaderAt(r, int64(len(raw)))
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, cap := range []*Capture{c, rc} {
+			if len(cap.Interfaces) != 2 || len(cap.InterfaceStats) != 1 || cap.InterfaceStats[0].InterfaceID != 1 || cap.InterfaceStats[0].TimestampNs != 3000 {
+				t.Fatalf("section metadata: %+v", cap)
+			}
+		}
+		want, err := c.Packets(raw)
+		if err != nil {
+			t.Fatal(err)
+		}
+		got, err := rc.PacketsFromReaderAt(r)
+		if err != nil || !slices.Equal(want, got) || len(got) != 3 {
+			t.Fatalf("packet parity: %+v, %+v, %v", want, got, err)
+		}
+		if got[1].LinkType != LinkTypeRaw || got[1].TimestampNs != 2000 || got[1].InterfaceID != 1 || got[2].InterfaceID != 1 || got[2].LinkType != LinkTypeRaw || got[2].CaptureLen != 3 || got[2].OriginalLen != 10 {
+			t.Fatalf("section packets: %+v", got)
+		}
+		a, err := c.PacketPayload(raw, want[2])
+		if err != nil {
+			t.Fatal(err)
+		}
+		b, err := rc.PacketPayloadFromReaderAt(r, got[2])
+		if err != nil || !bytes.Equal(a, []byte{7, 8, 9}) || !bytes.Equal(a, b) {
+			t.Fatalf("SPB payload: %x, %x, %v", a, b, err)
+		}
+
+		for _, tc := range []struct {
+			kind uint32
+			body []byte
+		}{{BlockTypeEnhancedPacket, epb}, {BlockTypeSimplePacket, spb}, {BlockTypeInterfaceStats, isb}} {
+			var bad bytes.Buffer
+			bad.Write(first)
+			bad.Write(header)
+			appendPCAPNGBlock(&bad, order, tc.kind, tc.body)
+			if _, err := New(bad.Bytes()); !errors.Is(err, ErrInvalidPacket) {
+				t.Fatalf("section without interface: %v", err)
+			}
+			if _, err := NewFromReaderAt(bytes.NewReader(bad.Bytes()), int64(bad.Len())); !errors.Is(err, ErrInvalidPacket) {
+				t.Fatalf("ReaderAt section without interface: %v", err)
+			}
+		}
+		var bad bytes.Buffer
+		bad.Write(first)
+		appendPCAPNGBlock(&bad, binary.LittleEndian, BlockTypeSimplePacket, []byte{16, 0, 0, 0, 1, 2, 3, 4})
+		if _, err := New(bad.Bytes()); !errors.Is(err, ErrInvalidBlock) {
+			t.Fatalf("short SPB: %v", err)
+		}
+		if _, err := NewFromReaderAt(bytes.NewReader(bad.Bytes()), int64(bad.Len())); !errors.Is(err, ErrInvalidBlock) {
+			t.Fatalf("short ReaderAt SPB: %v", err)
+		}
+	}
+}

@@ -107,6 +107,9 @@ input ends before a declared packet record or PcapNG block finishes. Call
 - `InvalidTimestampResolution`: An interface declared an invalid `if_tsresol`
   option (such as a decimal exponent greater than 9).
 
+In PcapNG, each section defines its own interface table and byte order. Packet
+and statistics records expose the resolved index into `Capture.Interfaces`.
+
 ## Read packet records
 
 To stream packet records in file order without allocating a slice, use

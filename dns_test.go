@@ -5,6 +5,7 @@ import (
 	"encoding/binary"
 	"errors"
 	"net/netip"
+	"slices"
 	"strings"
 	"testing"
 )
@@ -181,5 +182,26 @@ func TestDNSLabelEntropyAndDomainStats(t *testing.T) {
 	st := stats[0]
 	if st.Domain != "example.com" || st.QueryCount != 1 || st.UniqueSubdomains != 1 || st.MaxLabelLength != 32 || st.TunnelScore < 0.5 {
 		t.Fatalf("DNSDomainStats[0] = %+v", st)
+	}
+}
+
+func TestDNSAnswerTXTStrings(t *testing.T) {
+	for _, bad := range []bool{false, true} {
+		// Response with one root-name TXT answer and two strings.
+		msg := []byte{0, 1, 0x81, 0x80, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 16, 0, 1, 0, 0, 0, 60, 0, 5, 2, 'a', 'b', 1, 'c'}
+		if bad {
+			msg[26] = 2
+		}
+		got, err := ParseDNS(msg)
+		if err != nil || len(got.Answers) != 1 {
+			t.Fatalf("TXT response: %+v, %v", got, err)
+		}
+		want := []string{"ab", "c"}
+		if bad {
+			want = want[:1]
+		}
+		if !slices.Equal(got.Answers[0].TXT, want) || got.Anomalies.InvalidRDataLength != bad {
+			t.Fatalf("TXT answer: %+v, anomalies %+v", got.Answers[0], got.Anomalies)
+		}
 	}
 }
