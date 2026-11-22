@@ -115,6 +115,7 @@ func FuzzReassembleTCP(f *testing.F) {
 
 func FuzzParseDNS(f *testing.F) {
 	f.Add(buildDNSQueryResponsePacket())
+	f.Add(testServiceDNS(DNSTypeHTTPS, testServiceParams()))
 
 	f.Fuzz(func(t *testing.T, data []byte) {
 		msg, err := ParseDNS(data)

@@ -257,6 +257,7 @@ const (
 	MaxDNSCompressionJumps = 16
 	MaxDNSNameBytes        = 255
 	MaxDNSTXTStrings       = 32
+	MaxDNSALPNProtocols    = 32 // Maximum ALPN identifiers per SVCB or HTTPS record.
 	MaxDNSMessagesPerScan  = 65_536
 
 	// TLS parser limits.
@@ -388,6 +389,7 @@ const (
 	DNSTypeAAAA  uint16 = 28
 	DNSTypeSRV   uint16 = 33
 	DNSTypeOPT   uint16 = 41
+	DNSTypeSVCB  uint16 = 64
 	DNSTypeHTTPS uint16 = 65
 )
 
