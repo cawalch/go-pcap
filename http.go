@@ -129,7 +129,7 @@ func ParseHTTPRequest(stream []byte) (HTTPRequest, int, error) {
 	req.CookieCount = len(cookieNames)
 	req.JA4H = computeJA4H(&req, hasCookie, hasReferer, acceptLang, cookieNames, cookiePairs)
 
-	body, bodyOff, bodyLen, consumed := extractHTTPBody(stream, bodyStart, contentLen, chunked)
+	body, bodyOff, bodyLen, consumed := extractHTTPBody(stream, bodyStart, contentLen, chunked, true)
 	req.Body = body
 	req.BodyOffset = bodyOff
 	req.BodyLength = bodyLen
@@ -183,7 +183,12 @@ func ParseHTTPResponse(stream []byte) (HTTPResponse, int, error) {
 		}
 	}
 
-	body, bodyOff, bodyLen, consumed := extractHTTPBody(stream, bodyStart, contentLen, chunked)
+	if (code >= 100 && code < 200) || code == 204 || code == 304 {
+		resp.BodyOffset = bodyStart
+		return resp, bodyStart, nil
+	}
+
+	body, bodyOff, bodyLen, consumed := extractHTTPBody(stream, bodyStart, contentLen, chunked, false)
 	resp.Body = body
 	resp.BodyOffset = bodyOff
 	resp.BodyLength = bodyLen
@@ -238,7 +243,7 @@ func parseHTTPHeaders(stream []byte, start int) (headers []HTTPHeader, bodyStart
 	return nil, 0, 0, false, fmt.Errorf("%w: missing end of HTTP headers", ErrInvalidHTTP)
 }
 
-func extractHTTPBody(stream []byte, bodyStart int, contentLen int, chunked bool) (body []byte, bodyOffset int, bodyLength int, consumed int) {
+func extractHTTPBody(stream []byte, bodyStart int, contentLen int, chunked bool, bodylessIfUnspecified bool) (body []byte, bodyOffset int, bodyLength int, consumed int) {
 	avail := len(stream) - bodyStart
 	if avail <= 0 {
 		return nil, bodyStart, 0, bodyStart
@@ -249,15 +254,15 @@ func extractHTTPBody(stream []byte, bodyStart int, contentLen int, chunked bool)
 		return decoded, bodyStart, len(decoded), bodyStart + rawConsumed
 	}
 
-	if contentLen == 0 {
+	if contentLen == 0 || (contentLen < 0 && bodylessIfUnspecified) {
 		return nil, bodyStart, 0, bodyStart
 	}
-	take := avail
-	if contentLen > 0 && contentLen < take {
-		take = contentLen
+	wireLen := avail
+	if contentLen > 0 && contentLen < wireLen {
+		wireLen = contentLen
 	}
-	take = min(take, MaxHTTPBodyBytes)
-	return bytes.Clone(stream[bodyStart : bodyStart+take]), bodyStart, take, bodyStart + take
+	take := min(wireLen, MaxHTTPBodyBytes)
+	return bytes.Clone(stream[bodyStart : bodyStart+take]), bodyStart, take, bodyStart + wireLen
 }
 
 func decodeChunkedBody(raw []byte) ([]byte, int) {
@@ -278,8 +283,17 @@ func decodeChunkedBody(raw []byte) ([]byte, int) {
 		}
 		offset += lineEnd + 2
 		if chunkSize == 0 {
-			if offset+2 <= len(raw) && raw[offset] == '\r' && raw[offset+1] == '\n' {
-				offset += 2
+			// Consume optional HTTP trailers up to the terminating empty line "\r\n".
+			for range MaxHTTPHeaders + 1 {
+				trEnd := bytes.Index(raw[offset:], []byte("\r\n"))
+				if trEnd < 0 {
+					offset = len(raw)
+					break
+				}
+				offset += trEnd + 2
+				if trEnd == 0 {
+					break
+				}
 			}
 			break
 		}
@@ -466,39 +480,47 @@ func (c *Capture) HTTP(data []byte) ([]HTTPRecord, error) {
 }
 
 func appendHTTPFromTCPStream(st *TCPStream, isDecrypted bool, records *[]HTTPRecord) error {
-	if len(st.Client.Data) > 0 {
-		if req, _, err := ParseHTTPRequest(st.Client.Data); err == nil {
-			if len(*records) >= MaxHTTPMessagesPerScan {
-				return fmt.Errorf("%w: exceeds %d HTTP messages", ErrHTTPLimit, MaxHTTPMessagesPerScan)
-			}
-			*records = append(*records, HTTPRecord{
-				FlowIndex:   st.FlowIndex,
-				SrcAddr:     st.SrcAddr,
-				DstAddr:     st.DstAddr,
-				SrcPort:     st.SrcPort,
-				DstPort:     st.DstPort,
-				IsResponse:  false,
-				IsDecrypted: isDecrypted,
-				Request:     req,
-			})
+	for off := 0; off < len(st.Client.Data); {
+		req, consumed, err := ParseHTTPRequest(st.Client.Data[off:])
+		if err != nil || consumed <= 0 {
+			break
 		}
+		if len(*records) >= MaxHTTPMessagesPerScan {
+			return fmt.Errorf("%w: exceeds %d HTTP messages", ErrHTTPLimit, MaxHTTPMessagesPerScan)
+		}
+		req.BodyOffset += off
+		*records = append(*records, HTTPRecord{
+			FlowIndex:   st.FlowIndex,
+			SrcAddr:     st.SrcAddr,
+			DstAddr:     st.DstAddr,
+			SrcPort:     st.SrcPort,
+			DstPort:     st.DstPort,
+			IsResponse:  false,
+			IsDecrypted: isDecrypted,
+			Request:     req,
+		})
+		off += consumed
 	}
-	if len(st.Server.Data) > 0 {
-		if resp, _, err := ParseHTTPResponse(st.Server.Data); err == nil {
-			if len(*records) >= MaxHTTPMessagesPerScan {
-				return fmt.Errorf("%w: exceeds %d HTTP messages", ErrHTTPLimit, MaxHTTPMessagesPerScan)
-			}
-			*records = append(*records, HTTPRecord{
-				FlowIndex:   st.FlowIndex,
-				SrcAddr:     st.DstAddr,
-				DstAddr:     st.SrcAddr,
-				SrcPort:     st.DstPort,
-				DstPort:     st.SrcPort,
-				IsResponse:  true,
-				IsDecrypted: isDecrypted,
-				Response:    resp,
-			})
+	for off := 0; off < len(st.Server.Data); {
+		resp, consumed, err := ParseHTTPResponse(st.Server.Data[off:])
+		if err != nil || consumed <= 0 {
+			break
 		}
+		if len(*records) >= MaxHTTPMessagesPerScan {
+			return fmt.Errorf("%w: exceeds %d HTTP messages", ErrHTTPLimit, MaxHTTPMessagesPerScan)
+		}
+		resp.BodyOffset += off
+		*records = append(*records, HTTPRecord{
+			FlowIndex:   st.FlowIndex,
+			SrcAddr:     st.DstAddr,
+			DstAddr:     st.SrcAddr,
+			SrcPort:     st.DstPort,
+			DstPort:     st.SrcPort,
+			IsResponse:  true,
+			IsDecrypted: isDecrypted,
+			Response:    resp,
+		})
+		off += consumed
 	}
 	return nil
 }
