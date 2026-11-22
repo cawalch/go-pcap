@@ -12,6 +12,8 @@ import (
 	"fmt"
 	"math/big"
 	"net/netip"
+	"os"
+	"slices"
 	"testing"
 	"time"
 )
@@ -263,5 +265,45 @@ func TestPCAPNGBinaryTimestampResolutionAndOffset(t *testing.T) {
 	wantNs := int64(1700000002)*1_000_000_000 + 500_000_000
 	if pkts[0].TimestampNs != wantNs {
 		t.Fatalf("PacketRecord.TimestampNs = %d, want %d", pkts[0].TimestampNs, wantNs)
+	}
+}
+
+// The datagrams are the protected packets in RFC 9001 and RFC 9369,
+// Appendix A.2 (client) and A.3 (server), including the original padding.
+func TestPublishedQUICInitialDatagrams(t *testing.T) {
+	for _, tc := range []struct {
+		rfc     string
+		version uint32
+	}{{"9001", QUICVersion1}, {"9369", QUICVersion2}} {
+		t.Run(tc.rfc, func(t *testing.T) {
+			var frames [][]byte
+			src, dst := [4]byte{192, 0, 2, 1}, [4]byte{192, 0, 2, 2}
+			client, server := uint16(54321), uint16(443)
+			for _, side := range []string{"client", "server"} {
+				wire, err := os.ReadFile("testdata/rfc" + tc.rfc + "-" + side + ".bin")
+				if err != nil {
+					t.Fatal(err)
+				}
+				frames = append(frames, buildEthernetIPv4UDPFrame(src, dst, client, server, wire))
+				src, dst = dst, src
+				client, server = server, client
+			}
+			raw := buildClassicPCAP(binary.LittleEndian, false, LinkTypeEthernet, 65535, frames)
+			c, err := New(raw)
+			if err != nil {
+				t.Fatal(err)
+			}
+			records, err := c.QUIC(raw)
+			if err != nil || len(records) != 1 {
+				t.Fatalf("QUIC records: %+v, %v", records, err)
+			}
+			hs := records[0].Handshake
+			if hs.Version != tc.version || !hs.HasClientHello || hs.ClientHello.SNI != "example.com" || !slices.Equal(hs.ClientHello.ALPNs, []string{"alpn"}) {
+				t.Fatalf("client: %+v", hs.ClientHello)
+			}
+			if !hs.HasServerHello || hs.ServerHello.CipherSuite != TLS_AES_128_GCM_SHA256 || hs.ServerHello.NegotiatedVersion != TLSVersion13 {
+				t.Fatalf("server: %+v", hs.ServerHello)
+			}
+		})
 	}
 }
