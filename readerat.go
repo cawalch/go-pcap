@@ -89,9 +89,8 @@ func (c *Capture) PacketPayloadFromReaderAt(r io.ReaderAt, pkt PacketRecord) ([]
 }
 
 // FlowsFromReaderAt aggregates deterministic 5-tuple flows from an [io.ReaderAt]
-// without loading the entire capture file into memory. It reads at most the
-// leading 256 bytes of each packet frame to decode L2–L4 headers under
-// [MaxReaderAtScanBytes].
+// using a 256-byte prefix for common transport headers. When the prefix is
+// insufficient it reads the remaining frame bytes under [MaxReaderAtScanBytes].
 func (c *Capture) FlowsFromReaderAt(r io.ReaderAt) ([]FlowSummary, error) {
 	packets, err := c.PacketsFromReaderAt(r)
 	if err != nil {
@@ -112,6 +111,7 @@ func (c *Capture) FlowsFromReaderAt(r io.ReaderAt) ([]FlowSummary, error) {
 	var flows []FlowSummary
 	var hsTimes []tcpHandshakeTime
 	var hdrBuf [256]byte
+	var scratch []byte
 	var totalRead int64
 
 	for i := range packets {
@@ -128,16 +128,28 @@ func (c *Capture) FlowsFromReaderAt(r io.ReaderAt) ([]FlowSummary, error) {
 		}
 		totalRead += readLen
 
-		frame, err := DecodeFrame(hdrBuf[:readLen], pkt.LinkType)
+		payload := hdrBuf[:readLen]
+		frame, err := DecodeFrame(payload, pkt.LinkType)
+		if readLen < pkt.PayloadLength && !completeFlowPrefix(&frame, payload, pkt.PayloadLength) {
+			tail := pkt.PayloadLength - readLen
+			if tail > MaxReaderAtScanBytes-totalRead {
+				return nil, fmt.Errorf("%w: ReaderAt scan exceeds %d bytes", ErrPacketLimit, MaxReaderAtScanBytes)
+			}
+			if int64(cap(scratch)) < pkt.PayloadLength {
+				scratch = make([]byte, pkt.PayloadLength)
+			}
+			payload = scratch[:pkt.PayloadLength]
+			copy(payload, hdrBuf[:])
+			if err := readExactAt(r, payload[readLen:], pkt.PayloadOffset+readLen, c.fileSize); err != nil {
+				return nil, err
+			}
+			totalRead += tail
+			frame, err = DecodeFrame(payload, pkt.LinkType)
+		}
 		if err != nil || frame.IPVersion == 0 {
 			continue
 		}
-		// Compute actual L4 payload length from full packet length when hdrBuf truncated the payload tail.
 		l4Len := uint64(frame.PayloadLength)
-		if pkt.PayloadLength > int64(frame.PayloadOffset) {
-			l4Len = uint64(pkt.PayloadLength - int64(frame.PayloadOffset))
-			frame.Anomalies.IPTotalLengthExceedsFrame = false
-		}
 
 		key, _ := makeCanonicalFlowKey(frame.IPProtocol, frame.SrcAddr, frame.SrcPort, frame.DstAddr, frame.DstPort)
 		idx, exists, err := table.lookupOrInsert(key)
@@ -198,7 +210,7 @@ func (c *Capture) FlowsFromReaderAt(r io.ReaderAt) ([]FlowSummary, error) {
 			flow.ClientBytes += l4Len
 			if (frame.TCPFlags & (TCPFlagSYN | TCPFlagACK)) == TCPFlagSYN {
 				if flow.ClientJA4T == "" {
-					if fp, ok := frame.JA4T(hdrBuf[:readLen]); ok {
+					if fp, ok := frame.JA4T(payload); ok {
 						flow.ClientJA4T = fp
 					}
 				}
@@ -215,7 +227,7 @@ func (c *Capture) FlowsFromReaderAt(r io.ReaderAt) ([]FlowSummary, error) {
 			flow.ServerBytes += l4Len
 			if (frame.TCPFlags & (TCPFlagSYN | TCPFlagACK)) == (TCPFlagSYN | TCPFlagACK) {
 				if flow.ServerJA4TS == "" {
-					if fp, ok := frame.JA4T(hdrBuf[:readLen]); ok {
+					if fp, ok := frame.JA4T(payload); ok {
 						flow.ServerJA4TS = fp
 					}
 				}
@@ -228,6 +240,42 @@ func (c *Capture) FlowsFromReaderAt(r io.ReaderAt) ([]FlowSummary, error) {
 		}
 	}
 	return flows, nil
+}
+
+// completeFlowPrefix accounts for the missing payload tail when the prefix
+// contains a complete, unencapsulated TCP or UDP header. An outer tunnel can
+// have an independent length anomaly, so decode those frames in full.
+func completeFlowPrefix(f *Frame, prefix []byte, captured int64) bool {
+	layers := f.LayerSlices()
+	if len(layers) < 2 {
+		return false
+	}
+	transport := layers[len(layers)-1].Proto
+	if transport != LayerTCP && (transport != LayerUDP || f.DstPort == 4789 || f.DstPort == 6081) {
+		return false
+	}
+	var end int64
+	for _, layer := range layers {
+		offset := int64(layer.Offset)
+		switch layer.Proto {
+		case LayerIPv4:
+			if end != 0 {
+				return false
+			}
+			end = offset + int64(binary.BigEndian.Uint16(prefix[offset+2:]))
+		case LayerIPv6:
+			if end != 0 {
+				return false
+			}
+			end = offset + 40 + int64(binary.BigEndian.Uint16(prefix[offset+4:]))
+		}
+	}
+	if end < int64(f.PayloadOffset) || f.PayloadOffset == 0 {
+		return false
+	}
+	f.Anomalies.IPTotalLengthExceedsFrame = end > captured
+	f.PayloadLength = uint32(min(end, captured) - int64(f.PayloadOffset))
+	return true
 }
 
 // DNSFromReaderAt extracts and parses DNS records from an [io.ReaderAt] under

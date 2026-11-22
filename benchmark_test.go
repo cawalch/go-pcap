@@ -1,7 +1,9 @@
 package pcap
 
 import (
+	"bytes"
 	"encoding/binary"
+	"fmt"
 	"testing"
 )
 
@@ -179,5 +181,36 @@ func BenchmarkComputeBeaconStats(b *testing.B) {
 	b.ReportAllocs()
 	for b.Loop() {
 		_ = ComputeBeaconStats(ts, sizes, 512, 512)
+	}
+}
+
+func BenchmarkReaderAtFlows(b *testing.B) {
+	for _, size := range []int{16, 1440} {
+		frame := buildEthernetIPv4TCPFrame([4]byte{10, 0, 0, 1}, [4]byte{10, 0, 0, 2}, 12345, 443, 1, 0, TCPFlagACK, make([]byte, size))
+		frames := make([][]byte, 512)
+		for i := range frames {
+			frames[i] = frame
+		}
+		for _, format := range []string{"PCAP", "PcapNG"} {
+			var raw []byte
+			if format == "PCAP" {
+				raw = buildClassicPCAP(binary.LittleEndian, false, LinkTypeEthernet, 65535, frames)
+			} else {
+				raw = buildPCAPNGFixture(binary.LittleEndian, nil, frames)
+			}
+			b.Run(fmt.Sprintf("%s/%d", format, size), func(b *testing.B) {
+				r := bytes.NewReader(raw)
+				c, err := NewFromReaderAt(r, int64(len(raw)))
+				if err != nil {
+					b.Fatal(err)
+				}
+				b.ReportAllocs()
+				for b.Loop() {
+					if _, err := c.FlowsFromReaderAt(r); err != nil {
+						b.Fatal(err)
+					}
+				}
+			})
+		}
 	}
 }

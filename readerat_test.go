@@ -5,6 +5,7 @@ import (
 	"encoding/binary"
 	"errors"
 	"net/netip"
+	"slices"
 	"testing"
 )
 
@@ -220,5 +221,46 @@ func TestReaderAtDissectorsParity(t *testing.T) {
 	quicRecs, err := cap.QUICFromReaderAt(ra)
 	if err != nil || len(quicRecs) != 1 || quicRecs[0].Handshake.ClientHello.SNI != "quic-readerat.example.com" {
 		t.Fatalf("QUICFromReaderAt() = (%+v, %v)", quicRecs, err)
+	}
+}
+
+func TestReaderAtFlowParity(t *testing.T) {
+	var frames [][]byte
+	for i, size := range []int{4, 16, 1440, 1440, 300} {
+		f := buildEthernetIPv4TCPFrame([4]byte{10, 0, 0, 1}, [4]byte{10, 0, 0, 2}, uint16(1024+i), 443, 1, 0, TCPFlagACK, make([]byte, size))
+		switch i {
+		case 0, 4:
+			f = append(f, make([]byte, 30)...)
+		case 1, 3:
+			f = f[:len(f)-8]
+		}
+		frames = append(frames, f)
+	}
+	// A 256-byte hop-by-hop header places TCP beyond the initial prefix.
+	v6 := make([]byte, 14+40+256+20)
+	binary.BigEndian.PutUint16(v6[12:], EtherTypeIPv6)
+	v6[14] = 0x60
+	binary.BigEndian.PutUint16(v6[18:], 276)
+	v6[54], v6[55] = IPProtoTCP, 31
+	copy(v6[310:], frames[0][34:54])
+	frames = append(frames, v6)
+	for _, raw := range [][]byte{buildClassicPCAP(binary.LittleEndian, false, LinkTypeEthernet, 65535, frames), buildPCAPNGFixture(binary.LittleEndian, nil, frames)} {
+		buf, err := New(raw)
+		if err != nil {
+			t.Fatal(err)
+		}
+		want, err := buf.Flows(raw)
+		if err != nil || len(want) != len(frames) {
+			t.Fatalf("slice flows = %v, %v", want, err)
+		}
+		r := bytes.NewReader(raw)
+		c, err := NewFromReaderAt(r, int64(len(raw)))
+		if err != nil {
+			t.Fatal(err)
+		}
+		got, err := c.FlowsFromReaderAt(r)
+		if err != nil || !slices.Equal(got, want) {
+			t.Fatalf("%v flows = %+v, %v; want %+v", c.Format, got, err, want)
+		}
 	}
 }
