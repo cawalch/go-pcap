@@ -83,6 +83,7 @@ The following limits bound parsing work and memory allocation on each call:
 | `MaxDNSResourceRecords` | 256 records | Bounds total answer, authority, and additional records per DNS message |
 | `MaxDNSCompressionJumps` | 16 jumps | Bounds RFC 1035 label pointer hops per domain name |
 | `MaxTLSHandshakeBytes` | 256 KiB | Bounds coalesced TLS handshake payload size |
+| `MaxTLSCertSANsPerKind` | 64 per kind | Bounds retained DNS names and IP addresses independently for each certificate |
 | `MaxTLSCertificates` | 16 certificates | Bounds X.509 certificates parsed per TLS Certificate message |
 | `MaxQUICCryptoBytes` | 64 KiB | Bounds reassembled QUIC Initial `CRYPTO` stream size |
 | `MaxQUICPacketsPerFlow` | 64 packets | Bounds Initial UDP datagrams inspected per QUIC flow |
@@ -251,6 +252,14 @@ and `Certificate` handshake messages:
   and preserving signature scheme wire order).
 - `TLSServerHello.JA4S` reports the FoxIO JA4S fingerprint over the server's
   selected version, cipher suite, ALPN, and wire-order extension list.
+- Each certificate in the chain exposes DNS SANs in `DNSNames` and IPv4/IPv6
+  SANs in `IPAddresses` as `netip.Addr` values. For example,
+  `record.Handshake.Certificates[0].IPAddresses` gives the leaf's addresses
+  when the chain is present. Each list is nil when absent and preserves the
+  first 64 entries in certificate order, including duplicates. If either
+  list exceeds the limit, `SANsTruncated` is true for that certificate.
+  `RawDER` retains the complete certificate. Cleartext and decrypted server
+  certificates follow the same rules for slice and ReaderAt scans.
 - `TLSCertificate.JA4X` (and standalone `JA4XFromDER` / `JA4XFromCert`) reports
   the FoxIO JA4X fingerprint over the certificate's raw ASN.1 issuer RDNs,
   subject RDNs, and X.509 extension OIDs. When a PcapNG `DSB` block or

@@ -80,8 +80,7 @@ func buildTLS13ClientHelloRecord(sni string, alpn string) []byte {
 	return wrapTLSHandshakeRecord(TLSHandshakeClientHello, body.Bytes())
 }
 
-func buildTLSServerHelloAndCertRecords(t testing.TB) []byte {
-	t.Helper()
+func buildTLSServerHelloRecord() []byte {
 	var shBody bytes.Buffer
 	shBody.Write([]byte{0x03, 0x03})
 	shBody.Write(bytes.Repeat([]byte{0x24}, 32))
@@ -98,6 +97,11 @@ func buildTLSServerHelloAndCertRecords(t testing.TB) []byte {
 	shBody.Write(shExtLen[:])
 	shBody.Write(shExt.Bytes())
 
+	return wrapTLSHandshakeRecord(TLSHandshakeServerHello, shBody.Bytes())
+}
+
+func buildTLSServerHelloAndCertRecords(t testing.TB) []byte {
+	t.Helper()
 	priv, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
 	if err != nil {
 		t.Fatalf("ecdsa.GenerateKey: %v", err)
@@ -126,7 +130,7 @@ func buildTLSServerHelloAndCertRecords(t testing.TB) []byte {
 	certBody.Write(der)
 
 	var out bytes.Buffer
-	out.Write(wrapTLSHandshakeRecord(TLSHandshakeServerHello, shBody.Bytes()))
+	out.Write(buildTLSServerHelloRecord())
 	out.Write(wrapTLSHandshakeRecord(TLSHandshakeCertificate, certBody.Bytes()))
 	return out.Bytes()
 }

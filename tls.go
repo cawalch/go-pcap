@@ -75,18 +75,23 @@ type TLSServerHello struct {
 }
 
 // TLSCertificate contains metadata and the JA4X structural fingerprint of a
-// parsed X.509 certificate from a TLS Certificate handshake message.
+// parsed X.509 certificate from a TLS Certificate handshake message. DNSNames
+// and IPAddresses each retain up to [MaxTLSCertSANsPerKind] entries in wire
+// order and are nil when absent. RawDER contains the complete certificate.
 type TLSCertificate struct {
-	Version    int
-	Serial     string
-	Subject    string
-	Issuer     string
-	NotBefore  int64
-	NotAfter   int64
-	DNSNames   []string
-	SelfSigned bool
-	JA4X       string
-	RawDER     []byte
+	Version     int
+	Serial      string
+	Subject     string
+	Issuer      string
+	NotBefore   int64
+	NotAfter    int64
+	DNSNames    []string
+	IPAddresses []netip.Addr
+	// SANsTruncated reports that DNS or IP names exceeded the per-kind limit.
+	SANsTruncated bool
+	SelfSigned    bool
+	JA4X          string
+	RawDER        []byte
 }
 
 // TLSHandshake aggregates the ClientHello, ServerHello, and X.509 certificates
@@ -762,35 +767,55 @@ func parseTLSCertificateBody(body []byte) ([]TLSCertificate, TLSAnomalies, error
 		der := bytes.Clone(body[offset : offset+certLen])
 		offset += certLen
 
-		parsed, err := x509.ParseCertificate(der)
-		if err != nil {
-			anomalies.InvalidCertificateDER = true
-			continue
-		}
-		selfSigned := bytes.Equal(parsed.RawIssuer, parsed.RawSubject)
-		if len(certs) == 0 && selfSigned {
-			anomalies.SelfSignedCertificate = true
-		}
-		ja4x := JA4XFromCert(parsed)
-		var serialHex string
-		if parsed.SerialNumber != nil {
-			serialHex = hex.EncodeToString(parsed.SerialNumber.Bytes())
-		}
-		certs = append(certs, TLSCertificate{
-			Version:    parsed.Version,
-			Serial:     serialHex,
-			Subject:    parsed.Subject.String(),
-			Issuer:     parsed.Issuer.String(),
-			NotBefore:  parsed.NotBefore.Unix(),
-			NotAfter:   parsed.NotAfter.Unix(),
-			DNSNames:   slices.Clone(parsed.DNSNames),
-			SelfSigned: selfSigned,
-			JA4X:       ja4x,
-			RawDER:     der,
-		})
+		certs = appendTLSCertificate(certs, der, &anomalies)
 	}
 
 	return certs, anomalies, nil
+}
+
+func appendTLSCertificate(certs []TLSCertificate, der []byte, anomalies *TLSAnomalies) []TLSCertificate {
+	parsed, err := x509.ParseCertificate(der)
+	if err != nil {
+		anomalies.InvalidCertificateDER = true
+		return certs
+	}
+	selfSigned := bytes.Equal(parsed.RawIssuer, parsed.RawSubject)
+	if len(certs) == 0 && selfSigned {
+		anomalies.SelfSignedCertificate = true
+	}
+	ja4x := JA4XFromCert(parsed)
+	var serialHex string
+	if parsed.SerialNumber != nil {
+		serialHex = hex.EncodeToString(parsed.SerialNumber.Bytes())
+	}
+	names := parsed.DNSNames
+	if len(names) > MaxTLSCertSANsPerKind {
+		// Release the backing array and strings for names beyond the limit.
+		names = slices.Clone(names[:MaxTLSCertSANsPerKind])
+	}
+	ipCount := min(len(parsed.IPAddresses), MaxTLSCertSANsPerKind)
+	var ips []netip.Addr
+	if ipCount > 0 {
+		ips = make([]netip.Addr, ipCount)
+		for i, ip := range parsed.IPAddresses[:ipCount] {
+			// x509 accepts only four- and sixteen-byte IP SANs.
+			ips[i], _ = netip.AddrFromSlice(ip)
+		}
+	}
+	return append(certs, TLSCertificate{
+		Version:       parsed.Version,
+		Serial:        serialHex,
+		Subject:       parsed.Subject.String(),
+		Issuer:        parsed.Issuer.String(),
+		NotBefore:     parsed.NotBefore.Unix(),
+		NotAfter:      parsed.NotAfter.Unix(),
+		DNSNames:      names,
+		IPAddresses:   ips,
+		SANsTruncated: len(parsed.DNSNames) > len(names) || len(parsed.IPAddresses) > ipCount,
+		SelfSigned:    selfSigned,
+		JA4X:          ja4x,
+		RawDER:        der,
+	})
 }
 
 // JA4XFromDER parses a DER-encoded X.509 certificate and returns its FoxIO JA4X
@@ -1028,31 +1053,7 @@ func parseTLSCertificateWithTLS13Context(body []byte) ([]TLSCertificate, TLSAnom
 			}
 		}
 
-		parsed, err := x509.ParseCertificate(der)
-		if err != nil {
-			anomalies.InvalidCertificateDER = true
-			continue
-		}
-		selfSigned := bytes.Equal(parsed.RawIssuer, parsed.RawSubject)
-		if len(certs) == 0 && selfSigned {
-			anomalies.SelfSignedCertificate = true
-		}
-		var serialHex string
-		if parsed.SerialNumber != nil {
-			serialHex = hex.EncodeToString(parsed.SerialNumber.Bytes())
-		}
-		certs = append(certs, TLSCertificate{
-			Version:    parsed.Version,
-			Serial:     serialHex,
-			Subject:    parsed.Subject.String(),
-			Issuer:     parsed.Issuer.String(),
-			NotBefore:  parsed.NotBefore.Unix(),
-			NotAfter:   parsed.NotAfter.Unix(),
-			DNSNames:   slices.Clone(parsed.DNSNames),
-			SelfSigned: selfSigned,
-			JA4X:       JA4XFromCert(parsed),
-			RawDER:     der,
-		})
+		certs = appendTLSCertificate(certs, der, &anomalies)
 	}
 	return certs, anomalies, nil
 }
