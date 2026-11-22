@@ -23,7 +23,13 @@ declared trailing record end, and marks `Capture.InputTruncated() == true`.
 If only a leading stream prefix is buffered while the total stream length is
 known, call `NewWithLength(data, streamLength)`. For large files on disk, call
 `NewFromReaderAt(r, size)` to parse container metadata without reading the
-entire capture into a single byte slice.
+entire capture into a single byte slice. For PcapNG, the scanner reads each
+complete block, including packet bodies. `PacketsFromReaderAt` collects a
+packet record slice. `FlowsFromReaderAt` then reads up to 256 bytes per frame,
+with a 64 MiB cumulative budget on those prefix reads. The metadata scan incurs
+additional I/O. `DNSFromReaderAt`, `TLSFromReaderAt`, and `QUICFromReaderAt`
+allocate a file-sized buffer and read the full capture. They return an error
+wrapping `ErrPacketLimit` when the file exceeds 64 MiB.
 
 If you don't modify its exported fields, you can read a `Capture` concurrently
 from multiple goroutines. Unlike `Capture`, `SafeReader` retains a reference to
@@ -65,7 +71,7 @@ The following limits bound parsing work and memory allocation on each call:
 | `MaxSSHKexPacketBytes` | 32 KiB | Bounds SSH `SSH_MSG_KEXINIT` packet length |
 | `MaxSMB2PacketBytes` | 64 KiB | Bounds NetBIOS-framed SMB2/3 message length |
 | `MaxNTLMTokenBytes` | 16 KiB | Bounds NTLMSSP token length |
-| `MaxReaderAtScanBytes` | 64 MiB | Bounds cumulative payload bytes read per `FromReaderAt` dissector call |
+| `MaxReaderAtScanBytes` | 64 MiB | Bounds cumulative flow prefix reads or total file size for DNS, TLS and QUIC ReaderAt calls |
 | `MaxFragmentGroups` | 1,024 groups | Bounds concurrent IPv4/IPv6 fragment groups tracked per scan |
 | `MaxFragmentsPerGroup` | 16 fragments | Bounds IP fragments reassembled per fragmented packet |
 | `MaxReassembledIPPacketBytes` | 65,535 bytes | Bounds reassembled IPv4/IPv6 packet payload size |
