@@ -6,6 +6,7 @@ import (
 	"errors"
 	"io"
 	"net/netip"
+	"os"
 	"reflect"
 	"slices"
 	"testing"
@@ -516,6 +517,10 @@ func TestReaderAtMalformedPacketParity(t *testing.T) {
 	}
 }
 
+type descriptorReader struct{ io.ReaderAt }
+
+func (descriptorReader) Fd() uintptr { panic("a scan must not access the descriptor") }
+
 // Use 64 KiB classic PCAP records so 1,024 complete records exactly consume
 // the 64 MiB read budget. The virtual capture stores one physical record.
 func TestReaderAtProtocolReadBudget(t *testing.T) {
@@ -574,16 +579,19 @@ func TestReaderAtProtocolReadBudget(t *testing.T) {
 					t.Fatalf("open: %v", err)
 				}
 				calls, read = 0, 0
+				// Advertise the same capability as a file-backed reader. A scan
+				// beyond the budget must preserve exact sparse access.
+				disk := descriptorReader{r}
 				var count int
 				switch proto {
 				case "DNS":
-					results, e := c.DNSFromReaderAt(r)
+					results, e := c.DNSFromReaderAt(disk)
 					count, err = len(results), e
 				case "TLS":
-					results, e := c.TLSFromReaderAt(r)
+					results, e := c.TLSFromReaderAt(disk)
 					count, err = len(results), e
 				case "QUIC":
-					results, e := c.QUICFromReaderAt(r)
+					results, e := c.QUICFromReaderAt(disk)
 					count, err = len(results), e
 				}
 				if i == 0 {
@@ -636,5 +644,164 @@ func checkProtocolErrors[T any](t *testing.T, slice func([]byte) ([]T, error), r
 	}
 	if got, err := reader(nil); got != nil || !errors.Is(err, ErrInvalidHeader) {
 		t.Fatalf("nil reader: %v", err)
+	}
+}
+
+func tempCaptureFile(t testing.TB, data []byte) *os.File {
+	t.Helper()
+	f, err := os.CreateTemp(t.TempDir(), "capture")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		if err := f.Close(); err != nil {
+			t.Error(err)
+		}
+	})
+	if _, err = f.Write(data); err != nil {
+		t.Fatal(err)
+	}
+	return f
+}
+
+func TestFileWindow(t *testing.T) {
+	raw := make([]byte, 3*fileWindowSize)
+	for i := range raw {
+		raw[i] = byte(i % 251)
+	}
+	f := tempCaptureFile(t, raw)
+	r := &measuredFile{File: f}
+	const extent = 2*fileWindowSize + 9
+	w := fileWindow(r, extent, fileWindowSize+7)
+	defer w.release()
+	check := func(off, length int, wantCalls, wantBytes int64, wantErr error) {
+		t.Helper()
+		buf := make([]byte, length)
+		n, err := w.ReadAt(buf, int64(off))
+		if !errors.Is(err, wantErr) || !bytes.Equal(buf[:n], raw[off:min(extent, off+length)]) || r.calls != wantCalls || r.bytesRead != wantBytes {
+			t.Fatalf("read at %d length %d: n=%d err=%v, calls=%d bytes=%d", off, length, n, err, r.calls, r.bytesRead)
+		}
+	}
+	check(0, 1, 1, 1, nil)
+	check(0, 1, 2, fileWindowSize+1, nil)
+	check(100, 3, 2, fileWindowSize+1, nil)
+	// Eight speculative bytes remain. Cross the window boundary, then seek back.
+	check(fileWindowSize-2, 5, 3, fileWindowSize+12, nil)
+	check(fileWindowSize, 11, 3, fileWindowSize+12, nil)
+	check(0, 1, 4, fileWindowSize+13, nil)
+	check(extent-2, 5, 5, fileWindowSize+15, io.EOF)
+}
+
+func TestFileReaderAtParity(t *testing.T) {
+	src, dst := [4]byte{10, 0, 0, 1}, [4]byte{10, 0, 0, 2}
+	noise := buildEthernetIPv4UDPFrame(src, dst, 1234, 5678, make([]byte, 1400))
+	frames := make([][]byte, 120)
+	for i := range frames {
+		frames[i] = noise
+	}
+	hello := buildTLS13ClientHelloRecord("window.example", "h2")
+	dgram := buildEncryptedQUICInitialDatagram(t, QUICVersion1, []byte{1, 2, 3, 4}, nil, nil, 1, 0, hello[5:])
+	frames = append(frames, buildEthernetIPv4UDPFrame(src, dst, 1234, 53, buildDNSQueryResponsePacket()), buildEthernetIPv4TCPFrame(src, dst, 1234, 443, 1, 0, TCPFlagACK, hello), buildEthernetIPv4UDPFrame(src, dst, 1234, 443, dgram))
+	for _, raw := range [][]byte{buildClassicPCAP(binary.BigEndian, true, LinkTypeEthernet, 65535, frames), buildPCAPNGFixture(binary.LittleEndian, []byte("embedded secret"), frames)} {
+		f := tempCaptureFile(t, raw)
+		r := &measuredFile{File: f}
+		want, err := New(raw)
+		if err != nil {
+			t.Fatal(err)
+		}
+		got, err := NewFromReaderAt(r, int64(len(raw)))
+		if err != nil || !reflect.DeepEqual(got, want) || r.calls > 12 {
+			t.Fatalf("open: %d reads, %v; metadata equal %t", r.calls, err, reflect.DeepEqual(got, want))
+		}
+		checkFileScan(t, raw, r, want.Packets, got.PacketsFromReaderAt)
+		checkFileScan(t, raw, r, want.Flows, got.FlowsFromReaderAt)
+		checkFileScan(t, raw, r, want.DNS, got.DNSFromReaderAt)
+		checkFileScan(t, raw, r, want.TLS, got.TLSFromReaderAt)
+		checkFileScan(t, raw, r, want.QUIC, got.QUICFromReaderAt)
+		r.calls, r.bytesRead = 0, 0
+		count := 0
+		for pkt, e := range got.PacketSeqFromReaderAt(r) {
+			if e != nil || pkt.Index != 0 {
+				t.Fatalf("first packet: %v, %v", pkt, e)
+			}
+			count++
+			break
+		}
+		wantCalls, wantBytes := int64(1), int64(pcapPacketHeaderSize)
+		if got.Format == FormatPCAPNG {
+			wantCalls, wantBytes = 2, 12+fileWindowSize
+		}
+		if count != 1 || r.calls != wantCalls || r.bytesRead != wantBytes {
+			t.Fatalf("early stop: records=%d calls=%d bytes=%d", count, r.calls, r.bytesRead)
+		}
+	}
+}
+
+func checkFileScan[T any](t *testing.T, raw []byte, r *measuredFile, slice func([]byte) ([]T, error), file func(io.ReaderAt) ([]T, error)) {
+	t.Helper()
+	r.calls, r.bytesRead = 0, 0
+	want, err := slice(raw)
+	if err != nil || len(want) == 0 {
+		t.Fatalf("slice: %d records, %v", len(want), err)
+	}
+	got, err := file(r)
+	if err != nil || !reflect.DeepEqual(got, want) || r.calls > 12 || r.bytesRead > MaxReaderAtScanBytes {
+		t.Fatalf("file: %d records, %v, %d reads, %d bytes", len(got), err, r.calls, r.bytesRead)
+	}
+}
+
+func TestFilePrefetchPartialRead(t *testing.T) {
+	injected := errors.New("file read failed")
+	data := []byte("prefix")
+	r := descriptorReader{readAtFunc(func(p []byte, off int64) (int, error) {
+		if off >= int64(len(data)) {
+			return 0, injected
+		}
+		return copy(p, data[off:]), injected
+	})}
+	w := fileWindow(r, 100, 100)
+	defer w.release()
+	var buf [8]byte
+	if err := readExactAt(w, buf[:1], 0, 100); err != nil {
+		t.Fatal(err)
+	}
+	if n, err := w.ReadAt(buf[:2], 0); n != 2 || err != nil || !bytes.Equal(buf[:2], data[:2]) {
+		t.Fatalf("valid prefix: %d, %v", n, err)
+	}
+	if n, err := w.ReadAt(buf[:], 2); n != 4 || !errors.Is(err, injected) || !bytes.Equal(buf[:4], data[2:]) {
+		t.Fatalf("partial read: %d, %v", n, err)
+	}
+}
+
+func TestFilePrefetchNearProtocolBudget(t *testing.T) {
+	frame := buildEthernetIPv4UDPFrame([4]byte{1}, [4]byte{2}, 1234, 53, buildDNSQueryResponsePacket())
+	raw := buildPCAPNGFixture(binary.LittleEndian, nil, [][]byte{frame})
+	f := tempCaptureFile(t, raw)
+	// An unknown block makes the file sparse. Its body requires no reads.
+	// PcapNG has only eleven bytes of speculative allowance at this size.
+	const size = 3*MaxReaderAtScanBytes/4 - 8
+	blockLen := uint32(size - len(raw))
+	header := binary.LittleEndian.AppendUint32(nil, 0x12345678)
+	header = binary.LittleEndian.AppendUint32(header, blockLen)
+	if _, err := f.Write(header); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.WriteAt(header[4:8], size-4); err != nil {
+		t.Fatal(err)
+	}
+	c, err := NewFromReaderAt(f, size)
+	if err != nil {
+		t.Fatal(err)
+	}
+	r := &measuredFile{File: f}
+	want, err := c.DNSFromReaderAt(struct{ io.ReaderAt }{r})
+	if err != nil || len(want) != 1 {
+		t.Fatalf("exact scan: %d records, %v", len(want), err)
+	}
+	exact := r.bytesRead
+	r.calls, r.bytesRead = 0, 0
+	got, err := c.DNSFromReaderAt(r)
+	if err != nil || !reflect.DeepEqual(got, want) || r.bytesRead > exact+c.scanReadAhead() || r.bytesRead > MaxReaderAtScanBytes {
+		t.Fatalf("prefetch: %v, %d exact bytes, %d file bytes, %d spare", err, exact, r.bytesRead, c.scanReadAhead())
 	}
 }

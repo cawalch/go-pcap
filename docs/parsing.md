@@ -23,7 +23,9 @@ declared trailing record end, and marks `Capture.InputTruncated() == true`.
 If only a leading stream prefix is buffered while the total stream length is
 known, call `NewWithLength(data, streamLength)`. For large files on disk, call
 `NewFromReaderAt(r, size)` to parse container metadata without reading the
-entire capture into a single byte slice. Both formats skip frame bytes. The PcapNG scanner reads packet headers,
+entire capture into a single byte slice. On a file (including a wrapper exposing `Fd() uintptr`), a scan can
+prefetch up to 64 KiB of adjacent bytes, including frame data. Each scan owns
+its window. Other readers receive exact range requests. The PcapNG scanner parses packet headers,
 options and block trailers. Each buffered PcapNG metadata read is limited to
 `MaxSnapLen + 4096` bytes. Use `PacketSeqFromReaderAt` to process records
 in order and break when you have enough. `PacketsFromReaderAt` collects a
@@ -36,7 +38,10 @@ the 64 MiB flow budget. Flow metadata incurs additional I/O.
 64 MiB of total reads, including container metadata, frame prefixes, and
 selected payloads. A call can finish on a larger file. A read that would
 exceed the remaining allowance returns `ErrPacketLimit` without partial results.
-Opening the capture has a separate scan cost.
+File prefetch uses only the allowance left after reserving for exact reads,
+including overlapping PcapNG block headers. Large sparse captures keep exact
+reads when that reservation leaves no room. Cache hits still count toward
+the limit on selected input. Opening the capture has a separate scan cost.
 
 DNS selects DNS ports and UDP fragments. TLS reassembles TCP on any port.
 QUIC selects candidate UDP long headers and UDP fragments. Incomplete headers

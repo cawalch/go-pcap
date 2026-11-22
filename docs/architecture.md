@@ -46,12 +46,13 @@ behavior require separate verification on a host with capture permissions.
 
 ### After v0.1.0 — large captures and repeated analysis
 
-ReaderAt packet iteration skips frame bytes in both formats. Use
+ReaderAt packet iteration uses bounded read-ahead on files. Use
 `BenchmarkReaderAtScan` to compare read counts, bytes read and allocations
 for metadata scans, packet collection and flows. `BenchmarkReaderAtProtocols`
-measures bounded DNS, TLS and QUIC scans on mixed traffic. Measure the benefit of [reusing TCP streams in HTTP and HTTP/2](https://github.com/cawalch/go-pcap/issues/41)
+and `BenchmarkReaderAtFileProtocols` compare mixed-traffic scans in memory
+and on a warm file. Measure the benefit of [reusing TCP streams in HTTP and HTTP/2](https://github.com/cawalch/go-pcap/issues/41)
 on captures with and without decryption keys before changing segment storage.
-Schedule header prefetching, fingerprint formatting, QUIC allocation changes
+Schedule fingerprint formatting, QUIC allocation changes
 and compiler bounds-check work when end-to-end measurements justify them.
 
 ### Protocol and integration proposals
