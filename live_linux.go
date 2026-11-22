@@ -7,7 +7,6 @@ import (
 	"net"
 	"syscall"
 	"time"
-	"unsafe"
 )
 
 const LinkTypeUnknown LinkType = 0xffff
@@ -76,18 +75,9 @@ func OpenLive(ifaceName string, opts LiveOptions) (*LiveCapture, error) {
 			Len:    uint16(len(insns)),
 			Filter: &insns[0],
 		}
-		_, _, errno := syscall.Syscall6(
-			syscall.SYS_SETSOCKOPT,
-			uintptr(fd),
-			uintptr(syscall.SOL_SOCKET),
-			uintptr(syscall.SO_ATTACH_FILTER),
-			uintptr(unsafe.Pointer(&fprog)),
-			unsafe.Sizeof(fprog),
-			0,
-		)
-		if errno != 0 {
+		if err := attachLinuxBPFFilter(fd, &fprog); err != nil {
 			_ = syscall.Close(fd)
-			return nil, fmt.Errorf("setsockopt SO_ATTACH_FILTER: %w", errno)
+			return nil, fmt.Errorf("setsockopt SO_ATTACH_FILTER: %w", err)
 		}
 	}
 

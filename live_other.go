@@ -2,6 +2,8 @@
 
 package pcap
 
+import "fmt"
+
 const LinkTypeUnknown LinkType = 0xffff
 
 // LiveCapture represents a live interface packet capture handle.
@@ -12,8 +14,11 @@ type LiveCapture struct {
 }
 
 // OpenLive returns [ErrLiveCaptureUnsupported] on platforms without a native
-// BPF or AF_PACKET implementation.
+// BPF or AF_PACKET implementation, after validating ifaceName and opts.
 func OpenLive(ifaceName string, opts LiveOptions) (*LiveCapture, error) {
+	if ifaceName == "" {
+		return nil, fmt.Errorf("%w: empty interface name", ErrInvalidHeader)
+	}
 	if _, err := opts.normalize(); err != nil {
 		return nil, err
 	}

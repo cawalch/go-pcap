@@ -153,7 +153,7 @@ func buildPCAPNGFixture(order binary.ByteOrder, secretData []byte, frames [][]by
 	for i, frame := range frames {
 		var epb bytes.Buffer
 		var epbFixed [20]byte
-		ts := uint64(1700000000000000000 + i*1000000)
+		ts := uint64(1700000000000000000) + uint64(i)*1000000
 		order.PutUint32(epbFixed[0:4], 0) // Interface ID 0
 		order.PutUint32(epbFixed[4:8], uint32(ts>>32))
 		order.PutUint32(epbFixed[8:12], uint32(ts&0xffffffff))
