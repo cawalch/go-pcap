@@ -8,7 +8,8 @@ import (
 )
 
 // NewFromReaderAt parses a classic PCAP or PcapNG container from an [io.ReaderAt]
-// of total byte length size without loading packet payloads into memory.
+// of total byte length size. The classic PCAP scan skips packet payloads.
+// The PcapNG scan reads complete blocks, including their packet data.
 func NewFromReaderAt(r io.ReaderAt, size int64) (*Capture, error) {
 	if r == nil {
 		return nil, fmt.Errorf("%w: nil ReaderAt", ErrInvalidHeader)
@@ -38,7 +39,7 @@ func NewFromReaderAt(r io.ReaderAt, size int64) (*Capture, error) {
 }
 
 // PacketsFromReaderAt enumerates bounded packet records from an [io.ReaderAt]
-// without reading packet payloads into memory.
+// in capture order. PcapNG enumeration reads complete blocks.
 func (c *Capture) PacketsFromReaderAt(r io.ReaderAt) ([]PacketRecord, error) {
 	if err := c.validateContainer(); err != nil {
 		return nil, err
