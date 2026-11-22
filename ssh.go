@@ -213,9 +213,9 @@ func (c *Capture) SSH(data []byte) ([]SSHRecord, error) {
 		return nil, nil
 	}
 
-	// Collect bounded per-flow JA4SSH segments only for matched SSH flows.
+	// Accumulate JA4SSH statistics directly while walking packets without retaining segment slices.
 	r := SafeReader{data: data, size: int64(len(data))}
-	segsByRecord := make([][]JA4SSHSegment, len(records))
+	accByRecord := make([]ja4sshAccumulator, len(records))
 	if err := c.walkPackets(&r, func(pkt PacketRecord) error {
 		payload, err := r.Slice(pkt.PayloadOffset, pkt.PayloadLength)
 		if err != nil {
@@ -227,11 +227,11 @@ func (c *Capture) SSH(data []byte) ([]SSHRecord, error) {
 		}
 		key, _ := makeCanonicalFlowKey(frame.IPProtocol, frame.SrcAddr, frame.SrcPort, frame.DstAddr, frame.DstPort)
 		recIdx, ok := sshFlows[key]
-		if !ok || len(segsByRecord[recIdx]) >= MaxSegmentsPerFlow {
+		if !ok {
 			return nil
 		}
 		rec := &records[recIdx]
-		segsByRecord[recIdx] = append(segsByRecord[recIdx], JA4SSHSegment{
+		accByRecord[recIdx].add(JA4SSHSegment{
 			IsClient:      frame.SrcAddr == rec.SrcAddr && frame.SrcPort == rec.SrcPort,
 			PayloadLength: int(frame.PayloadLength),
 			Flags:         frame.TCPFlags,
@@ -242,7 +242,7 @@ func (c *Capture) SSH(data []byte) ([]SSHRecord, error) {
 	}
 
 	for i := range records {
-		records[i].JA4SSH = JA4SSH(segsByRecord[i])
+		records[i].JA4SSH = accByRecord[i].fingerprint()
 	}
 	return records, nil
 }

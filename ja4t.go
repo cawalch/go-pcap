@@ -157,6 +157,59 @@ type JA4SSHSegment struct {
 	Flags         uint8
 }
 
+type ja4sshAccumulator struct {
+	clientCounts   map[int]int
+	serverCounts   map[int]int
+	clientDataPkts int
+	serverDataPkts int
+	clientBareACKs int
+	serverBareACKs int
+}
+
+func (a *ja4sshAccumulator) add(seg JA4SSHSegment) {
+	if seg.PayloadLength > 0 {
+		if seg.IsClient {
+			a.clientDataPkts++
+			if a.clientCounts == nil {
+				a.clientCounts = make(map[int]int)
+			}
+			a.clientCounts[seg.PayloadLength]++
+		} else {
+			a.serverDataPkts++
+			if a.serverCounts == nil {
+				a.serverCounts = make(map[int]int)
+			}
+			a.serverCounts[seg.PayloadLength]++
+		}
+	} else if (seg.Flags&TCPFlagACK) != 0 && (seg.Flags&(TCPFlagSYN|TCPFlagFIN|TCPFlagRST)) == 0 {
+		if seg.IsClient {
+			a.clientBareACKs++
+		} else {
+			a.serverBareACKs++
+		}
+	}
+}
+
+func (a *ja4sshAccumulator) fingerprint() string {
+	clientMode := modePayloadLen(a.clientCounts)
+	serverMode := modePayloadLen(a.serverCounts)
+
+	var buf [64]byte
+	out := append(buf[:0], 'c')
+	out = strconv.AppendInt(out, int64(clientMode), 10)
+	out = append(out, 's')
+	out = strconv.AppendInt(out, int64(serverMode), 10)
+	out = append(out, '_', 'c')
+	out = strconv.AppendInt(out, int64(a.clientDataPkts), 10)
+	out = append(out, 's')
+	out = strconv.AppendInt(out, int64(a.serverDataPkts), 10)
+	out = append(out, '_', 'c')
+	out = strconv.AppendInt(out, int64(a.clientBareACKs), 10)
+	out = append(out, 's')
+	out = strconv.AppendInt(out, int64(a.serverBareACKs), 10)
+	return string(out)
+}
+
 // JA4SSH computes the FoxIO JA4SSH fingerprint over a sequence of bidirectional
 // TCP segments:
 //
@@ -165,47 +218,11 @@ type JA4SSHSegment struct {
 // When two payload lengths share the same maximum frequency, the smaller length
 // wins (matching FoxIO JA4SSH tie-breaking).
 func JA4SSH(segments []JA4SSHSegment) string {
-	clientCounts := make(map[int]int)
-	serverCounts := make(map[int]int)
-	var clientDataPkts, serverDataPkts int
-	var clientBareACKs, serverBareACKs int
-
+	var acc ja4sshAccumulator
 	for i := range segments {
-		seg := &segments[i]
-		if seg.PayloadLength > 0 {
-			if seg.IsClient {
-				clientDataPkts++
-				clientCounts[seg.PayloadLength]++
-			} else {
-				serverDataPkts++
-				serverCounts[seg.PayloadLength]++
-			}
-		} else if (seg.Flags&TCPFlagACK) != 0 && (seg.Flags&(TCPFlagSYN|TCPFlagFIN|TCPFlagRST)) == 0 {
-			if seg.IsClient {
-				clientBareACKs++
-			} else {
-				serverBareACKs++
-			}
-		}
+		acc.add(segments[i])
 	}
-
-	clientMode := modePayloadLen(clientCounts)
-	serverMode := modePayloadLen(serverCounts)
-
-	var buf [64]byte
-	out := append(buf[:0], 'c')
-	out = strconv.AppendInt(out, int64(clientMode), 10)
-	out = append(out, 's')
-	out = strconv.AppendInt(out, int64(serverMode), 10)
-	out = append(out, '_', 'c')
-	out = strconv.AppendInt(out, int64(clientDataPkts), 10)
-	out = append(out, 's')
-	out = strconv.AppendInt(out, int64(serverDataPkts), 10)
-	out = append(out, '_', 'c')
-	out = strconv.AppendInt(out, int64(clientBareACKs), 10)
-	out = append(out, 's')
-	out = strconv.AppendInt(out, int64(serverBareACKs), 10)
-	return string(out)
+	return acc.fingerprint()
 }
 
 func modePayloadLen(counts map[int]int) int {
