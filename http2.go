@@ -186,7 +186,8 @@ func (c *Capture) HTTP2(data []byte) ([]HTTP2Record, error) {
 	for i := range streams {
 		appendHTTP2FromTCPStream(&streams[i], false, &records)
 	}
-	if decStreams, err := c.DecryptedTLSStreams(data, nil); err == nil {
+	if keys, err := c.TLSKeyLog(nil); err == nil && len(keys.Entries) > 0 {
+		decStreams := decryptTLSStreams(streams, keys)
 		for i := range decStreams {
 			appendHTTP2FromTCPStream(&decStreams[i], true, &records)
 		}

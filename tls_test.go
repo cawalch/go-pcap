@@ -80,7 +80,7 @@ func buildTLS13ClientHelloRecord(sni string, alpn string) []byte {
 	return wrapTLSHandshakeRecord(TLSHandshakeClientHello, body.Bytes())
 }
 
-func buildTLSServerHelloAndCertRecords(t *testing.T) []byte {
+func buildTLSServerHelloAndCertRecords(t testing.TB) []byte {
 	t.Helper()
 	var shBody bytes.Buffer
 	shBody.Write([]byte{0x03, 0x03})
@@ -223,7 +223,7 @@ func TestTLSHandshakeJA4SuiteAndCaptureTLS(t *testing.T) {
 	}
 }
 
-func encryptTLS13AppDataRecord(t *testing.T, secret []byte, cipherSuite uint16, seq uint64, innerType uint8, payload []byte) []byte {
+func encryptTLS13AppDataRecord(t testing.TB, secret []byte, cipherSuite uint16, seq uint64, innerType uint8, payload []byte) []byte {
 	t.Helper()
 	aead, iv, err := deriveTLS13TrafficAEAD(secret, cipherSuite)
 	if err != nil {

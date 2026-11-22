@@ -447,8 +447,8 @@ func (c *Capture) HTTP(data []byte) ([]HTTPRecord, error) {
 	}
 
 	// Also inspect any DSB-decrypted TLS 1.3 streams automatically.
-	decStreams, err := c.DecryptedTLSStreams(data, nil)
-	if err == nil {
+	if keys, err := c.TLSKeyLog(nil); err == nil && len(keys.Entries) > 0 {
+		decStreams := decryptTLSStreams(streams, keys)
 		for i := range decStreams {
 			if err := appendHTTPFromTCPStream(&decStreams[i], true, &records); err != nil {
 				return nil, err

@@ -110,3 +110,15 @@ func TestMidstreamSequenceOrder(t *testing.T) {
 		}
 	}
 }
+
+func TestReassemblyReservationWithGapsAndRetransmissions(t *testing.T) {
+	segs := []TCPSegmentInput{
+		{Seq: 20, Payload: []byte("abcd")},
+		{Seq: 22, Payload: []byte("cd")},
+		{Seq: 1 << 28, Payload: []byte("efgh")},
+	}
+	buf, used, err := reassembleTCPWithBudget(segs, 6)
+	if err != nil || used != 6 || string(buf.Data) != "abcdef" || !buf.Anomalies.Truncated || !buf.Anomalies.SequenceGap || !buf.Anomalies.Retransmission || buf.Anomalies.OverlapConflict {
+		t.Fatalf("reassembly: %+v, %d bytes, %v", buf, used, err)
+	}
+}

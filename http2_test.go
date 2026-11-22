@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/binary"
 	"errors"
+	"fmt"
 	"testing"
 )
 
@@ -77,5 +78,81 @@ func TestParseHTTP2FramesAndCaptureHTTP2(t *testing.T) {
 	// Non-HTTP/2 bytes return ErrInvalidHTTP.
 	if _, err := ParseHTTP2Frames([]byte("GET / HTTP/1.1\r\n\r\n")); !errors.Is(err, ErrInvalidHTTP) {
 		t.Fatalf("ParseHTTP2Frames(HTTP/1.1) err = %v, want ErrInvalidHTTP", err)
+	}
+}
+
+// Include cleartext and encrypted traffic in the same packet order for each
+// key-log case so only the decryption work differs.
+func mixedWebCapture(t testing.TB, h2, keyed bool) ([]byte, *Capture) {
+	t.Helper()
+	body := []byte("hello")
+	alpn := "http/1.1"
+	req := []byte("POST /sample HTTP/1.1\r\nContent-Length: 5\r\n\r\nhello")
+	if h2 {
+		alpn = "h2"
+		req = append(bytes.Clone(HTTP2ClientPreface), buildHTTP2Frame(HTTP2FrameData, 1, 1, body)...)
+	}
+	client, server := [4]byte{10, 0, 0, 1}, [4]byte{10, 0, 0, 2}
+	var frames [][]byte
+	for i := range 32 {
+		frames = append(frames, buildEthernetIPv4TCPFrame(client, server, uint16(30000+i), 80, 1, 0, TCPFlagACK, req))
+	}
+	secret := bytes.Repeat([]byte{0xab}, 32)
+	encrypted := encryptTLS13AppDataRecord(t, secret, TLS_AES_128_GCM_SHA256, 0, TLSRecordApplicationData, req)
+	hello := append(buildTLS13ClientHelloRecord("example.org", alpn), encrypted...)
+	frames = append(frames, buildEthernetIPv4TCPFrame(client, server, 40000, 443, 1, 0, TCPFlagACK, hello), buildEthernetIPv4TCPFrame(server, client, 443, 40000, 1, 0, TCPFlagACK, buildTLSServerHelloAndCertRecords(t)))
+	var keys []byte
+	if keyed {
+		keys = fmt.Appendf(nil, "CLIENT_TRAFFIC_SECRET_0 %x %x\n", bytes.Repeat([]byte{0x42}, 32), secret)
+	}
+	raw := buildPCAPNGFixture(binary.LittleEndian, keys, frames)
+	c, err := New(raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return raw, c
+}
+
+func TestMixedWebCapture(t *testing.T) {
+	for _, keyed := range []bool{false, true} {
+		want := 32
+		if keyed {
+			want++
+		}
+		raw, c := mixedWebCapture(t, false, keyed)
+		records, err := c.HTTP(raw)
+		if err != nil || len(records) != want {
+			t.Fatalf("HTTP keyed %v: %d, %v", keyed, len(records), err)
+		}
+		for i, r := range records {
+			if r.FlowIndex != i || r.IsDecrypted != (i == 32) || string(r.Request.Body) != "hello" {
+				t.Fatalf("HTTP record %d: %+v", i, r)
+			}
+		}
+		raw, c = mixedWebCapture(t, true, keyed)
+		h2, err := c.HTTP2(raw)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(h2) != want {
+			t.Fatalf("HTTP2 keyed %v: %d records, want %d", keyed, len(h2), want)
+		}
+		for i, r := range h2 {
+			if !r.Summary.HasClientPreface || r.FlowIndex != i || r.IsDecrypted != (i == 32) || len(r.Summary.Streams) != 1 || string(r.Summary.Streams[0].Data) != "hello" {
+				t.Fatalf("HTTP2 record %d: %+v", i, r)
+			}
+		}
+		for _, scan := range []func() error{
+			func() error { _, err := c.HTTP(nil); return err },
+			func() error { _, err := c.HTTP2(nil); return err },
+		} {
+			if err := scan(); !errors.Is(err, ErrInvalidHeader) {
+				t.Fatalf("missing PcapNG data: %v", err)
+			}
+		}
+		_, err = c.DecryptedTLSStreams(nil, nil)
+		if keyed && !errors.Is(err, ErrInvalidHeader) || !keyed && err != nil {
+			t.Fatalf("standalone decryption, keyed %v: %v", keyed, err)
+		}
 	}
 }
