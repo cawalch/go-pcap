@@ -147,6 +147,7 @@ func ParseTLSRecords(stream []byte) (TLSHandshake, error) {
 	var hsBuf bytes.Buffer
 	var firstRecordVersion uint16
 	var out TLSHandshake
+	var passedRetryCCS bool
 	offset := 0
 
 	for offset+5 <= len(stream) {
@@ -173,6 +174,14 @@ func ParseTLSRecords(stream []byte) (TLSHandshake, error) {
 		if bodyEnd > len(stream) {
 			out.Anomalies.TruncatedRecord = true
 			bodyEnd = len(stream)
+		}
+		if contentType == TLSRecordChangeCipherSpec {
+			// TLS 1.2 subsequent handshake records are ciphertext. TLS 1.3
+			// allows a compatibility CCS between a retry and the final hello.
+			if passedRetryCCS || bodyEnd-bodyStart != 1 || stream[bodyStart] != 1 || !containsHelloRetry(hsBuf.Bytes()) {
+				break
+			}
+			passedRetryCCS = true
 		}
 		if contentType == TLSRecordHandshake {
 			if hsBuf.Len()+(bodyEnd-bodyStart) > MaxTLSHandshakeBytes {
@@ -262,6 +271,21 @@ func ParseTLSRecords(stream []byte) (TLSHandshake, error) {
 	}
 	out.IsResumed = out.IsResumed || out.hasResumedSessionID()
 	return out, nil
+}
+
+// containsHelloRetry examines complete handshake messages preceding a CCS.
+func containsHelloRetry(data []byte) bool {
+	for len(data) >= 4 {
+		n := int(data[1])<<16 | int(data[2])<<8 | int(data[3])
+		if n > len(data)-4 {
+			return false
+		}
+		if data[0] == TLSHandshakeServerHello {
+			return n >= 34 && bytes.Equal(data[6:38], helloRetryRandom[:])
+		}
+		data = data[4+n:]
+	}
+	return false
 }
 
 func (hs *TLSHandshake) hasResumedSessionID() bool {

@@ -22,6 +22,8 @@ func TestTLSResumption(t *testing.T) {
 	server12 := hello(true, id, ticket, [32]byte{})
 	server13 := hello(true, id, psk, [32]byte{})
 	retry := hello(true, id, v13, helloRetryRandom)
+	ccs := []byte{TLSRecordChangeCipherSpec, 3, 3, 0, 1, 1}
+	encrypted := append(bytes.Clone(ccs), []byte{TLSRecordHandshake, 3, 3, 0, 4, 0xff, 0xff, 0xff, 0xff}...)
 	certs := buildTLSServerHelloAndCertRecords(t)[len(buildTLSServerHelloRecord()):]
 	for _, tc := range []struct {
 		name           string
@@ -36,7 +38,8 @@ func TestTLSResumption(t *testing.T) {
 		{"compatibility ID and offer only", client13, hello(true, id, v13, [32]byte{}), false},
 		{"malformed selection", client13, hello(true, id, append(bytes.Clone(v13), testTLSExtension(TLSExtPreSharedKey, []byte{0})...), [32]byte{}), false},
 		{"retry only", client13, hello(true, id, psk, helloRetryRandom), false},
-		{"retry then selection", client13, append(bytes.Clone(retry), server13...), true},
+		{"retry then selection", client13, append(append(bytes.Clone(retry), ccs...), server13...), true},
+		{"encrypted Finished", client12, append(bytes.Clone(server12), encrypted...), true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			raw := keyShareCapture(tc.client, tc.server, 1)
