@@ -111,7 +111,11 @@ func reassembleTCPWithBudget(segments []TCPSegmentInput, remainingBudget int64) 
 		out.Anomalies.MidstreamPickup = true
 	}
 
-	norm := make([]normSegment, 0, len(segments))
+	var inline [8]normSegment
+	norm := inline[:0]
+	if len(segments) > len(inline) {
+		norm = make([]normSegment, 0, len(segments))
+	}
 	for i := range segments {
 		seg := &segments[i]
 		if len(seg.Payload) == 0 {
@@ -168,6 +172,25 @@ func reassembleTCPWithBudget(segments []TCPSegmentInput, remainingBudget int64) 
 	// Midstream input can begin after bytes captured later in packet order.
 	if !hasSYN && len(norm) > 0 {
 		cursor = norm[0].relStart
+	}
+
+	// Size the result from distinct captured ranges. Reserving the whole
+	// sequence span would charge gaps and retransmissions to the heap.
+	if len(norm) > 1 {
+		end := cursor
+		var size int64
+		for i := range norm {
+			seg := &norm[i]
+			if seg.relEnd > end {
+				size += seg.relEnd - max(end, seg.relStart)
+				end = seg.relEnd
+				if size >= maxBytes {
+					size = maxBytes
+					break
+				}
+			}
+		}
+		buf.Grow(int(size))
 	}
 
 	for i := range norm {

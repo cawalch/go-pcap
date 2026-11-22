@@ -134,18 +134,25 @@ func TestMixedWebCapture(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		var seen int
-		for _, r := range h2 {
-			if !r.Summary.HasClientPreface {
-				continue
-			}
-			if r.FlowIndex != seen || r.IsDecrypted != (seen == 32) || len(r.Summary.Streams) != 1 || string(r.Summary.Streams[0].Data) != "hello" {
-				t.Fatalf("HTTP2 record %d: %+v", seen, r)
-			}
-			seen++
+		if len(h2) != want {
+			t.Fatalf("HTTP2 keyed %v: %d records, want %d", keyed, len(h2), want)
 		}
-		if seen != want {
-			t.Fatalf("HTTP2 keyed %v: %d records, want %d", keyed, seen, want)
+		for i, r := range h2 {
+			if !r.Summary.HasClientPreface || r.FlowIndex != i || r.IsDecrypted != (i == 32) || len(r.Summary.Streams) != 1 || string(r.Summary.Streams[0].Data) != "hello" {
+				t.Fatalf("HTTP2 record %d: %+v", i, r)
+			}
+		}
+		for _, scan := range []func() error{
+			func() error { _, err := c.HTTP(nil); return err },
+			func() error { _, err := c.HTTP2(nil); return err },
+		} {
+			if err := scan(); !errors.Is(err, ErrInvalidHeader) {
+				t.Fatalf("missing PcapNG data: %v", err)
+			}
+		}
+		_, err = c.DecryptedTLSStreams(nil, nil)
+		if keyed && !errors.Is(err, ErrInvalidHeader) || !keyed && err != nil {
+			t.Fatalf("standalone decryption, keyed %v: %v", keyed, err)
 		}
 	}
 }
