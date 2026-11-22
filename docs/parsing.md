@@ -402,12 +402,20 @@ absolute deviation (MAD), jitter ratios, Bowley quartile skewness periodicity
 scores, payload size uniformity, Producer-Consumer Ratio (PCR), and composite
 `BeaconScore` values in $[0.0, 1.0]$.
 
-## Write PcapNG captures
+## Write captures
+
+Use `NewPCAPWriter(w, linkType, snapLen)` for single-interface classic PCAP.
+Pass Unix nanoseconds and the complete packet to `WritePacket`. The writer
+stores up to `snapLen` bytes and preserves the original length. Timestamps must
+fit unsigned 32-bit Unix seconds; zero snaplen selects `DefaultLiveSnapLen`.
 
 Use `NewPCAPNGWriter(w, opts)` to stream PcapNG `SHB`, `IDB` (nanosecond
 resolution), `NRB` (`WriteNameResolution`), `ISB` (`WriteInterfaceStats`),
 `DSB` (`WriteDecryptionSecrets`), and process-attributed `EPB` (`WritePacket`)
-blocks to any `io.Writer`.
+blocks to any `io.Writer`. Interface 0 is ready immediately. Call `AddInterface`
+for each additional interface and use its returned ID in `PacketRecord` and
+`InterfaceStatistics`. Each interface has its own link type and snaplen. After
+an output error, start a new capture stream.
 
 ## Capture live interface traffic
 

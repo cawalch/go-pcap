@@ -5,6 +5,7 @@ import (
 	"encoding/binary"
 	"fmt"
 	"io"
+	"math"
 )
 
 // PCAPNGWriterOptions configures container and interface metadata written by
@@ -22,9 +23,8 @@ type PCAPNGWriterOptions struct {
 // PCAPNGWriter writes PcapNG Section Header, Interface Description, Decryption
 // Secrets, and Enhanced Packet blocks to an [io.Writer].
 type PCAPNGWriter struct {
-	w        io.Writer
-	linkType LinkType
-	snapLen  uint32
+	captureOutput
+	interfaceCount uint32
 }
 
 // NewPCAPNGWriter writes a PcapNG Section Header Block (SHB) and Interface
@@ -34,18 +34,12 @@ func NewPCAPNGWriter(w io.Writer, opts PCAPNGWriterOptions) (*PCAPNGWriter, erro
 	if w == nil {
 		return nil, fmt.Errorf("%w: nil writer", ErrInvalidHeader)
 	}
-	linkType := opts.LinkType
-	if linkType == 0 && opts.InterfaceName != "lo0" {
-		linkType = LinkTypeEthernet
+	if len(opts.Hardware) > MaxOptionStringBytes || len(opts.OS) > MaxOptionStringBytes || len(opts.UserApplication) > MaxOptionStringBytes {
+		return nil, ErrOptionLimit
 	}
-	snapLen := opts.SnapLen
-	if snapLen == 0 {
-		snapLen = DefaultLiveSnapLen
+	if opts.LinkType == 0 && opts.InterfaceName != "lo0" {
+		opts.LinkType = LinkTypeEthernet
 	}
-	if snapLen > MaxSnapLen {
-		return nil, fmt.Errorf("%w: snaplen %d exceeds %d", ErrInvalidHeader, snapLen, MaxSnapLen)
-	}
-
 	var buf bytes.Buffer
 
 	// 1. Section Header Block (SHB).
@@ -74,10 +68,52 @@ func NewPCAPNGWriter(w io.Writer, opts PCAPNGWriterOptions) (*PCAPNGWriter, erro
 	}
 	writePCAPNGBlockLE(&buf, BlockTypeSectionHeader, shb.Bytes())
 
-	// 2. Interface Description Block (IDB) with nanosecond timestamp resolution (10^-9 s).
+	if err := appendInterfaceBlock(&buf, opts); err != nil {
+		return nil, err
+	}
+	pw := &PCAPNGWriter{captureOutput: captureOutput{w: w}, interfaceCount: 1}
+	if err := pw.write(buf.Bytes()); err != nil {
+		return nil, err
+	}
+	return pw, nil
+}
+
+// AddInterface writes an Interface Description Block and returns its section-local ID.
+// LinkType is used verbatim, including [LinkTypeNull]. SnapLen defaults to
+// [DefaultLiveSnapLen]. Hardware, OS and UserApplication are section options.
+func (pw *PCAPNGWriter) AddInterface(opts PCAPNGWriterOptions) (uint32, error) {
+	if pw == nil || pw.w == nil {
+		return 0, ErrInvalidHeader
+	}
+	if pw.interfaceCount >= MaxInterfaces {
+		return 0, ErrInterfaceLimit
+	}
+	var buf bytes.Buffer
+	if err := appendInterfaceBlock(&buf, opts); err != nil {
+		return 0, err
+	}
+	if err := pw.write(buf.Bytes()); err != nil {
+		return 0, err
+	}
+	id := pw.interfaceCount
+	pw.interfaceCount++
+	return id, nil
+}
+
+func appendInterfaceBlock(buf *bytes.Buffer, opts PCAPNGWriterOptions) error {
+	if len(opts.InterfaceName) > MaxOptionStringBytes || len(opts.InterfaceDescription) > MaxOptionStringBytes {
+		return ErrOptionLimit
+	}
+	snapLen := opts.SnapLen
+	if snapLen == 0 {
+		snapLen = DefaultLiveSnapLen
+	}
+	if snapLen > MaxSnapLen {
+		return ErrInvalidHeader
+	}
 	var idb bytes.Buffer
 	var idbFixed [8]byte
-	binary.LittleEndian.PutUint16(idbFixed[0:2], uint16(linkType))
+	binary.LittleEndian.PutUint16(idbFixed[0:2], uint16(opts.LinkType))
 	binary.LittleEndian.PutUint32(idbFixed[4:8], snapLen)
 	idb.Write(idbFixed[:])
 	if opts.InterfaceName != "" {
@@ -88,16 +124,8 @@ func NewPCAPNGWriter(w io.Writer, opts PCAPNGWriterOptions) (*PCAPNGWriter, erro
 	}
 	writePCAPNGOptionLE(&idb, optIDBTsResol, []byte{9}) // 10^-9 s (nanoseconds)
 	writePCAPNGOptionLE(&idb, optEndOfOpt, nil)
-	writePCAPNGBlockLE(&buf, BlockTypeInterfaceDesc, idb.Bytes())
-
-	if _, err := w.Write(buf.Bytes()); err != nil {
-		return nil, err
-	}
-	return &PCAPNGWriter{
-		w:        w,
-		linkType: linkType,
-		snapLen:  snapLen,
-	}, nil
+	writePCAPNGBlockLE(buf, BlockTypeInterfaceDesc, idb.Bytes())
+	return nil
 }
 
 // WriteDecryptionSecrets writes a PcapNG Decryption Secrets Block (DSB), such
@@ -120,8 +148,7 @@ func (pw *PCAPNGWriter) WriteDecryptionSecrets(secretsType uint32, secretData []
 	}
 	var block bytes.Buffer
 	writePCAPNGBlockLE(&block, BlockTypeDecryptionSecrets, body.Bytes())
-	_, err := pw.w.Write(block.Bytes())
-	return err
+	return pw.write(block.Bytes())
 }
 
 // WritePacket writes an Enhanced Packet Block (EPB) with nanosecond timestamp
@@ -129,6 +156,9 @@ func (pw *PCAPNGWriter) WriteDecryptionSecrets(secretsType uint32, secretData []
 func (pw *PCAPNGWriter) WritePacket(pkt PacketRecord, payload []byte) error {
 	if pw == nil || pw.w == nil {
 		return ErrInvalidHeader
+	}
+	if pkt.InterfaceID >= pw.interfaceCount {
+		return fmt.Errorf("%w: undeclared interface %d", ErrInvalidPacket, pkt.InterfaceID)
 	}
 	if len(payload) > MaxSnapLen {
 		return fmt.Errorf("%w: packet payload %d exceeds %d", ErrInvalidPacket, len(payload), MaxSnapLen)
@@ -205,8 +235,7 @@ func (pw *PCAPNGWriter) WritePacket(pkt PacketRecord, payload []byte) error {
 
 	var block bytes.Buffer
 	writePCAPNGBlockLE(&block, BlockTypeEnhancedPacket, body.Bytes())
-	_, err := pw.w.Write(block.Bytes())
-	return err
+	return pw.write(block.Bytes())
 }
 
 // WriteNameResolution writes a PcapNG Name Resolution Block (NRB) containing
@@ -251,8 +280,7 @@ func (pw *PCAPNGWriter) WriteNameResolution(records []NameResolutionRecord) erro
 
 	var block bytes.Buffer
 	writePCAPNGBlockLE(&block, BlockTypeNameResolution, body.Bytes())
-	_, err := pw.w.Write(block.Bytes())
-	return err
+	return pw.write(block.Bytes())
 }
 
 // WriteInterfaceStats writes a PcapNG Interface Statistics Block (ISB) with
@@ -260,6 +288,9 @@ func (pw *PCAPNGWriter) WriteNameResolution(records []NameResolutionRecord) erro
 func (pw *PCAPNGWriter) WriteInterfaceStats(stat InterfaceStatistics) error {
 	if pw == nil || pw.w == nil {
 		return ErrInvalidHeader
+	}
+	if stat.InterfaceID >= pw.interfaceCount {
+		return fmt.Errorf("%w: undeclared interface %d", ErrInvalidBlock, stat.InterfaceID)
 	}
 	var body bytes.Buffer
 	var fixed [12]byte
@@ -308,8 +339,7 @@ func (pw *PCAPNGWriter) WriteInterfaceStats(stat InterfaceStatistics) error {
 
 	var block bytes.Buffer
 	writePCAPNGBlockLE(&block, BlockTypeInterfaceStats, body.Bytes())
-	_, err := pw.w.Write(block.Bytes())
-	return err
+	return pw.write(block.Bytes())
 }
 
 func writePCAPNGBlockLE(buf *bytes.Buffer, blockType uint32, body []byte) {
@@ -339,4 +369,77 @@ func writePCAPNGOptionLE(buf *bytes.Buffer, code uint16, val []byte) {
 	if rem := len(val) % 4; rem != 0 {
 		buf.Write(make([]byte, 4-rem))
 	}
+}
+
+// captureOutput retains the first I/O failure: after a partial record the
+// stream cannot safely accept further records.
+type captureOutput struct {
+	w   io.Writer
+	err error
+}
+
+func (out *captureOutput) write(data []byte) error {
+	if out.err == nil {
+		var n int
+		n, out.err = out.w.Write(data)
+		if out.err == nil && n != len(data) {
+			out.err = io.ErrShortWrite
+		}
+	}
+	return out.err
+}
+
+// PCAPWriter writes classic little-endian PCAP records with nanosecond timestamps.
+type PCAPWriter struct {
+	captureOutput
+	snapLen uint32
+	header  [16]byte
+}
+
+// NewPCAPWriter writes the global PCAP header for linkType to w. A zero snapLen
+// selects [DefaultLiveSnapLen].
+func NewPCAPWriter(w io.Writer, linkType LinkType, snapLen uint32) (*PCAPWriter, error) {
+	if w == nil || snapLen > MaxSnapLen {
+		return nil, ErrInvalidHeader
+	}
+	if snapLen == 0 {
+		snapLen = DefaultLiveSnapLen
+	}
+	pw := &PCAPWriter{captureOutput: captureOutput{w: w}, snapLen: snapLen}
+	var hdr [24]byte
+	binary.LittleEndian.PutUint32(hdr[:4], PCAPMagicNanoLE)
+	binary.LittleEndian.PutUint16(hdr[4:6], 2)
+	binary.LittleEndian.PutUint16(hdr[6:8], 4)
+	binary.LittleEndian.PutUint32(hdr[16:20], snapLen)
+	binary.LittleEndian.PutUint32(hdr[20:24], uint32(linkType))
+	if err := pw.write(hdr[:]); err != nil {
+		return nil, err
+	}
+	return pw, nil
+}
+
+// WritePacket writes one packet with timestampNs in Unix nanoseconds. It saves
+// up to the configured snaplen and records the full payload length on the wire.
+// The PCAP seconds and original-length fields must fit unsigned 32-bit values.
+func (pw *PCAPWriter) WritePacket(timestampNs int64, payload []byte) error {
+	if pw == nil || pw.w == nil {
+		return ErrInvalidHeader
+	}
+	sec := timestampNs / 1_000_000_000
+	if timestampNs < 0 || sec > math.MaxUint32 || uint64(len(payload)) > math.MaxUint32 {
+		return ErrInvalidPacket
+	}
+	orig := uint32(len(payload))
+	n := min(orig, pw.snapLen)
+	binary.LittleEndian.PutUint32(pw.header[:4], uint32(sec))
+	binary.LittleEndian.PutUint32(pw.header[4:8], uint32(timestampNs%1_000_000_000))
+	binary.LittleEndian.PutUint32(pw.header[8:12], n)
+	binary.LittleEndian.PutUint32(pw.header[12:16], orig)
+	if err := pw.write(pw.header[:]); err != nil {
+		return err
+	}
+	if n == 0 {
+		return nil
+	}
+	return pw.write(payload[:n])
 }
