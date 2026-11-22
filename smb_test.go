@@ -65,6 +65,9 @@ func buildSMB2SessionSetupNTLMChallenge() []byte {
 	binary.LittleEndian.PutUint32(smb[16:20], 0x00000001)
 	binary.LittleEndian.PutUint64(smb[24:32], 1)
 	binary.LittleEndian.PutUint64(smb[40:48], 0xdeadbeef)
+	binary.LittleEndian.PutUint16(smb[64:], 9)
+	binary.LittleEndian.PutUint16(smb[68:], 72)
+	binary.LittleEndian.PutUint16(smb[70:], uint16(len(token)))
 	copy(smb[64+8:], token)
 	return pkt
 }
@@ -120,5 +123,18 @@ func TestSMB2AndNTLMBounds(t *testing.T) {
 	}
 	if info.TargetName != "" {
 		t.Fatalf("ParseNTLMSSP(overflow offset) TargetName = %q, want empty", info.TargetName)
+	}
+}
+
+func TestSMBSessionSecurityBufferBounds(t *testing.T) {
+	pkt := buildSMB2SessionSetupNTLMChallenge()
+	binary.LittleEndian.PutUint16(pkt[4+70:], 4)
+	msg, err := ParseSMB2Message(pkt)
+	if err != nil || msg.HasNTLM {
+		t.Fatalf("short declared buffer: %+v, %v", msg, err)
+	}
+	binary.LittleEndian.PutUint16(pkt[4+68:], 65535)
+	if _, err := ParseSMB2Message(pkt); !errors.Is(err, ErrInvalidSMB) {
+		t.Fatalf("offset outside command: %v", err)
 	}
 }

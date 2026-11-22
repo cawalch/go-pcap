@@ -146,9 +146,14 @@ func parseSMBCommand(buf []byte) (SMB2Message, []byte, error) {
 		msg.TreeID = binary.LittleEndian.Uint32(buf[36:40])
 	}
 	body := buf[64:]
+	var fields []byte
+	var minOffset int
 	switch command {
 	case SMB2CommandNegotiate:
 		if isResp && len(body) >= 64 {
+			if binary.LittleEndian.Uint16(body) == 65 {
+				fields, minOffset = body[56:60], 128
+			}
 			msg.SecurityMode = binary.LittleEndian.Uint16(body[2:4])
 			msg.DialectRevision = binary.LittleEndian.Uint16(body[4:6])
 		} else if !isResp && len(body) >= 36 {
@@ -192,13 +197,24 @@ func parseSMBCommand(buf []byte) (SMB2Message, []byte, error) {
 
 	case SMB2CommandSessionSetup:
 		if !isResp && len(body) >= 24 {
+			if binary.LittleEndian.Uint16(body) == 25 {
+				fields, minOffset = body[12:16], 88
+			}
 			msg.SecurityMode = uint16(body[3])
 			msg.SigningEnabled = (msg.SecurityMode & 0x0001) != 0
 			msg.SigningRequired = (msg.SecurityMode & 0x0002) != 0
+		} else if isResp && len(body) >= 8 && binary.LittleEndian.Uint16(body) == 9 && (status == 0 || status == 0xc0000016) {
+			fields, minOffset = body[4:8], 72
 		}
 	}
 
-	if command == SMB2CommandNegotiate || command == SMB2CommandSessionSetup {
+	if fields != nil && binary.LittleEndian.Uint16(fields[2:]) != 0 {
+		start := int(binary.LittleEndian.Uint16(fields))
+		end := start + int(binary.LittleEndian.Uint16(fields[2:]))
+		if start < minOffset || end > len(buf) {
+			return SMB2Message{}, rest, fmt.Errorf("%w: invalid security buffer", ErrInvalidSMB)
+		}
+		body = buf[start:end]
 		if ntlmIdx := bytes.Index(body, ntlmsspSig); ntlmIdx >= 0 {
 			if ntlm, err := ParseNTLMSSP(body[ntlmIdx:]); err == nil {
 				msg.NTLM = ntlm
@@ -213,7 +229,7 @@ func parseSMBCommand(buf []byte) (SMB2Message, []byte, error) {
 func smbRequestName(buf, descriptor []byte, minOffset int) (string, error) {
 	offset := int(binary.LittleEndian.Uint16(descriptor))
 	size := int(binary.LittleEndian.Uint16(descriptor[2:]))
-	if offset < minOffset || size == 0 || size%2 != 0 || offset+size > len(buf) {
+	if offset < minOffset || offset%2 != 0 || size == 0 || size%2 != 0 || offset+size > len(buf) {
 		return "", fmt.Errorf("%w: invalid UTF-16 name range", ErrInvalidSMB)
 	}
 	if size > MaxOptionStringBytes {
