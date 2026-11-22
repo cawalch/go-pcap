@@ -60,13 +60,12 @@ design scope.
   metrics.
 
 The library doesn't perform active network probing, certificate revocation
-checks, or operating-system trust store validation. For large files, use
-`NewFromReaderAt`, `Capture.PacketsFromReaderAt`,
-`Capture.PacketPayloadFromReaderAt`, `Capture.FlowsFromReaderAt`,
-`Capture.DNSFromReaderAt`, `Capture.TLSFromReaderAt`, and
-`Capture.QUICFromReaderAt` to read bounded container metadata, packet records,
-flows, and handshake records from an `io.ReaderAt` without loading the entire
-capture into memory. To write PcapNG files or capture live packets from a local
+checks, or operating-system trust store validation. For large files, use `NewFromReaderAt` for container
+metadata and `Capture.PacketPayloadFromReaderAt` for individual payloads.
+The PcapNG scanner reads one complete block at a time. `FlowsFromReaderAt`
+collects packet records and reads frame prefixes. The DNS, TLS and QUIC
+ReaderAt methods read the entire file into memory and accept files up to
+64 MiB. See the [parsing guide](docs/parsing.md#parse-capture-containers). To write PcapNG files or capture live packets from a local
 interface using standard-library system calls (`CGO_ENABLED=0`), use
 `NewPCAPNGWriter` and `OpenLive` (with `BPFFilterTCPPort`, `BPFFilterUDPPort`,
 `BPFFilterIPProtocol`, `BPFFilterIPv4Host`, and `EvalBPF`).
@@ -223,7 +222,7 @@ install Go.
 
 - [API reference](https://pkg.go.dev/github.com/cawalch/go-pcap)
 - [Parsing guide](docs/parsing.md)
-- [Architecture, roadmap, and YARA integration](docs/architecture.md)
+- [Architecture and release roadmap](docs/architecture.md)
 - [Release guide](docs/releases.md)
 - [Changelog](CHANGELOG.md)
 - [Security policy](SECURITY.md)

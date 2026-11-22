@@ -1,7 +1,6 @@
-# Architecture, roadmap, and YARA integration
+# Architecture and release roadmap
 
-This document anchors the design decisions, performance invariants, protocol
-expansion model, and `go-yara` `import "pcap"` specification for `go-pcap`.
+This guide describes the library design, release criteria, and scope of protocol additions.
 
 ## Design pillars
 
@@ -25,78 +24,46 @@ expansion model, and `go-yara` `import "pcap"` specification for `go-pcap`.
    (such as truncated blocks, snaplen mismatches, IP header length conflicts, or
    overlapping TCP segments) without panicking.
 
-## Phased roadmap
+## Release roadmap
 
-```mermaid
-flowchart LR
-    P1["<b>Phase 1 (Foundation MVP)</b><br/>• PCAP & PcapNG containers<br/>• DSB secrets & EPB PIDs<br/>• Zero-alloc L2-L4 Frame decoder<br/>• Deterministic 5-tuple Flows"]
-    P2["<b>Phase 2 (Core L7 & JA4+)</b><br/>• Bounded TCP reassembler<br/>• DNS parser & query matching<br/>• TLS 1.2/1.3 & X.509 parser<br/>• JA4, JA4S, JA4X, JA4T"]
-    P3["<b>Phase 3 (QUIC, HTTP & Decryption)</b><br/>• QUIC v1/v2 Initial decrypt<br/>• HTTP/1.x parser, JA4H & carving<br/>• Offline DSB TLS stream decrypt<br/>• SSH (HASSH) & SMB/NTLM"]
-    P4["<b>Phase 4 (Live Capture & YARA)</b><br/>• Pure-Go syscall live capture<br/>  (BPF / AF_PACKET / SIO_RCVALL)<br/>• go-yara built-in 'pcap' module<br/>• gopacket benchmark comparisons"]
+### v0.1.0 — capture correctness and compatibility
 
-    P1 --> P2 --> P3 --> P4
-```
+The [v0.1.0 milestone](https://github.com/cawalch/go-pcap/milestone/1) tracks the
+work required before the first experimental tag.
 
-### Phase 1: Container, DSB, L2–L4 frame cursor, and flow summary (Implemented)
+| Area | Release evidence |
+| --- | --- |
+| PcapNG sections | Resolve interface IDs within their section on both reader paths. Verify two sections that reuse interface 0 with different link types and timestamp settings. [#26](https://github.com/cawalch/go-pcap/issues/26) |
+| Flow summaries | Compare complete slice and ReaderAt results for padded, truncated and long packets. [#58](https://github.com/cawalch/go-pcap/issues/58) |
+| Reassembly | Verify exact TCP bytes for reordered midstream pickup and sequence wrap. Verify IPv6 overlap rejection and atomic-fragment handling through the consuming dissectors. [#44](https://github.com/cawalch/go-pcap/issues/44), [#52](https://github.com/cawalch/go-pcap/issues/52) |
+| Compatibility fixtures | Check QUIC v1 and v2 ciphertext and fingerprint outputs against independent references. Exercise Server Initial decryption, Simple Packet Blocks and DNS TXT records. [#17](https://github.com/cawalch/go-pcap/issues/17), [#59](https://github.com/cawalch/go-pcap/issues/59), [#60](https://github.com/cawalch/go-pcap/issues/60) |
 
-- Classic PCAP (little/big-endian, microsecond/nanosecond) and PcapNG (`SHB`,
-  `IDB`, `EPB`, `SPB`, `DSB`) container parser (`New`, `NewWithLength`, `Open`).
-- PcapNG `DSB` secret extraction (`SecretsTypeTLSKeyLog`,
-  `SecretsTypeWireGuardKeyLog`) and `EPB` process attribution (`ProcessID`,
-  `ThreadID`, packet flags).
-- Zero-allocation L2–L4 frame decoder (`DecodeFrame`) supporting Ethernet,
-  nested 802.1Q/802.1ad VLANs, Linux SLL/SLL2, BSD Loopback/Null, Raw IP, IPv4,
-  IPv6 (with bounded extension-header traversal), TCP (including raw SYN options),
-  UDP, and ICMPv4/ICMPv6.
-- Deterministic 5-tuple flow aggregator (`Capture.Flows`).
+Before tagging, verify the documented [ReaderAt limits](parsing.md#parse-capture-containers)
+and describe the extent of live capture testing for each supported platform.
+Linux, macOS and Windows CI run unit tests. The live tests cover argument
+validation and buffer handling. Successful device reads and kernel filter
+behavior require separate verification on a host with capture permissions.
 
-### Phase 2: Bounded TCP stream reassembly, DNS, TLS 1.2/1.3, and JA4+ (Implemented)
+### After v0.1.0 — large captures and repeated analysis
 
-- Synchronous, bounded TCP interval reassembler (`ReassembleTCP`,
-  `Capture.Streams`) with explicit sequence-gap, midstream-pickup, and
-  overlap-conflict anomaly reporting (`StreamAnomalies`).
-- Standalone and capture-level DNS message parser (`ParseDNS`, `Capture.DNS`)
-  with query lookup (`Capture.HasDNSQuery`).
-- Standalone and capture-level TLS 1.2/1.3 handshake parser (`ParseTLSRecords`,
-  `ParseTLSClientHello`, `ParseTLSServerHello`, `Capture.TLS`,
-  `Capture.HasTLSJA4`, `Capture.HasTLSSNI`) extracting `ClientHello`,
-  `ServerHello`, X.509 certificates, and deterministic **JA4, JA4S, JA4X, and
-  JA4T** fingerprints (`JA4T`, `Frame.JA4T`, `JA4XFromDER`, `JA4XFromCert`).
+Measure ReaderAt request counts, bytes read and allocations while implementing
+[packet iteration](https://github.com/cawalch/go-pcap/issues/20). Track
+[bounded DNS, TLS and QUIC reads](https://github.com/cawalch/go-pcap/issues/61)
+separately. Measure the benefit of [reusing TCP streams in HTTP and HTTP/2](https://github.com/cawalch/go-pcap/issues/41)
+on captures with and without decryption keys before changing segment storage.
+Schedule header prefetching, fingerprint formatting, QUIC allocation changes
+and compiler bounds-check work when end-to-end measurements justify them.
 
-### Phase 3: QUIC Initial decryption, HTTP carving, DSB stream decryption, and SSH (Implemented)
+### Protocol and integration proposals
 
-- QUIC v1 (RFC 9001) and v2 (RFC 9369) Initial packet decryption
-  (`ParseQUICInitialPacket`, `DecryptQUICInitial`, `Capture.QUIC`,
-  `Capture.HasQUICJA4`, `Capture.HasQUICSNI`) using `crypto/hkdf` and
-  `crypto/aes`, `CRYPTO` frame reassembly, and inner TLS 1.3 `ClientHello` +
-  `q13...` JA4 extraction.
-- HTTP/1.x request/response dissector (`ParseHTTPRequest`, `ParseHTTPResponse`,
-  `Capture.HTTP`) with **JA4H** fingerprinting and `Content-Length` / `chunked`
-  body payload carving (ready to pass carved payloads directly to `go-pe` or
-  `go-yara`).
-- Offline TLS 1.3 application stream decryption (`ParseTLSKeyLog`,
-  `Capture.TLSKeyLog`, `DecryptTLS13Records`, `Capture.DecryptedTLSStreams`)
-  using embedded PcapNG `DSB` secrets or caller-supplied `SSLKEYLOGFILE`
-  material, automatically feeding `Capture.HTTP`.
-- SSH handshake dissector (`ParseSSHHandshake`, `Capture.SSH`) extracting version
-  banners, `SSH_MSG_KEXINIT` algorithm lists, and **HASSH / HASSHServer**
-  fingerprints.
-
-### Phase 4: ReaderAt, PcapNG writer, SMB2/NTLM, beacon analytics, and stdlib live capture (Implemented)
-
-- Bounded `io.ReaderAt` APIs (`NewFromReaderAt`, `Capture.PacketsFromReaderAt`,
-  `Capture.PacketPayloadFromReaderAt`) for inspecting large captures without
-  loading full files into memory.
-- PcapNG streaming writer (`NewPCAPNGWriter`, `PCAPNGWriter.WriteDecryptionSecrets`,
-  `PCAPNGWriter.WritePacket`) emitting spec-compliant `SHB`, `IDB`, `DSB`, and
-  process-tagged `EPB` blocks.
-- Pure-Go live capture (`OpenLive`, `ParseBPFBuffer`) using OS-native descriptors
-  in `syscall` (`/dev/bpf*` on macOS, `AF_PACKET` on Linux) with optional kernel
-  BPF bytecode filters (`BPFInstruction`).
-- SMB2/3 and NTLMSSP dissector (`ParseSMB2Message`, `ParseNTLMSSP`,
-  `Capture.SMB`) and statistical C2 beacon/jitter analyzer (`ComputeBeaconStats`,
-  `Capture.Beacons`).
-- Ready for downstream `go-yara` `import "pcap"` built-in module wiring.
+Add protocol fields when a caller can use the observation and the parser can
+bound the work. Community ID is a candidate for cross-tool flow correlation.
+HTTP/3 depends on a separate decision about QUIC 1-RTT decryption and stream
+reconstruction. Consumers interpret observations such as TCP timestamps, ICMP
+statistics and advertised address bindings in their deployment context.
+The [go-yara adapter](https://github.com/cawalch/go-yara/issues/646) belongs to
+the consuming repository. Its schema and release schedule are owned there.
+The [original design discussion](https://github.com/cawalch/go-pcap/issues/19) records the proposed adapter contract.
 
 ## Protocol expansion model
 
@@ -114,55 +81,3 @@ To add a new L7 protocol dissector (`<proto>`):
    function and a capture-level `(c *Capture) <Proto>(data []byte)` method.
 2. Pair it with `proto_<proto>_test.go`, `proto_<proto>_bounds_test.go`,
    `proto_<proto>_fuzz_test.go`, and `proto_<proto>_benchmark_test.go`.
-
-## `go-yara` `import "pcap"` specification
-
-`go-pcap` remains independent of `go-yara`. In `go-yara`, the `pcap` module
-adapter wraps `go-pcap` with per-scan lazy caching on `MatchContext.moduleCache`,
-mirroring `modules_pe.go`.
-
-### Top-level fields and constants
-
-| Object | Fields |
-| --- | --- |
-| `pcap` | `is_pcap`, `is_pcapng`, `format`, `link_type`, `snaplen`, `packet_count`, `flow_count`, `interface_count`, `secret_count`, `declared_extent`, `input_truncated`, `anomalies` |
-| `pcap.interfaces[i]` | `id`, `link_type`, `snaplen`, `name`, `description`, `os` |
-| `pcap.secrets[i]` | `type`, `length`, `offset` |
-| `pcap.flows[i]` | `protocol`, `src_ip`, `dst_ip`, `src_port`, `dst_port`, `packet_count`, `client_packets`, `server_packets`, `client_bytes`, `server_bytes`, `first_timestamp_ns`, `last_timestamp_ns`, `tcp_flags`, `process_id`, `anomalies`, `ja4t` |
-| `pcap.dns[i]` | `flow_index`, `transaction_id`, `is_response`, `opcode`, `rcode`, `qname`, `qtype`, `answers` |
-| `pcap.tls[i]` | `flow_index`, `version`, `sni`, `alpn`, `ja4`, `ja4s`, `ja4x`, `issuer`, `subject`, `not_before`, `not_after`, `serial`, `anomalies` |
-| `pcap.quic[i]` | `flow_index`, `version`, `dcid`, `scid`, `sni`, `alpn`, `ja4`, `anomalies` |
-| `pcap.http[i]` | `flow_index`, `method`, `host`, `uri`, `user_agent`, `status_code`, `content_type`, `body_offset`, `body_length`, `ja4h` |
-
-### Query functions (Zero-array-allocation fast paths)
-
-Rules often test whether any flow or transaction matches a signature without
-iterating the full YARA object tree. The adapter provides overloaded functions
-that scan `go-pcap` records directly:
-
-- `pcap.has_flow(ip_string, port_int)` / `pcap.has_flow(ip_string)`
-- `pcap.dns_query(exact_string)` / `pcap.dns_query(/regex/)`
-- `pcap.tls_sni(exact_string)` / `pcap.tls_sni(/regex/)`
-- `pcap.tls_ja4(hash_string)` / `pcap.tls_ja4s(hash_string)` / `pcap.tls_ja4x(hash_string)`
-- `pcap.quic_ja4(hash_string)` / `pcap.quic_sni(exact_string_or_regex)`
-- `pcap.http_uri(exact_string_or_regex)` / `pcap.http_host(exact_string_or_regex)` / `pcap.http_ja4h(hash_string)`
-
-### Example YARA rules
-
-```yara
-import "pcap"
-
-rule Suspicious_C2_Capture {
-    condition:
-        pcap.is_pcap and
-        not pcap.input_truncated and
-        (
-            pcap.tls_ja4("t13d1516h2_8daaf6152771_b186095e22b6") or
-            pcap.dns_query(/^[a-z0-9]{24,}\.stage\.example\.com$/i) or
-            for any f in pcap.flows : (
-                f.dst_port == 443 and
-                f.anomalies & pcap.FLOW_ANOMALY_IP_FRAGMENT != 0
-            )
-        )
-}
-```
