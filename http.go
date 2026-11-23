@@ -97,7 +97,7 @@ func ParseHTTPRequest(stream []byte) (HTTPRequest, int, error) {
 	return parseHTTPRequest(stream, nil)
 }
 
-func parseHTTPRequest(stream []byte, decodedBudget *int) (HTTPRequest, int, error) {
+func parseHTTPRequest(stream []byte, decodedBudget *httpDecodeBudget) (HTTPRequest, int, error) {
 	lineEnd := bytes.Index(stream, []byte("\r\n"))
 	if lineEnd <= 0 || lineEnd > MaxHTTPHeaderLineBytes {
 		return HTTPRequest{}, 0, fmt.Errorf("%w: missing or oversize HTTP request line", ErrInvalidHTTP)
@@ -183,7 +183,7 @@ func ParseHTTPResponse(stream []byte) (HTTPResponse, int, error) {
 	return parseHTTPResponse(stream, nil)
 }
 
-func parseHTTPResponse(stream []byte, decodedBudget *int) (HTTPResponse, int, error) {
+func parseHTTPResponse(stream []byte, decodedBudget *httpDecodeBudget) (HTTPResponse, int, error) {
 	lineEnd := bytes.Index(stream, []byte("\r\n"))
 	if lineEnd <= 0 || lineEnd > MaxHTTPHeaderLineBytes {
 		return HTTPResponse{}, 0, fmt.Errorf("%w: missing or oversize HTTP status line", ErrInvalidHTTP)
@@ -333,7 +333,23 @@ func extractHTTPBody(stream []byte, bodyStart int, contentLen int, chunked bool,
 
 var errHTTPDecodeBudget = fmt.Errorf("%w: HTTP content decoding exceeds %d bytes per capture", ErrHTTPLimit, MaxHTTPDecodedBodyBytesPerScan)
 
-func decodeHTTPContent(body []byte, encoding string, chunked bool, budget *int) ([]byte, bool, HTTPAnomalies, error) {
+type httpDecodeBudget struct {
+	remaining int
+	scratch   bytes.Buffer
+}
+
+// read reuses one output buffer during a capture scan. Successful scan
+// results copy the borrowed bytes before reading another message.
+func (b *httpDecodeBudget) read(r io.Reader) ([]byte, error) {
+	if b == nil {
+		return io.ReadAll(r)
+	}
+	b.scratch.Reset()
+	_, err := b.scratch.ReadFrom(r)
+	return b.scratch.Bytes(), err
+}
+
+func decodeHTTPContent(body []byte, encoding string, chunked bool, budget *httpDecodeBudget) ([]byte, bool, HTTPAnomalies, error) {
 	var anomalies HTTPAnomalies
 	if len(body) == 0 {
 		return body, false, anomalies, nil
@@ -344,26 +360,29 @@ func decodeHTTPContent(body []byte, encoding string, chunked bool, budget *int) 
 		if reader != nil {
 			limit := MaxHTTPBodyBytes
 			if budget != nil {
-				limit = min(limit, *budget)
+				limit = min(limit, budget.remaining)
 			}
-			decoded, readErr := io.ReadAll(io.LimitReader(reader, int64(limit)+1))
+			decoded, readErr := budget.read(io.LimitReader(reader, int64(limit)+1))
 			if closeErr := reader.Close(); readErr == nil {
 				readErr = closeErr
 			}
 
 			if budget != nil {
 				charged := min(len(decoded), MaxHTTPBodyBytes)
-				if charged > *budget {
+				if charged > budget.remaining {
 					return nil, false, anomalies, errHTTPDecodeBudget
 				}
 				// A checksum or stream error still costs the work of inflating
 				// the bytes the reader produced before reporting the error.
-				*budget -= charged
+				budget.remaining -= charged
 			}
 			if readErr == nil {
 				if len(decoded) > MaxHTTPBodyBytes {
 					anomalies.DecompressionLimitExceeded = true
 					decoded = decoded[:MaxHTTPBodyBytes:MaxHTTPBodyBytes]
+				}
+				if budget != nil {
+					decoded = bytes.Clone(decoded)
 				}
 				return decoded, true, anomalies, nil
 			}
@@ -597,7 +616,7 @@ func (c *Capture) HTTP(data []byte) ([]HTTPRecord, error) {
 		return nil, err
 	}
 	var records []HTTPRecord
-	decodedBudget := MaxHTTPDecodedBodyBytesPerScan
+	decodedBudget := httpDecodeBudget{remaining: MaxHTTPDecodedBodyBytesPerScan}
 	for i := range streams {
 		if err := appendHTTPFromTCPStream(&streams[i], false, &records, &decodedBudget); err != nil {
 			return nil, err
@@ -616,7 +635,7 @@ func (c *Capture) HTTP(data []byte) ([]HTTPRecord, error) {
 	return records, nil
 }
 
-func appendHTTPFromTCPStream(st *TCPStream, isDecrypted bool, records *[]HTTPRecord, decodedBudget *int) error {
+func appendHTTPFromTCPStream(st *TCPStream, isDecrypted bool, records *[]HTTPRecord, decodedBudget *httpDecodeBudget) error {
 	for off := 0; off < len(st.Client.Data); {
 		req, consumed, err := parseHTTPRequest(st.Client.Data[off:], decodedBudget)
 		if errors.Is(err, errHTTPDecodeBudget) {

@@ -107,11 +107,14 @@ func TestHTTPKeepAlivePipeliningAndChunkedTrailers(t *testing.T) {
 		"GET /first HTTP/1.1\r\nHost: keepalive.example\r\n\r\n" +
 			"POST /second HTTP/1.1\r\nHost: keepalive.example\r\nContent-Length: 4\r\n\r\nBODY",
 	)
-	serverStream := []byte(
-		"HTTP/1.1 204 No Content\r\nServer: srv\r\n\r\n" +
-			"HTTP/1.1 304 Not Modified\r\nContent-Length: 12\r\n\r\n" +
-			"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n2\r\nok\r\n0\r\nX-Trailer: done\r\n\r\n" +
-			"HTTP/1.1 200 OK\r\nContent-Length: 3\r\n\r\nend",
+	gzipOK := compressHTTPTestBody(t, "gzip", []byte("ok"))
+	gzipEnd := compressHTTPTestBody(t, "gzip", []byte("end"))
+	serverStream := fmt.Appendf(nil,
+		"HTTP/1.1 204 No Content\r\nServer: srv\r\n\r\n"+
+			"HTTP/1.1 304 Not Modified\r\nContent-Length: 12\r\n\r\n"+
+			"HTTP/1.1 200 OK\r\nContent-Encoding: gzip\r\nTransfer-Encoding: chunked\r\n\r\n%x\r\n%s\r\n0\r\nX-Trailer: done\r\n\r\n"+
+			"HTTP/1.1 200 OK\r\nContent-Encoding: gzip\r\nContent-Length: %d\r\n\r\n%s",
+		len(gzipOK), gzipOK, len(gzipEnd), gzipEnd,
 	)
 
 	// Verify 304 with Content-Length ends strictly at the header boundary.
@@ -155,10 +158,10 @@ func TestHTTPKeepAlivePipeliningAndChunkedTrailers(t *testing.T) {
 	if !recs[3].IsResponse || recs[3].Response.StatusCode != 304 || len(recs[3].Response.Body) != 0 {
 		t.Fatalf("rec[3] = %+v, want bodyless 304 with Content-Length", recs[3])
 	}
-	if !recs[4].IsResponse || string(recs[4].Response.Body) != "ok" {
+	if !recs[4].IsResponse || !recs[4].Response.IsDecompressed || string(recs[4].Response.Body) != "ok" {
 		t.Fatalf("rec[4] = %+v, want chunked response with trailer", recs[4])
 	}
-	if !recs[5].IsResponse || string(recs[5].Response.Body) != "end" {
+	if !recs[5].IsResponse || !recs[5].Response.IsDecompressed || string(recs[5].Response.Body) != "end" {
 		t.Fatalf("rec[5] = %+v, want trailing 200 end", recs[5])
 	}
 }
