@@ -52,6 +52,19 @@ external caller:
 go test -run 'TestReaderAtFlowParity|TestFlowHandshakeTimestamp|ExampleFlowSummary' .
 ```
 
+The [consumer compatibility suite](testdata/consumer/contract_test.go) is a
+separate Go module. From `testdata/consumer`, run the same tests against
+the published private module and your checkout:
+
+```sh
+GOPRIVATE=github.com/cawalch/go-pcap GOWORK=off go test -mod=readonly -count=1 ./...
+workdir=$(mktemp -d)
+(cd "$workdir" && go work init)
+export GOWORK="$workdir/go.work"
+go work use . ../..
+go test -count=1 ./...
+```
+
 CI tests the Go 1.26 compatibility floor and the current stable toolchain.
 Use the patched release for each line when reproducing a result. The Linux
 jobs cover race detection and 32-bit arithmetic. The stable job discovers
