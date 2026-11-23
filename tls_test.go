@@ -7,6 +7,7 @@ import (
 	"crypto/ecdsa"
 	"crypto/elliptic"
 	"crypto/rand"
+	"crypto/sha256"
 	"crypto/x509"
 	"crypto/x509/pkix"
 	"encoding/binary"
@@ -262,11 +263,22 @@ func TestPCAPNGDSBTLS13DecryptionToHTTP(t *testing.T) {
 	httpReqPlain := []byte("GET /beacon HTTP/1.1\r\nHost: secure.c2.example.com\r\nUser-Agent: Go-http-client/1.1\r\n\r\n")
 	httpRespPlain := []byte("HTTP/1.1 200 OK\r\nServer: c2\r\nContent-Length: 7\r\n\r\nCOMMAND")
 
-	encReqRec := encryptTLS13AppDataRecord(t, clientAppSecret, TLS_AES_128_GCM_SHA256, 0, TLSRecordApplicationData, httpReqPlain)
-	encRespRec := encryptTLS13AppDataRecord(t, serverAppSecret, TLS_AES_128_GCM_SHA256, 0, TLSRecordApplicationData, httpRespPlain)
-
-	clientStream := append(bytes.Clone(chRec), encReqRec...)
-	serverStream := append(bytes.Clone(shRec), encRespRec...)
+	// Independently computed HKDF-Expand-Label(clientAppSecret, "traffic upd", "", 32).
+	nextClient, err := hex.DecodeString("f85d855ad7ec6180400925db7c0ea442d9076cd4174db4a46654b11ea416bedd")
+	if err != nil {
+		t.Fatal(err)
+	}
+	clientStream := bytes.Join([][]byte{
+		chRec,
+		encryptTLS13AppDataRecord(t, clientAppSecret, TLS_AES_128_GCM_SHA256, 0, TLSRecordApplicationData, httpReqPlain[:12]),
+		encryptTLS13AppDataRecord(t, clientAppSecret, TLS_AES_128_GCM_SHA256, 1, TLSRecordHandshake, []byte{TLSHandshakeKeyUpdate, 0, 0, 1, 0}),
+		encryptTLS13AppDataRecord(t, nextClient, TLS_AES_128_GCM_SHA256, 0, TLSRecordApplicationData, httpReqPlain[12:]),
+	}, nil)
+	serverStream := bytes.Join([][]byte{
+		shRec,
+		encryptTLS13AppDataRecord(t, serverAppSecret, TLS_AES_128_GCM_SHA256, 0, TLSRecordApplicationData, httpRespPlain[:12]),
+		encryptTLS13AppDataRecord(t, serverAppSecret, TLS_AES_128_GCM_SHA256, 1, TLSRecordApplicationData, httpRespPlain[12:]),
+	}, nil)
 
 	p1 := buildEthernetIPv4TCPFrame([4]byte{10, 0, 0, 1}, [4]byte{10, 0, 0, 2}, 54000, 443, 1, 0, TCPFlagSYN, nil)
 	p2 := buildEthernetIPv4TCPFrame([4]byte{10, 0, 0, 2}, [4]byte{10, 0, 0, 1}, 443, 54000, 100, 2, TCPFlagSYN|TCPFlagACK, nil)
@@ -277,6 +289,11 @@ func TestPCAPNGDSBTLS13DecryptionToHTTP(t *testing.T) {
 	cap, err := New(rawPCAPNG)
 	if err != nil {
 		t.Fatalf("New(PCAPNG) error = %v", err)
+	}
+
+	streams, err := cap.DecryptedTLSStreams(rawPCAPNG, nil)
+	if err != nil || len(streams) != 1 || !bytes.Equal(streams[0].Client.Data, httpReqPlain) || !bytes.Equal(streams[0].Server.Data, httpRespPlain) {
+		t.Fatalf("decrypted streams across client KeyUpdate: %+v, %v", streams, err)
 	}
 
 	checkReaderParity(t, rawPCAPNG, cap.TLS, cap.TLSFromReaderAt)
@@ -579,5 +596,78 @@ func TestTLSHandshakeRecordBudget(t *testing.T) {
 		if _, err := ParseTLSRecords(wire); !errors.Is(err, ErrInvalidTLS) {
 			t.Errorf("alert %x: got %v", alert, err)
 		}
+	}
+}
+
+func TestTLS13PostHandshakeKeyUpdate(t *testing.T) {
+	const suite = TLS_AES_256_GCM_SHA384
+	initial := bytes.Repeat([]byte{0xaa}, 48)
+	// SHA-384 reference result computed independently with HMAC.
+	next, err := hex.DecodeString("2d60a729099363d5c4f8fe5057aacdc76c5e8774641e03cbf4467490d0e56b11b43988b6f1822dc961a7bb2e8a4ffc85")
+	if err != nil {
+		t.Fatal(err)
+	}
+	update := []byte{TLSHandshakeKeyUpdate, 0, 0, 1, 1}
+	for _, tc := range []struct {
+		name   string
+		parts  [][]byte
+		rotate bool
+	}{
+		{"coalesced and fragmented", [][]byte{{4, 0, 0, 2, 0, 0, 24, 0}, {0, 1}, {1}}, true},
+		{"inside another message", [][]byte{{4, 0, 0, 5}, update}, false},
+		{"invalid request", [][]byte{{24, 0, 0, 1, 2}}, false},
+		{"invalid length", [][]byte{{24, 0, 0, 2, 0, 0}}, false},
+		{"update before record boundary", [][]byte{append(bytes.Clone(update), 4, 0, 0, 0)}, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var wire []byte
+			for i, part := range tc.parts {
+				wire = append(wire, encryptTLS13AppDataRecord(t, initial, suite, uint64(i), TLSRecordHandshake, part)...)
+			}
+			secret, seq := initial, uint64(len(tc.parts))
+			if tc.rotate {
+				secret, seq = next, 0
+			}
+			wire = append(wire, encryptTLS13AppDataRecord(t, secret, suite, seq, TLSRecordApplicationData, []byte("after"))...)
+			hs, app, err := DecryptTLS13Records(wire, suite, nil, initial)
+			if err != nil || string(app) != "after" || !bytes.Equal(hs, bytes.Join(tc.parts, nil)) {
+				t.Fatalf("handshake %x, application %q, err %v", hs, app, err)
+			}
+		})
+	}
+}
+
+func TestTLS13KeyUpdateLimit(t *testing.T) {
+	const suite = TLS_AES_128_GCM_SHA256
+	initial := bytes.Repeat([]byte{0xaa}, 32)
+	secret := initial
+	var wire []byte
+	for i := 0; i <= MaxTLSKeyUpdatesPerStream+1; i++ {
+		wire = append(wire, encryptTLS13AppDataRecord(t, secret, suite, 0, TLSRecordApplicationData, []byte{byte(i)})...)
+		wire = append(wire, encryptTLS13AppDataRecord(t, secret, suite, 1, TLSRecordHandshake, []byte{24, 0, 0, 1, 0})...)
+		var err error
+		secret, err = tls13ExpandLabelHash(sha256.New, secret, "traffic upd", nil, 32)
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+	_, app, err := DecryptTLS13Records(wire, suite, nil, initial)
+	if err != nil || len(app) != MaxTLSKeyUpdatesPerStream+1 || app[len(app)-1] != MaxTLSKeyUpdatesPerStream {
+		t.Fatalf("recovered generations %v, err %v", app, err)
+	}
+}
+
+func TestTLS13KeyUpdateRequiresApplicationKey(t *testing.T) {
+	const suite = TLS_AES_128_GCM_SHA256
+	hsSecret := bytes.Repeat([]byte{0x11}, 32)
+	appSecret := bytes.Repeat([]byte{0x22}, 32)
+	update := []byte{TLSHandshakeKeyUpdate, 0, 0, 1, 0}
+	beforeApp := encryptTLS13AppDataRecord(t, hsSecret, suite, 0, TLSRecordHandshake, update)
+	tampered := encryptTLS13AppDataRecord(t, appSecret, suite, 0, TLSRecordHandshake, update)
+	tampered[len(tampered)-1] ^= 1
+	data := encryptTLS13AppDataRecord(t, appSecret, suite, 0, TLSRecordApplicationData, []byte("current"))
+	hs, app, err := DecryptTLS13Records(bytes.Join([][]byte{beforeApp, tampered, data}, nil), suite, hsSecret, appSecret)
+	if err != nil || !bytes.Equal(hs, update) || string(app) != "current" {
+		t.Fatalf("handshake %x, application %q, err %v", hs, app, err)
 	}
 }

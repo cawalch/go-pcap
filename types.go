@@ -278,17 +278,18 @@ const (
 	MaxDNSMessagesPerScan  = 65_536
 
 	// TLS parser limits.
-	MaxTLSRecordBytes       = 16384 + 2048 // RFC 8446 record expansion limit
-	MaxTLSHandshakeRecords  = 128          // Maximum records inspected per directional plaintext handshake scan.
-	MaxTLSHandshakeBytes    = 256 << 10    // 256 KiB coalesced handshake message
-	MaxTLSCipherSuites      = 256
-	MaxTLSExtensions        = 128
-	MaxTLSSignatureSchemes  = 128
-	MaxTLSALPNProtocols     = 32
-	MaxTLSCertificates      = 16
-	MaxTLSCertSANsPerKind   = 64 // Maximum DNS names and IP addresses retained per certificate, independently.
-	MaxTLSHandshakesPerScan = 16_384
-	MaxTLSKeyLogEntries     = 4096
+	MaxTLSRecordBytes         = 16384 + 2048 // RFC 8446 record expansion limit
+	MaxTLSHandshakeRecords    = 128          // Maximum records inspected per directional plaintext handshake scan.
+	MaxTLSHandshakeBytes      = 256 << 10    // 256 KiB coalesced handshake message
+	MaxTLSCipherSuites        = 256
+	MaxTLSExtensions          = 128
+	MaxTLSSignatureSchemes    = 128
+	MaxTLSALPNProtocols       = 32
+	MaxTLSCertificates        = 16
+	MaxTLSCertSANsPerKind     = 64 // Maximum DNS names and IP addresses retained per certificate, independently.
+	MaxTLSHandshakesPerScan   = 16_384
+	MaxTLSKeyUpdatesPerStream = 32 // Maximum application traffic key updates per direction.
+	MaxTLSKeyLogEntries       = 4096
 
 	// QUIC Initial parser limits.
 	MaxQUICConnIDBytes    = 20
@@ -444,6 +445,7 @@ const (
 	TLSHandshakeServerHello        uint8 = 2
 	TLSHandshakeCertificate        uint8 = 11
 	TLSHandshakeCertificateRequest uint8 = 13
+	TLSHandshakeKeyUpdate          uint8 = 24
 )
 
 // TLS protocol versions.

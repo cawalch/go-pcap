@@ -117,17 +117,20 @@ func (c *Capture) TLSKeyLog(extraKeyLog []byte) (*TLSKeyLog, error) {
 	return ParseTLSKeyLog(combined.Bytes())
 }
 
-func deriveTLS13TrafficAEAD(secret []byte, cipherSuite uint16) (cipher.AEAD, [12]byte, error) {
-	var hashFn func() hash.Hash
-	var keyLen int
-	switch cipherSuite {
+func tls13SuiteParams(suite uint16) (func() hash.Hash, int) {
+	switch suite {
 	case TLS_AES_128_GCM_SHA256:
-		hashFn = sha256.New
-		keyLen = 16
+		return sha256.New, 16
 	case TLS_AES_256_GCM_SHA384:
-		hashFn = sha512.New384
-		keyLen = 32
+		return sha512.New384, 32
 	default:
+		return nil, 0
+	}
+}
+
+func deriveTLS13TrafficAEAD(secret []byte, cipherSuite uint16) (cipher.AEAD, [12]byte, error) {
+	hashFn, keyLen := tls13SuiteParams(cipherSuite)
+	if hashFn == nil {
 		return nil, [12]byte{}, fmt.Errorf("%w: unsupported TLS 1.3 cipher suite %#04x for decryption", ErrInvalidTLS, cipherSuite)
 	}
 
@@ -164,10 +167,43 @@ func tls13ExpandLabelHash(hashFn func() hash.Hash, secret []byte, label string, 
 	return hkdf.Expand(hashFn, secret, string(b), length)
 }
 
+// tls13PostHandshake tracks message boundaries without retaining message bodies.
+type tls13PostHandshake struct {
+	header       [4]byte
+	n, remaining int
+}
+
+func (h *tls13PostHandshake) endsWithKeyUpdate(record []byte) bool {
+	for len(record) > 0 {
+		if h.n < len(h.header) {
+			n := copy(h.header[h.n:], record)
+			h.n += n
+			record = record[n:]
+			if h.n < len(h.header) {
+				return false
+			}
+			h.remaining = int(h.header[1])<<16 | int(h.header[2])<<8 | int(h.header[3])
+		}
+		if h.remaining > len(record) {
+			h.remaining -= len(record)
+			return false
+		}
+		// The one-byte request must end the old traffic generation's record.
+		update := h.header == [4]byte{TLSHandshakeKeyUpdate, 0, 0, 1} && len(record) == 1 && record[0] <= 1
+		record = record[h.remaining:]
+		h.n = 0
+		if update {
+			return true
+		}
+	}
+	return false
+}
+
 // DecryptTLS13Records decrypts a directional TLS 1.3 byte stream using the
 // caller's handshake traffic secret (optional) and application traffic secret 0
 // (optional). It returns the decrypted handshake payload bytes and application
-// data payload bytes.
+// data payload bytes. Authenticated KeyUpdate messages advance only this direction.
+// At the next update after [MaxTLSKeyUpdatesPerStream], it returns the recovered prefix.
 func DecryptTLS13Records(
 	stream []byte,
 	cipherSuite uint16,
@@ -190,6 +226,8 @@ func DecryptTLS13Records(
 		}
 	}
 
+	var postHandshake tls13PostHandshake
+	var updates int
 	var hsSeq, appSeq uint64
 	inAppPhase := hsAEAD == nil
 	var hsBuf, appBuf bytes.Buffer
@@ -250,6 +288,9 @@ func DecryptTLS13Records(
 		innerType := plain[idx]
 		innerContent := plain[:idx]
 
+		if innerType != TLSRecordHandshake {
+			postHandshake = tls13PostHandshake{}
+		}
 		switch innerType {
 		case TLSRecordHandshake:
 			if !hsFull {
@@ -260,6 +301,22 @@ func DecryptTLS13Records(
 					hsBuf.Write(innerContent[:rem])
 					hsFull = true
 				}
+			}
+			if inAppPhase && postHandshake.endsWithKeyUpdate(innerContent) {
+				if updates == MaxTLSKeyUpdatesPerStream {
+					return hsBuf.Bytes(), appBuf.Bytes(), nil
+				}
+				hashFn, _ := tls13SuiteParams(cipherSuite)
+				appSecret, err = tls13ExpandLabelHash(hashFn, appSecret, "traffic upd", nil, hashFn().Size())
+				if err != nil {
+					return nil, nil, err
+				}
+				appAEAD, appIV, err = deriveTLS13TrafficAEAD(appSecret, cipherSuite)
+				if err != nil {
+					return nil, nil, err
+				}
+				appSeq = 0
+				updates++
 			}
 		case TLSRecordApplicationData:
 			if !appFull {
