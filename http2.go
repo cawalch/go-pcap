@@ -187,7 +187,8 @@ func (c *Capture) HTTP2(data []byte) ([]HTTP2Record, error) {
 	}
 	var records []HTTP2Record
 	for i := range streams {
-		if err := appendHTTP2FromTCPStream(&streams[i], false, &records); err != nil {
+		inner, _, _ := proxyStream(streams[i])
+		if err := appendHTTP2FromTCPStream(&inner, false, &records); err != nil {
 			return nil, err
 		}
 	}

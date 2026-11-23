@@ -187,7 +187,7 @@ func (c *Capture) SSH(data []byte) ([]SSHRecord, error) {
 	var records []SSHRecord
 	sshFlows := make(map[flowKey]int)
 	for i := range streams {
-		st := &streams[i]
+		st, _, _ := proxyStream(streams[i])
 		if !bytes.HasPrefix(st.Client.Data, []byte("SSH-")) && !bytes.HasPrefix(st.Server.Data, []byte("SSH-")) {
 			continue
 		}

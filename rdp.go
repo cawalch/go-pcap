@@ -115,7 +115,7 @@ func (c *Capture) RDP(data []byte) ([]RDPRecord, error) {
 	}
 	var records []RDPRecord
 	for i := range streams {
-		st := &streams[i]
+		st, _, _ := proxyStream(streams[i])
 		if len(st.Client.Data) >= 11 && st.Client.Data[0] == 0x03 && st.Client.Data[1] == 0x00 {
 			if neg, err := ParseRDPNegotiation(st.Client.Data); err == nil && isRDPNegotiationRecord(st.SrcPort, st.DstPort, neg) {
 				if len(records) >= MaxRDPRecordsPerScan {

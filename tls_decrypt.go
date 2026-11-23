@@ -444,7 +444,7 @@ func (c *Capture) DecryptedTLSStreams(data []byte, extraKeyLog []byte) ([]TCPStr
 func decryptTLSStreams(streams []TCPStream, keyLog *TLSKeyLog) []TCPStream {
 	var decrypted []TCPStream
 	for i := range streams {
-		st := &streams[i]
+		st, _, _ := proxyStream(streams[i])
 		cData, sData := st.Client.Data, st.Server.Data
 		srcAddr, dstAddr, srcPort, dstPort := st.SrcAddr, st.DstAddr, st.SrcPort, st.DstPort
 		cOff, sOff := findTLSHandshakeStart(cData), findTLSHandshakeStart(sData)
