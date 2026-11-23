@@ -10,7 +10,7 @@ import (
 // interfaces used by the flow and all source name records and decryption secrets.
 // A missing flow returns [ErrOutOfBounds] without writing to w.
 func (c *Capture) ExtractFlowPCAPNG(data []byte, w io.Writer, flowIndex int) error {
-	return c.extractFlowPCAPNG(flowExportSource{data: NewSafeReader(data)}, w, flowIndex)
+	return c.extractFlowPCAPNG(flowExportSource{data: *NewSafeReader(data)}, w, flowIndex)
 }
 
 // ExtractFlowPCAPNGFromReaderAt writes the same packets and metadata as
@@ -26,14 +26,14 @@ func (c *Capture) ExtractFlowPCAPNGFromReaderAt(r io.ReaderAt, w io.Writer, flow
 }
 
 type flowExportSource struct {
-	data    *SafeReader
+	data    SafeReader
 	budget  *scanReadBudget
 	size    int64
 	scratch []byte
 }
 
 func (s *flowExportSource) read(offset, length int64) ([]byte, error) {
-	if s.data != nil {
+	if s.budget == nil {
 		return s.data.Slice(offset, length)
 	}
 	if err := s.budget.check(length); err != nil {
@@ -66,7 +66,7 @@ func (c *Capture) extractFlowPCAPNG(source flowExportSource, w io.Writer, flowIn
 	var used [MaxInterfaces]bool
 	var selected []uint64
 	source.size = c.fileSize
-	observe := func(pkt PacketRecord, frame *Frame, payload []byte) error {
+	observe := func(pkt *PacketRecord, frame *Frame, payload []byte) error {
 		key, _ := makeCanonicalFlowKey(frame.IPProtocol, frame.SrcAddr, frame.SrcPort, frame.DstAddr, frame.DstPort)
 		idx, _, err := table.lookupOrInsert(key)
 		if err != nil {
@@ -89,7 +89,7 @@ func (c *Capture) extractFlowPCAPNG(source flowExportSource, w io.Writer, flowIn
 					return err
 				}
 			}
-			return classic.WritePacket(pkt, payload)
+			return classic.WritePacket(*pkt, payload)
 		}
 		// The block pass can copy the original timestamps, options and payloads
 		// directly. At MaxPackets the selection needs only 128 KiB.
@@ -102,9 +102,9 @@ func (c *Capture) extractFlowPCAPNG(source flowExportSource, w io.Writer, flowIn
 		return nil
 	}
 	var err error
-	if source.data != nil {
-		err = c.walkPackets(source.data, func(pkt PacketRecord) error {
-			payload, err := source.read(pkt.PayloadOffset, pkt.PayloadLength)
+	if source.budget == nil {
+		err = c.walkPackets(&source.data, func(pkt PacketRecord) error {
+			payload, err := source.data.Slice(pkt.PayloadOffset, pkt.PayloadLength)
 			if err != nil {
 				return err
 			}
@@ -112,11 +112,11 @@ func (c *Capture) extractFlowPCAPNG(source flowExportSource, w io.Writer, flowIn
 			if err != nil || frame.IPVersion == 0 {
 				return nil
 			}
-			return observe(pkt, &frame, payload)
+			return observe(&pkt, &frame, payload)
 		})
 	} else {
 		err = c.walkFlowPrefixes(source.budget, func(pkt PacketRecord, frame Frame, prefix []byte) error {
-			return observe(pkt, &frame, prefix)
+			return observe(&pkt, &frame, prefix)
 		})
 	}
 	if err != nil {
@@ -150,7 +150,7 @@ func (s *flowExportSource) writeSelectedBlocks(w io.Writer, used *[MaxInterfaces
 			if err != nil {
 				return err
 			}
-			if s.data != nil && order.Uint64(header[16:24]) == ^uint64(0) {
+			if s.budget == nil && order.Uint64(header[16:24]) == ^uint64(0) {
 				break
 			}
 			copy(head[:], header)
@@ -190,7 +190,7 @@ func (s *flowExportSource) writeSelectedBlocks(w io.Writer, used *[MaxInterfaces
 				if uint64(id) >= uint64(globalID-sectionBase) {
 					return ErrInvalidPacket
 				}
-				if s.data != nil && remap[sectionBase+int(id)] == id {
+				if s.budget == nil && remap[sectionBase+int(id)] == id {
 					break
 				}
 				copy(head[:12], header)
@@ -221,8 +221,8 @@ func (s *flowExportSource) writeSelectedBlocks(w io.Writer, used *[MaxInterfaces
 		}
 		return nil
 	}
-	if s.data != nil {
-		return walkPCAPNGBlockBytes(s.data, &scanSummary{}, func(kind uint32, order binary.ByteOrder, offset int64, block []byte) error {
+	if s.budget == nil {
+		return walkPCAPNGBlockBytes(&s.data, &scanSummary{}, func(kind uint32, order binary.ByteOrder, offset int64, block []byte) error {
 			return writeBlock(kind, order, offset, offset+int64(len(block)))
 		})
 	}
