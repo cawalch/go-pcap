@@ -36,15 +36,17 @@ for the README, repository documentation, and prose in code comments. Follow
 ## Merge a change
 
 Open a pull request against `main` and resolve its review conversations.
-The owner starts CI on the reviewed head branch with
-`gh workflow run ci.yml --ref BRANCH`. For a fork contribution, the owner
-can push the reviewed commit to a branch in this repository and dispatch
-there. Use the same commit SHA as the pull request head.
+After reviewing the current changes, the owner applies the `run-ci` label
+to start the six required GitHub-hosted checks on the PR merge candidate:
 
-Keep the branch up to date with `main`. If the head changes, dispatch CI
-for the new commit. Squash-merge once both Go test jobs, macOS and Windows
-tests, lint, and the vulnerability check pass. The sole maintainer can
-merge their own PR after these checks.
+```sh
+gh pr edit NUMBER --add-label run-ci
+```
+
+Keep the branch up to date with `main`. After updating it, remove and
+reapply the label to test the new revision. Squash-merge after both Go
+test jobs, macOS and Windows tests, lint, and the vulnerability check pass.
+The sole maintainer can merge their own PR after these checks.
 
 ## Validate a change
 
