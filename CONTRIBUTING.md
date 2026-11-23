@@ -64,8 +64,10 @@ go test -run '^$' -fuzz '^FuzzReaderAt$' -fuzztime=30s -parallel=2 .
 
 The tests use synthetic PCAP and PcapNG fixtures built in memory and offline
 [reference inputs](testdata/foxio/README.md) for fingerprint compatibility.
-Separate tests cover byte-order variants, nanosecond timestamps, PcapNG
-Decryption Secrets Blocks (`DSB`), Enhanced Packet Block process metadata,
+The [deployment corpus](testdata/deployments/README.md) compares mixed
+whole-capture cases against TShark. Separate tests cover byte-order variants,
+nanosecond timestamps, PcapNG Decryption Secrets Blocks (`DSB`), Enhanced
+Packet Block process metadata,
 VLAN nesting, IPv4/IPv6 headers, TCP/UDP framing, truncation, arithmetic
 overflow, resource limits, and concurrent reads. These tests and bounded fuzz
 runs don't establish full format compatibility or prove that all inputs are
