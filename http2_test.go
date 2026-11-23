@@ -293,3 +293,23 @@ func TestHTTP2PushPromiseCompressionContext(t *testing.T) {
 		t.Fatalf("%+v %v", sum, err)
 	}
 }
+
+func TestHTTP2CaptureGapSuppressesDirectionalHeaders(t *testing.T) {
+	a, b := [4]byte{10, 0, 0, 1}, [4]byte{10, 0, 0, 2}
+	first := append(bytes.Clone(HTTP2ClientPreface), buildHTTP2Frame(HTTP2FrameHeaders, 4, 1, []byte{0x82, 0x41, 1, 'a'})...)
+	// The missing frame could have inserted a different :authority at index 62.
+	last := buildHTTP2Frame(HTTP2FrameHeaders, 4, 3, []byte{0x82, 0xbe})
+	response := append(buildHTTP2Frame(HTTP2FrameSettings, 0, 0, nil), buildHTTP2Frame(HTTP2FrameHeaders, 4, 3, []byte{0x88})...)
+	raw := buildClassicPCAP(binary.LittleEndian, false, LinkTypeEthernet, 65535, [][]byte{
+		buildEthernetIPv4TCPFrame(a, b, 40001, 80, 1, 0, TCPFlagACK, first),
+		buildEthernetIPv4TCPFrame(a, b, 40001, 80, uint32(1+len(first)+16), 0, TCPFlagACK, last),
+		buildEthernetIPv4TCPFrame(b, a, 80, 40001, 1, 0, TCPFlagACK, response)})
+	c, err := New(raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	r, err := c.HTTP2(raw)
+	if err != nil || len(r) != 2 || !r[0].Summary.HeadersIncomplete || r[0].Summary.AkamaiFingerprint != "" || len(r[0].Summary.Streams) != 0 || r[1].Summary.HeadersIncomplete || r[1].Summary.Streams[0].HeaderBlocks[0].Status != "200" {
+		t.Fatalf("%+v %v", r, err)
+	}
+}

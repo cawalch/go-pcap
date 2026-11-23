@@ -434,7 +434,10 @@ including interim responses and trailers. Inspect `Method`, `Authority`,
 `Path`, and `Status` in their respective direction. HPACK context is shared by
 concurrent stream IDs within a direction. A partial or invalid block sets
 `HeadersIncomplete` and suppresses subsequent header decoding in that
-direction. DATA and already completed blocks remain available.
+direction. DATA and already completed blocks remain available. When TCP
+reassembly reports a sequence gap, the scanner suppresses all header blocks
+and the client fingerprint for that direction. A missing frame may have changed
+the HPACK table even when later frame boundaries appear intact.
 
 The decoder accepts up to 4 KiB of dynamic table state and 64 KiB per compressed
 block. Each block costs 128 bytes, plus 32 bytes per field and the length of its

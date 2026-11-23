@@ -59,7 +59,8 @@ type HTTP2Summary struct {
 	WindowUpdate        uint32
 	Streams             []HTTP2StreamData
 	// HeadersIncomplete means a truncated or invalid HPACK block made later
-	// headers undecodable. Previously completed blocks and DATA remain available.
+	// headers undecodable. A known TCP gap suppresses headers for that direction
+	// because reassembly cannot locate its missing HPACK table updates.
 	HeadersIncomplete bool
 	// AkamaiFingerprint is populated on the first decoded client request.
 	AkamaiFingerprint string
@@ -84,11 +85,11 @@ type HTTP2Record struct {
 // limited to [MaxHTTP2DecodedHeaderBytes] and DATA to [MaxHTTPBodyBytes].
 func ParseHTTP2Frames(stream []byte) (HTTP2Summary, error) {
 	remaining := MaxHTTP2DecodedHeaderBytes
-	return parseHTTP2Frames(stream, &remaining)
+	return parseHTTP2Frames(stream, &remaining, false)
 }
 
-func parseHTTP2Frames(stream []byte, remaining *int) (HTTP2Summary, error) {
-	var out HTTP2Summary
+func parseHTTP2Frames(stream []byte, remaining *int, sequenceGap bool) (HTTP2Summary, error) {
+	out := HTTP2Summary{HeadersIncomplete: sequenceGap}
 	offset := 0
 	if bytes.HasPrefix(stream, HTTP2ClientPreface) {
 		out.HasClientPreface = true
@@ -262,7 +263,7 @@ func (c *Capture) HTTP2(data []byte) ([]HTTP2Record, error) {
 
 func appendHTTP2FromTCPStream(st *TCPStream, isDecrypted bool, records *[]HTTP2Record, remaining *int) error {
 	if len(st.Client.Data) >= 9 {
-		sum, err := parseHTTP2Frames(st.Client.Data, remaining)
+		sum, err := parseHTTP2Frames(st.Client.Data, remaining, st.Client.Anomalies.SequenceGap)
 		if errors.Is(err, ErrHTTPLimit) {
 			return err
 		}
@@ -283,7 +284,7 @@ func appendHTTP2FromTCPStream(st *TCPStream, isDecrypted bool, records *[]HTTP2R
 		}
 	}
 	if len(st.Server.Data) >= 9 {
-		sum, err := parseHTTP2Frames(st.Server.Data, remaining)
+		sum, err := parseHTTP2Frames(st.Server.Data, remaining, st.Server.Anomalies.SequenceGap)
 		if errors.Is(err, ErrHTTPLimit) {
 			return err
 		}
