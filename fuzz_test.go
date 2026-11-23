@@ -80,6 +80,14 @@ func FuzzDecodeFrame(f *testing.F) {
 	frame := buildEthernetIPv4TCPFrame([4]byte{10, 0, 0, 1}, [4]byte{10, 0, 0, 2}, 12345, 443, 1, 1, TCPFlagSYN, []byte("payload"))
 	f.Add(frame, uint16(LinkTypeEthernet))
 	f.Add(frame[14:], uint16(LinkTypeRaw))
+	raw, c, packets := readFramingFixture(f)
+	for _, pkt := range packets {
+		payload, err := c.PacketPayload(raw, pkt)
+		if err != nil {
+			f.Fatal(err)
+		}
+		f.Add(payload, uint16(pkt.LinkType))
+	}
 
 	f.Fuzz(func(t *testing.T, data []byte, rawLinkType uint16) {
 		decoded, err := DecodeFrame(data, LinkType(rawLinkType))
@@ -326,6 +334,8 @@ func FuzzReaderAt(f *testing.F) {
 	frame := buildEthernetIPv4TCPFrame([4]byte{10, 0, 0, 1}, [4]byte{10, 0, 0, 2}, 12345, 443, 1, 1, TCPFlagSYN, []byte("payload"))
 	f.Add(buildClassicPCAP(binary.LittleEndian, false, LinkTypeEthernet, 65535, [][]byte{frame}))
 	f.Add(buildPCAPNGFixture(binary.LittleEndian, []byte("CLIENT_RANDOM deadbeef cafebabe\n"), [][]byte{frame}))
+	raw, _, _ := readFramingFixture(f)
+	f.Add(raw)
 
 	f.Fuzz(func(t *testing.T, data []byte) {
 		// Keep both paths inside the ReaderAt byte budget and bound fuzz iteration cost.

@@ -1,6 +1,7 @@
 package pcap
 
 import (
+	"bytes"
 	"encoding/binary"
 	"fmt"
 	"net/netip"
@@ -104,8 +105,9 @@ func (f *Frame) pushLayer(proto LayerProto, offset, length int64) {
 // to linkType without allocating on the heap.
 //
 // It returns [ErrInvalidFrame] if linkType is unsupported or the outer link
-// header is shorter than its minimum size. Truncated inner network or transport
-// headers are recorded in [Frame.Anomalies] without discarding outer layers.
+// header is shorter than its minimum size or has invalid Radiotap framing.
+// Truncated inner headers are recorded in [Frame.Anomalies] without discarding
+// outer layers. Protected IEEE 802.11 frames and ESP bodies remain opaque.
 func DecodeFrame(data []byte, linkType LinkType) (Frame, error) {
 	r := NewSafeReader(data)
 	f := Frame{LinkType: linkType}
@@ -173,12 +175,120 @@ func DecodeFrame(data []byte, linkType LinkType) (Frame, error) {
 		f.pushLayer(LayerRawIP, 0, 0)
 		offset = 0
 
+	case LinkTypeIEEE80211:
+		if len(data) < 2 {
+			return Frame{}, fmt.Errorf("%w: 802.11 frame control shorter than 2 bytes", ErrInvalidFrame)
+		}
+		decodeIEEE80211(r, 0, false, &f)
+		return f, nil
+
+	case LinkTypeIEEE80211RadioTap:
+		if len(data) < 8 || data[0] != 0 {
+			return Frame{}, fmt.Errorf("%w: missing Radiotap version 0 header", ErrInvalidFrame)
+		}
+		length := int64(binary.LittleEndian.Uint16(data[2:4]))
+		if length < 8 || length > r.Size() {
+			return Frame{}, fmt.Errorf("%w: Radiotap header length %d", ErrInvalidFrame, length)
+		}
+		padded, ok := radiotapDataPadding(data[:length])
+		if !ok {
+			return Frame{}, fmt.Errorf("%w: incomplete Radiotap Flags field", ErrInvalidFrame)
+		}
+		f.pushLayer(LayerRadiotap, 0, length)
+		decodeIEEE80211(r, length, padded, &f)
+		return f, nil
+
 	default:
 		return Frame{}, fmt.Errorf("%w: unsupported link type %d", ErrInvalidFrame, linkType)
 	}
 
 	dispatchEtherType(r, offset, r.Size(), &f)
 	return f, nil
+}
+
+// radiotapDataPadding reads only the optional Flags field. Its only possible
+// predecessor is the 8-byte TSFT field, aligned to 8 bytes after the bitmaps.
+func radiotapDataPadding(header []byte) (padded, ok bool) {
+	first := binary.LittleEndian.Uint32(header[4:8])
+	if first&2 == 0 {
+		return false, true
+	}
+	present := first
+	offset := 8
+	for present&0x80000000 != 0 {
+		if len(header)-offset < 4 {
+			return false, false
+		}
+		present = binary.LittleEndian.Uint32(header[offset : offset+4])
+		offset += 4
+	}
+	if first&1 != 0 {
+		offset = ((offset + 7) &^ 7) + 8
+	}
+	if offset >= len(header) {
+		return false, false
+	}
+	return header[offset]&0x20 != 0, true
+}
+
+func decodeIEEE80211(r *SafeReader, offset int64, padded bool, f *Frame) {
+	bound := r.Size()
+	if bound-offset < 2 {
+		f.Anomalies.TruncatedLayer = true
+		return
+	}
+	fc, flags := r.data[offset], r.data[offset+1]
+	if fc&0x0f != 0x08 { // Only version 0 Data frames carry supported LLC/SNAP.
+		f.pushLayer(LayerIEEE80211, offset, 2)
+		return
+	}
+
+	headerLen := int64(24)
+	if flags&3 == 3 { // To DS and From DS imply Address 4.
+		headerLen += 6
+	}
+	qos := fc&0x80 != 0
+	qosOffset := offset + headerLen
+	if qos {
+		headerLen += 2
+		if flags&0x80 != 0 { // +HTC in a QoS Data frame.
+			headerLen += 4
+		}
+	}
+	if bound-offset < headerLen {
+		f.Anomalies.TruncatedLayer = true
+		return
+	}
+	f.pushLayer(LayerIEEE80211, offset, headerLen)
+	payload := offset + headerLen
+	if padded {
+		payload = offset + ((headerLen + 3) &^ 3)
+		if payload > bound {
+			f.Anomalies.TruncatedLayer = true
+			return
+		}
+	}
+	f.PayloadOffset = uint32(payload)
+	f.PayloadLength = uint32(bound - payload)
+	// Null data, protected or fragmented bodies, and A-MSDU aggregates remain opaque.
+	if fc&0x40 != 0 || flags&0x44 != 0 || r.data[offset+22]&0x0f != 0 ||
+		(qos && r.data[qosOffset]&0x80 != 0) {
+		return
+	}
+
+	const snap = "\xaa\xaa\x03\x00\x00\x00"
+	data := r.data[payload:bound]
+	if len(data) < 8 {
+		f.Anomalies.TruncatedLayer = bytes.HasPrefix([]byte(snap), data[:min(len(data), len(snap))])
+		return
+	}
+	if !bytes.HasPrefix(data, []byte(snap)) {
+		return
+	}
+	f.EtherType = binary.BigEndian.Uint16(data[6:8])
+	f.PayloadOffset = 0
+	f.PayloadLength = 0
+	dispatchEtherType(r, payload+8, bound, f)
 }
 
 func peelVLANTags(r *SafeReader, offset, bound int64, f *Frame) (int64, bool) {
@@ -476,7 +586,7 @@ func isIPv6ExtHeader(proto uint8) bool {
 
 func decodeTransport(r *SafeReader, offset, ipBound int64, proto uint8, f *Frame) {
 	avail := ipBound - offset
-	if avail <= 0 {
+	if avail <= 0 && proto != IPProtoESP {
 		f.PayloadOffset = uint32(offset)
 		f.PayloadLength = 0
 		return
@@ -541,6 +651,12 @@ func decodeTransport(r *SafeReader, offset, ipBound int64, proto uint8, f *Frame
 		f.PayloadOffset = uint32(udpPayloadOff)
 		f.PayloadLength = uint32(udpPayloadLen)
 
+		if udpLen >= 8 && udpLen <= avail && f.DstPort != 4789 && f.DstPort != 6081 &&
+			(isIKEPort(f.SrcPort) || isIKEPort(f.DstPort)) {
+			decodeIKEv2(r, udpPayloadOff, udpBound, f)
+			return
+		}
+
 		// Peel VXLAN (UDP port 4789, 8-byte VXLAN header with I-flag 0x08 + inner 14-byte Ethernet)
 		// or Geneve (UDP port 6081, 8 + OptLen*4 header) when space permits in Layers.
 		if int(f.LayerCount)+2 <= MaxFrameLayers {
@@ -571,6 +687,15 @@ func decodeTransport(r *SafeReader, offset, ipBound int64, proto uint8, f *Frame
 			}
 		}
 
+	case IPProtoESP:
+		if avail < 8 {
+			f.Anomalies.TruncatedLayer = true
+			return
+		}
+		f.pushLayer(LayerESP, offset, 8)
+		f.PayloadOffset = uint32(offset + 8)
+		f.PayloadLength = uint32(avail - 8)
+
 	case IPProtoGRE:
 		decodeGRE(r, offset, ipBound, f)
 
@@ -594,6 +719,30 @@ func decodeTransport(r *SafeReader, offset, ipBound int64, proto uint8, f *Frame
 		f.PayloadOffset = uint32(offset)
 		f.PayloadLength = uint32(avail)
 	}
+}
+
+func isIKEPort(port uint16) bool {
+	return port == 500 || port == 4500
+}
+
+func decodeIKEv2(r *SafeReader, offset, bound int64, f *Frame) {
+	if f.SrcPort == 4500 || f.DstPort == 4500 {
+		if bound-offset < 4 || binary.BigEndian.Uint32(r.data[offset:offset+4]) != 0 {
+			return // ESP-in-UDP and NAT keepalives do not have the Non-ESP Marker.
+		}
+		offset += 4
+	}
+	const headerLen = 28
+	if bound-offset < headerLen {
+		return
+	}
+	header := r.data[offset : offset+headerLen]
+	if header[17]>>4 != 2 || int64(binary.BigEndian.Uint32(header[24:28])) != bound-offset {
+		return
+	}
+	f.pushLayer(LayerIKEv2, offset, headerLen)
+	f.PayloadOffset = uint32(offset + headerLen)
+	f.PayloadLength = uint32(bound - offset - headerLen)
 }
 
 func decodeGRE(r *SafeReader, offset, ipBound int64, f *Frame) {

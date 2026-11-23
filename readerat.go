@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"iter"
+	"slices"
 	"sync"
 )
 
@@ -249,6 +250,11 @@ func (c *Capture) FlowsFromReaderAt(r io.ReaderAt) ([]FlowSummary, error) {
 		defer w.release()
 		r = w
 	}
+	if c.LinkType == LinkTypeIEEE80211RadioTap || slices.ContainsFunc(c.Interfaces, func(iface InterfaceDescriptor) bool {
+		return iface.LinkType == LinkTypeIEEE80211RadioTap
+	}) {
+		return c.flowsFromRadiotapReader(r)
+	}
 	var acc flowAccumulator
 	var header [256]byte
 	var scratch []byte
@@ -281,6 +287,20 @@ func (c *Capture) FlowsFromReaderAt(r io.ReaderAt) ([]FlowSummary, error) {
 		if err := acc.observe(&pkt, &frame, payload); err != nil {
 			return nil, err
 		}
+	}
+	return acc.flows, nil
+}
+
+// flowsFromRadiotapReader uses the shared prefix walker to retry large Radiotap
+// headers. Other captures use the direct loop without that recovery path.
+func (c *Capture) flowsFromRadiotapReader(r io.ReaderAt) ([]FlowSummary, error) {
+	budget := scanReadBudget{r: r, remaining: MaxReaderAtScanBytes}
+	var acc flowAccumulator
+	err := c.walkFlowPrefixes(&budget, func(pkt PacketRecord, f Frame, prefix []byte) error {
+		return acc.observe(&pkt, &f, prefix)
+	})
+	if err != nil {
+		return nil, err
 	}
 	return acc.flows, nil
 }
@@ -432,7 +452,7 @@ func extendFramePrefix(budget *scanReadBudget, size int64, pkt PacketRecord, f *
 		// DecodeFrame has already accepted this link header. Extending its
 		// backing data cannot shorten the header or change its link type.
 		*f, _ = DecodeFrame(data, pkt.LinkType)
-		if next == limit || completeFlowPrefix(f, data, pkt.PayloadLength) {
+		if next == limit || completeProtocolPrefix(f, data, pkt.PayloadLength) {
 			return data, nil
 		}
 	}
@@ -487,9 +507,16 @@ func (c *Capture) walkFlowPrefixes(budget *scanReadBudget, visit func(PacketReco
 		}
 		f, err := DecodeFrame(data, pkt.LinkType)
 		if err != nil {
-			return nil
+			if pkt.LinkType != LinkTypeIEEE80211RadioTap {
+				return nil
+			}
+			data, err = extendRadiotapPrefix(budget, c.fileSize, &pkt, &f, data, &scratch)
+			if err != nil {
+				return err
+			}
+			n = int64(len(data))
 		}
-		if n < pkt.PayloadLength && !completeFlowPrefix(&f, data, pkt.PayloadLength) {
+		if n < pkt.PayloadLength && !completeProtocolPrefix(&f, data, pkt.PayloadLength) {
 			data, err = extendFramePrefix(budget, c.fileSize, pkt, &f, data, &scratch)
 			if err != nil {
 				return err
@@ -500,6 +527,42 @@ func (c *Capture) walkFlowPrefixes(budget *scanReadBudget, visit func(PacketReco
 		}
 		return visit(pkt, f, data)
 	})
+}
+
+func completeProtocolPrefix(f *Frame, data []byte, captured int64) bool {
+	// IKEv2 classification requires the full UDP datagram. Flow summaries can
+	// use UDP metadata alone, but protocol scanners need the adjusted span.
+	if f.IPProtocol == IPProtoUDP && (isIKEPort(f.SrcPort) || isIKEPort(f.DstPort)) {
+		return false
+	}
+	return completeFlowPrefix(f, data, captured)
+}
+
+// extendRadiotapPrefix retries decoding when a Radiotap header extends past
+// the initial prefix.
+func extendRadiotapPrefix(budget *scanReadBudget, size int64, pkt *PacketRecord, f *Frame, data []byte, scratch *[]byte) ([]byte, error) {
+	n := int64(len(data))
+	if n < 8 || data[0] != 0 {
+		return data, nil
+	}
+	length := int64(binary.LittleEndian.Uint16(data[2:4]))
+	if length <= n || length > pkt.PayloadLength {
+		return data, nil
+	}
+	end := min(length+n, pkt.PayloadLength)
+	if err := budget.check(end - n); err != nil {
+		return nil, err
+	}
+	if int64(cap(*scratch)) < end {
+		*scratch = make([]byte, end)
+	}
+	result := (*scratch)[:end]
+	copy(result, data)
+	if err := readExactAt(budget, result[n:], pkt.PayloadOffset+n, size); err != nil {
+		return nil, err
+	}
+	*f, _ = DecodeFrame(result, pkt.LinkType)
+	return result, nil
 }
 
 func readExactAt(r io.ReaderAt, buf []byte, offset, totalSize int64) error {

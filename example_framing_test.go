@@ -1,0 +1,27 @@
+package pcap_test
+
+import (
+	"fmt"
+
+	pcap "github.com/cawalch/go-pcap"
+)
+
+func ExampleDecodeFrame_esp() {
+	data := []byte{
+		0x45, 0, 0, 32, 0, 0, 0, 0, 64, pcap.IPProtoESP, 0, 0,
+		192, 0, 2, 1, 198, 51, 100, 2,
+		0x10, 0x20, 0x30, 0x40, 0, 0, 0, 7, // SPI and sequence number.
+		0xde, 0xad, 0xbe, 0xef, // Opaque bytes.
+	}
+	frame, err := pcap.DecodeFrame(data, pcap.LinkTypeIPv4)
+	if err != nil {
+		panic(err)
+	}
+	for _, layer := range frame.LayerSlices() {
+		if layer.Proto == pcap.LayerESP {
+			fmt.Printf("%s header at byte %d, %d opaque bytes\n", layer.Proto, layer.Offset, frame.PayloadLength)
+		}
+	}
+	// Output:
+	// esp header at byte 20, 4 opaque bytes
+}
