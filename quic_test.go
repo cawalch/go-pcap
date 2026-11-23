@@ -333,3 +333,25 @@ func TestQUICRebindingDistinctAndAmbiguousIDs(t *testing.T) {
 		}
 	}
 }
+
+func TestQUICRebindOntoOccupiedTuple(t *testing.T) {
+	client, server := [4]byte{192, 0, 2, 1}, [4]byte{192, 0, 2, 2}
+	var frames [][]byte
+	add := func(port uint16, dcid, scid string, off int, fragment []byte) {
+		payload := buildEncryptedQUICInitialDatagram(t, QUICVersion1, []byte(dcid), []byte(scid), nil, uint16(off+1), uint16(off), fragment)
+		frames = append(frames, buildEthernetIPv4UDPFrame(client, server, port, 443, payload))
+	}
+	a := buildTLS13ClientHelloRecord("original.example", "h3")[5:]
+	b := buildTLS13ClientHelloRecord("rebound.example", "h3")[5:]
+	add(10001, "dest-a", "src-a", 0, a[:40])
+	add(10002, "dest-b", "src-b", 0, b[:40])
+	add(10001, "dest-b", "src-b", 40, b[40:])
+	add(10001, "dest-a", "src-a", 40, a[40:])
+	serverInitial := buildQUICInitialWithKeys(t, QUICVersion1, []byte("src-b"), []byte("server"), nil, 1, 0, buildTLSServerHelloRecord()[5:], []byte("dest-b"), false)
+	frames = append(frames, buildEthernetIPv4UDPFrame(server, client, 443, 10001, serverInitial))
+	records := quicTestRecords(t, frames...)
+	if len(records) != 2 || records[0].Handshake.ClientHello.SNI != "original.example" || records[0].Handshake.HasServerHello ||
+		records[1].SrcPort != 10002 || records[1].Handshake.ClientHello.SNI != "rebound.example" || !records[1].Handshake.HasServerHello {
+		t.Fatalf("occupied tuple: %+v", records)
+	}
+}

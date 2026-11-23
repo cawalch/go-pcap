@@ -626,18 +626,28 @@ func scanQUIC(source ipFrameSource) ([]QUICRecord, error) {
 
 		forward := cidKey{frame.SrcAddr, netip.AddrPortFrom(frame.DstAddr, frame.DstPort), string(dcid), false}
 		reverse := cidKey{frame.DstAddr, netip.AddrPortFrom(frame.SrcAddr, frame.SrcPort), string(dcid), true}
-		slot, found := slotByFlow[flowIdx]
+		slot, hasTuple := slotByFlow[flowIdx]
+		found := hasTuple
 		client := true
+		var tupleIDsMatch bool
 		if found {
 			fb := &flows[slot]
 			client = frame.DstAddr == fb.dstAddr && frame.DstPort == fb.dstPort
-		} else {
+			if client {
+				tupleIDsMatch = fb.version == version && bytes.Equal(fb.dcid, dcid) && bytes.Equal(fb.scid, scid)
+			} else {
+				tupleIDsMatch = (vn || fb.version == version) && bytes.Equal(fb.scid, dcid)
+			}
+		}
+		// A client can rebind onto a tuple already used by another exchange.
+		// When its IDs disagree, prefer a unique directional CID match.
+		if !tupleIDsMatch {
 			f, fOK := byCID[forward]
 			r, rOK := byCID[reverse]
 			// A changed client SCID identifies a separate Initial exchange,
 			// even when both clients chose the same destination ID.
 			if !vn && !retry && fOK && f >= 0 && !rOK && flows[f].version == version && bytes.Equal(flows[f].scid, scid) {
-				slot, found = f, true
+				slot, found, client = f, true, true
 			} else if rOK && r >= 0 && !fOK && (vn || flows[r].version == version) {
 				slot, found, client = r, true, false
 			}
@@ -678,7 +688,9 @@ func scanQUIC(source ipFrameSource) ([]QUICRecord, error) {
 		if fb.count >= MaxQUICPacketsPerFlow {
 			return nil
 		}
-		slotByFlow[flowIdx] = slot
+		if !hasTuple {
+			slotByFlow[flowIdx] = slot
+		}
 		fb.count++
 		if client {
 			fb.clientPkt = append(fb.clientPkt, udpPayload)
