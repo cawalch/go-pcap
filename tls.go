@@ -1048,7 +1048,7 @@ func (c *Capture) tlsFromStreams(streams []TCPStream, extraKeyLog []byte) ([]TLS
 
 	var records []TLSRecord
 	for i := range streams {
-		st := &streams[i]
+		st, _, _ := proxyStream(streams[i])
 		cData, sData := st.Client.Data, st.Server.Data
 		srcAddr, dstAddr, srcPort, dstPort := st.SrcAddr, st.DstAddr, st.SrcPort, st.DstPort
 		var merged TLSHandshake

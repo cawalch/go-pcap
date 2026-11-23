@@ -433,7 +433,7 @@ func (c *Capture) DecryptedTLSStreams(data []byte, extraKeyLog []byte) ([]TCPStr
 	if err != nil || len(keyLog.Entries) == 0 {
 		return nil, err
 	}
-	streams, err := c.Streams(data)
+	streams, err := c.proxyStreams(data)
 	if err != nil || len(streams) == 0 {
 		return nil, err
 	}

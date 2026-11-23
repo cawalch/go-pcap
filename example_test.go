@@ -124,6 +124,14 @@ func ExampleCapture_PacketSeq() {
 	// pkt=0 ipv=4 proto=17 payload=ping
 }
 
+func ExampleUnwrapProxyStream() {
+	client := []byte("CONNECT example.org:443 HTTP/1.1\r\n\r\n")
+	server := []byte("HTTP/1.1 200 Connection established\r\n\r\n")
+	_, _, kind, host, port, ok := pcap.UnwrapProxyStream(client, server)
+	fmt.Println(ok, kind, host, port)
+	// Output: true http-connect example.org 443
+}
+
 func ExampleParseHTTPRequest() {
 	raw := []byte("POST /submit HTTP/1.1\r\n" +
 		"Host: api.example.com\r\n" +

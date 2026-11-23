@@ -369,7 +369,7 @@ func (c *Capture) SMB(data []byte) ([]SMB2Record, error) {
 	}
 	var records []SMB2Record
 	for i := range streams {
-		st := &streams[i]
+		st, _, _ := proxyStream(streams[i])
 		if err := extractSMB2FromStream(st.Client.Data, st.FlowIndex, st.SrcAddr, st.DstAddr, st.SrcPort, st.DstPort, &records); err != nil {
 			return nil, err
 		}

@@ -618,7 +618,24 @@ func (c *Capture) HTTP(data []byte) ([]HTTPRecord, error) {
 	var records []HTTPRecord
 	decodedBudget := httpDecodeBudget{remaining: MaxHTTPDecodedBodyBytesPerScan}
 	for i := range streams {
-		if err := appendHTTPFromTCPStream(&streams[i], false, &records, &decodedBudget); err != nil {
+		inner, clientOffset, serverOffset := proxyStream(streams[i])
+		if clientOffset != 0 {
+			client, server := streams[i].Client.Data, streams[i].Server.Data
+			if inner.SrcAddr != streams[i].SrcAddr || inner.SrcPort != streams[i].SrcPort {
+				client, server = server, client
+			}
+			if bytes.HasPrefix(client, []byte("CONNECT ")) {
+				// A successful CONNECT ends at the blank line in each direction.
+				// Bound the outer response so its body cannot consume tunnel data.
+				outer := inner
+				outer.Client.Data, outer.Server.Data = client[:clientOffset], server[:serverOffset]
+				if err := appendHTTPFromTCPStream(&outer, false, &records, &decodedBudget, 0, 0); err != nil {
+					return nil, err
+				}
+			}
+		}
+		streams[i] = inner // Reuse this view for key-log decryption below.
+		if err := appendHTTPFromTCPStream(&streams[i], false, &records, &decodedBudget, clientOffset, serverOffset); err != nil {
 			return nil, err
 		}
 	}
@@ -627,7 +644,7 @@ func (c *Capture) HTTP(data []byte) ([]HTTPRecord, error) {
 	if keys, err := c.TLSKeyLog(nil); err == nil && len(keys.Entries) > 0 {
 		decStreams := decryptTLSStreams(streams, keys)
 		for i := range decStreams {
-			if err := appendHTTPFromTCPStream(&decStreams[i], true, &records, &decodedBudget); err != nil {
+			if err := appendHTTPFromTCPStream(&decStreams[i], true, &records, &decodedBudget, 0, 0); err != nil {
 				return nil, err
 			}
 		}
@@ -635,7 +652,7 @@ func (c *Capture) HTTP(data []byte) ([]HTTPRecord, error) {
 	return records, nil
 }
 
-func appendHTTPFromTCPStream(st *TCPStream, isDecrypted bool, records *[]HTTPRecord, decodedBudget *httpDecodeBudget) error {
+func appendHTTPFromTCPStream(st *TCPStream, isDecrypted bool, records *[]HTTPRecord, decodedBudget *httpDecodeBudget, clientOffset, serverOffset int) error {
 	for off := 0; off < len(st.Client.Data); {
 		req, consumed, err := parseHTTPRequest(st.Client.Data[off:], decodedBudget)
 		if errors.Is(err, errHTTPDecodeBudget) {
@@ -647,7 +664,7 @@ func appendHTTPFromTCPStream(st *TCPStream, isDecrypted bool, records *[]HTTPRec
 		if len(*records) >= MaxHTTPMessagesPerScan {
 			return fmt.Errorf("%w: exceeds %d HTTP messages", ErrHTTPLimit, MaxHTTPMessagesPerScan)
 		}
-		req.BodyOffset += off
+		req.BodyOffset += off + clientOffset
 		*records = append(*records, HTTPRecord{
 			FlowIndex:   st.FlowIndex,
 			SrcAddr:     st.SrcAddr,
@@ -671,7 +688,7 @@ func appendHTTPFromTCPStream(st *TCPStream, isDecrypted bool, records *[]HTTPRec
 		if len(*records) >= MaxHTTPMessagesPerScan {
 			return fmt.Errorf("%w: exceeds %d HTTP messages", ErrHTTPLimit, MaxHTTPMessagesPerScan)
 		}
-		resp.BodyOffset += off
+		resp.BodyOffset += off + serverOffset
 		*records = append(*records, HTTPRecord{
 			FlowIndex:   st.FlowIndex,
 			SrcAddr:     st.DstAddr,

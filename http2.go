@@ -181,7 +181,7 @@ func ParseHTTP2Frames(stream []byte) (HTTP2Summary, error) {
 // stream payloads from both cleartext TCP streams (h2c) and DSB-decrypted TLS
 // 1.2/1.3 streams.
 func (c *Capture) HTTP2(data []byte) ([]HTTP2Record, error) {
-	streams, err := c.Streams(data)
+	streams, err := c.proxyStreams(data)
 	if err != nil {
 		return nil, err
 	}
