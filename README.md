@@ -7,7 +7,7 @@ packets from a local interface and write captures for another tool to inspect.
 
 The library uses the Go standard library, builds without cgo or libpcap, and
 requires Go 1.26 or later. The API is experimental and can change before v1.0.
-[v0.1.0 release and platform verification](https://github.com/cawalch/go-pcap/releases/tag/v0.1.0)
+[v0.1.1 release](https://github.com/cawalch/go-pcap/releases/tag/v0.1.1) · [Platform verification](CHANGELOG.md#platform-verification)
 
 ## Quick start with a guest Wi-Fi capture
 
@@ -18,7 +18,7 @@ In that directory, initialize a Go module and install the release.
 
 ```sh
 go mod init example.com/inspect
-go get github.com/cawalch/go-pcap@v0.1.0
+go get github.com/cawalch/go-pcap@v0.1.1
 ```
 
 Save the program below as `main.go` and run `go run . guest.pcapng`.
@@ -113,7 +113,8 @@ proxy, see the [deployment walkthrough](docs/parsing.md#trace-a-guest-connection
 
 ## Licenses and attribution
 
-The project uses the [MIT license](LICENSE). The HPACK tables come
-from the Go project and carry its [copyright notice and license](LICENSE-hpack).
-The [fingerprint fixture notes](testdata/foxio/README.md) identify the FoxIO
-captures, reference outputs and upstream license texts.
+Original go-pcap code uses the [MIT license](LICENSE). FoxIO publishes JA4 TLS
+client fingerprinting under BSD-3-Clause and the other JA4+ methods under the
+FoxIO License 1.1, which restricts monetization. The distribution includes
+the [third-party notices and terms](NOTICE), [Go HPACK license](LICENSE-hpack)
+and [fingerprint fixture provenance](testdata/foxio/README.md).

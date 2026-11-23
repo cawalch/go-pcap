@@ -6,6 +6,16 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 for pre-v1 releases (`0.y.z` minor bumps may include API additions or changes).
 
+## [v0.1.1](https://github.com/cawalch/go-pcap/releases/tag/v0.1.1) - 2026-11-23
+
+This patch packages the [third-party notices](NOTICE) with the module,
+including the terms for JA4 and JA4+, the Community ID test vectors and
+the QUIC reference packets. The library API and implementation match v0.1.0.
+
+Pull request checks now target GitHub-hosted Linux, macOS and Windows
+runners. The [consumer compatibility guide](docs/compatibility.md) and its
+external test module document and exercise the v0.1.0 baseline.
+
 ## [v0.1.0](https://github.com/cawalch/go-pcap/releases/tag/v0.1.0) - 2026-11-23
 
 First experimental release of the Go 1.26+ module. It reads, analyzes and
