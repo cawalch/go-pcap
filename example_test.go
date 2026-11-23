@@ -377,3 +377,43 @@ func ExampleCapture_WebWithWebSockets() {
 	fmt.Println(len(web.TLS), len(messages))
 	// Output: 2 0
 }
+
+func ExampleCapture_DNSSourceStats() {
+	data, err := os.ReadFile("testdata/deployments/client.pcapng")
+	if err != nil {
+		log.Fatal(err)
+	}
+	c, err := pcap.New(data)
+	if err != nil {
+		log.Fatal(err)
+	}
+	sources, err := c.DNSSourceStats(data)
+	if err != nil {
+		log.Fatal(err)
+	}
+	for _, s := range sources {
+		fmt.Println(s.SrcAddr, s.QueryCount, s.ResponseCount, s.NXDomainCount)
+	}
+	// Output: 192.0.2.14 1 1 0
+}
+
+func ExampleCapture_BeaconsWithOptions() {
+	data, err := os.ReadFile("testdata/deployments/client.pcapng")
+	if err != nil {
+		log.Fatal(err)
+	}
+	c, err := pcap.New(data)
+	if err != nil {
+		log.Fatal(err)
+	}
+	groups, err := c.BeaconsWithOptions(data, pcap.BeaconOptions{GroupBy3Tuple: true})
+	if err != nil {
+		log.Fatal(err)
+	}
+	for _, g := range groups {
+		fmt.Println(g.DstAddr, g.DstPort, g.Stats.SampleCount)
+	}
+	// Output:
+	// 198.51.100.80 443 1
+	// 198.51.100.81 443 1
+}

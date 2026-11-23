@@ -155,10 +155,33 @@ func medianUint64(sorted []uint64) uint64 {
 	return sorted[n/2-1] + (sorted[n/2]-sorted[n/2-1])/2
 }
 
+// BeaconOptions configures beacon aggregation in [Capture.BeaconsWithOptions].
+type BeaconOptions struct {
+	// GroupBy3Tuple aggregates flow-start callbacks by (Protocol, SrcAddr,
+	// DstAddr, DstPort) instead of 5-tuple, catching beacons that open a new
+	// source port per callback. FlowIndex is set to the first flow's index and
+	// SrcPort is set to 0 in 3-tuple results.
+	GroupBy3Tuple bool
+	// MinIntervalNs ignores 3-tuple beacon candidates whose median inter-arrival
+	// interval is below this threshold by zeroing PeriodicityScore and
+	// BeaconScore. When GroupBy3Tuple is true and MinIntervalNs is 0, a default
+	// of 1 second (1_000_000_000 ns) is used. Set a negative value to disable.
+	MinIntervalNs int64
+	// IncludeDNSPort includes port 53 traffic when GroupBy3Tuple is true.
+	// By default, port 53 is excluded in 3-tuple mode to avoid DNS polling FPs.
+	IncludeDNSPort bool
+}
+
 // Beacons computes C2 beacon periodicity, payload size uniformity, and
 // directional Producer-Consumer Ratio (PCR) metrics for every IPv4/IPv6 flow in
 // the capture.
 func (c *Capture) Beacons(data []byte) ([]FlowBeacon, error) {
+	return c.BeaconsWithOptions(data, BeaconOptions{})
+}
+
+// BeaconsWithOptions computes C2 beacon metrics according to opts. When
+// opts.GroupBy3Tuple is false, it behaves identically to [Capture.Beacons].
+func (c *Capture) BeaconsWithOptions(data []byte, opts BeaconOptions) ([]FlowBeacon, error) {
 	if err := c.validateContainer(); err != nil {
 		return nil, err
 	}
@@ -173,6 +196,7 @@ func (c *Capture) Beacons(data []byte) ([]FlowBeacon, error) {
 		dstAddr     netip.Addr
 		srcPort     uint16
 		dstPort     uint16
+		firstTS     int64
 		timestamps  []int64
 		sizes       []uint64
 		clientBytes uint64
@@ -206,13 +230,16 @@ func (c *Capture) Beacons(data []byte) ([]FlowBeacon, error) {
 				dstAddr:   frame.DstAddr,
 				srcPort:   frame.SrcPort,
 				dstPort:   frame.DstPort,
+				firstTS:   pkt.TimestampNs,
 			})
+		} else if pkt.TimestampNs < flows[idx].firstTS {
+			flows[idx].firstTS = pkt.TimestampNs
 		}
 
 		fa := &flows[idx]
 		if frame.SrcAddr == fa.srcAddr && frame.SrcPort == fa.srcPort {
 			fa.clientBytes += uint64(frame.PayloadLength)
-			if frame.IPProtocol != IPProtoTCP || frame.PayloadLength > 0 {
+			if !opts.GroupBy3Tuple && (frame.IPProtocol != IPProtoTCP || frame.PayloadLength > 0) {
 				fa.timestamps = append(fa.timestamps, pkt.TimestampNs)
 				fa.sizes = append(fa.sizes, uint64(frame.PayloadLength))
 			}
@@ -225,17 +252,88 @@ func (c *Capture) Beacons(data []byte) ([]FlowBeacon, error) {
 		return nil, err
 	}
 
-	out := make([]FlowBeacon, len(flows))
+	if !opts.GroupBy3Tuple {
+		out := make([]FlowBeacon, len(flows))
+		for i := range flows {
+			fa := &flows[i]
+			out[i] = FlowBeacon{
+				FlowIndex: fa.flowIndex,
+				Protocol:  fa.proto,
+				SrcAddr:   fa.srcAddr,
+				DstAddr:   fa.dstAddr,
+				SrcPort:   fa.srcPort,
+				DstPort:   fa.dstPort,
+				Stats:     ComputeBeaconStats(fa.timestamps, fa.sizes, fa.clientBytes, fa.serverBytes),
+			}
+		}
+		return out, nil
+	}
+
+	type tuple3Key struct {
+		proto   uint8
+		srcAddr netip.Addr
+		dstAddr netip.Addr
+		dstPort uint16
+	}
+	type tuple3Accum struct {
+		firstFlowIndex int
+		key            tuple3Key
+		timestamps     []int64
+		sizes          []uint64
+		clientBytes    uint64
+		serverBytes    uint64
+	}
+
+	indexByTuple3 := make(map[tuple3Key]int)
+	var groups []tuple3Accum
 	for i := range flows {
 		fa := &flows[i]
+		if !opts.IncludeDNSPort && (fa.srcPort == 53 || fa.dstPort == 53) {
+			continue
+		}
+		tk := tuple3Key{
+			proto:   fa.proto,
+			srcAddr: fa.srcAddr,
+			dstAddr: fa.dstAddr,
+			dstPort: fa.dstPort,
+		}
+		gIdx, exists := indexByTuple3[tk]
+		if !exists {
+			gIdx = len(groups)
+			indexByTuple3[tk] = gIdx
+			groups = append(groups, tuple3Accum{
+				firstFlowIndex: fa.flowIndex,
+				key:            tk,
+			})
+		}
+		g := &groups[gIdx]
+		g.timestamps = append(g.timestamps, fa.firstTS)
+		g.sizes = append(g.sizes, fa.clientBytes)
+		g.clientBytes += fa.clientBytes
+		g.serverBytes += fa.serverBytes
+	}
+
+	minInt := opts.MinIntervalNs
+	if minInt == 0 {
+		minInt = 1_000_000_000
+	}
+
+	out := make([]FlowBeacon, len(groups))
+	for i := range groups {
+		g := &groups[i]
+		stats := ComputeBeaconStats(g.timestamps, g.sizes, g.clientBytes, g.serverBytes)
+		if minInt > 0 && stats.MedianIntervalNs < minInt {
+			stats.PeriodicityScore = 0
+			stats.BeaconScore = 0
+		}
 		out[i] = FlowBeacon{
-			FlowIndex: fa.flowIndex,
-			Protocol:  fa.proto,
-			SrcAddr:   fa.srcAddr,
-			DstAddr:   fa.dstAddr,
-			SrcPort:   fa.srcPort,
-			DstPort:   fa.dstPort,
-			Stats:     ComputeBeaconStats(fa.timestamps, fa.sizes, fa.clientBytes, fa.serverBytes),
+			FlowIndex: g.firstFlowIndex,
+			Protocol:  g.key.proto,
+			SrcAddr:   g.key.srcAddr,
+			DstAddr:   g.key.dstAddr,
+			SrcPort:   0,
+			DstPort:   g.key.dstPort,
+			Stats:     stats,
 		}
 	}
 	return out, nil
