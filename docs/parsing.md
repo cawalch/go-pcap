@@ -566,6 +566,16 @@ or call `capture.HTTP(data)` to extract HTTP/1.x requests, responses, FoxIO
 `Transfer-Encoding: chunked`) from both cleartext TCP streams and DSB-decrypted
 TLS 1.2 and TLS 1.3 flows.
 
+Inspect `Anomalies` for conflicting numeric lengths, simultaneous transfer
+encoding and content length, folded headers, and incomplete bodies. Folded
+lines count toward the header limit and are unfolded into their preceding
+field. A final `chunked` transfer coding determines the wire boundary even
+when a length is present. Without transfer coding, equal lengths are accepted.
+For conflicting or invalid lengths on a body-bearing message, the parser
+returns the headers, omits the body, and consumes the remaining input in that
+direction. An incomplete chunk stream also consumes the remaining input and
+retains the bounded body prefix. Bodyless response statuses end at the headers.
+
 For a single `gzip`, `x-gzip`, or `deflate` content coding, the parser removes
 chunk framing before decoding the content. Deflate supports zlib streams and raw
 DEFLATE streams without a zlib header. `ContentEncoding` carries the header

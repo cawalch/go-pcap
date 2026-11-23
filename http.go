@@ -20,8 +20,16 @@ type HTTPHeader struct {
 	Value string
 }
 
-// HTTPAnomalies describes content decoding issues found while carving a body.
+// HTTPAnomalies reports framing and content decoding observations for one message.
 type HTTPAnomalies struct {
+	// MultipleContentLength reports conflicting numeric Content-Length values.
+	MultipleContentLength bool
+	// TransferEncodingWithContentLength reports that both fields appeared.
+	TransferEncodingWithContentLength bool
+	// ObsFoldHeader reports a header continued on a whitespace-prefixed line.
+	ObsFoldHeader bool
+	// TruncatedBody reports incomplete declared length or chunk framing.
+	TruncatedBody bool
 	// InvalidContentEncoding indicates a supported content coding failed to decode.
 	InvalidContentEncoding bool
 	// DecompressionLimitExceeded indicates Body contains the first
@@ -91,8 +99,8 @@ type HTTPRecord struct {
 
 // ParseHTTPRequest parses one HTTP/1.x request from stream, computes its JA4H
 // fingerprint, and carves its body. It decodes single gzip, x-gzip, and deflate
-// content codings after removing chunk framing. See [HTTPAnomalies] for body
-// decoding issues. The returned byte count measures the original wire message.
+// content codings after removing chunk framing. See [HTTPAnomalies] for framing and decoding observations.
+// When framing cannot locate the next message, the byte count covers all input.
 func ParseHTTPRequest(stream []byte) (HTTPRequest, int, error) {
 	return parseHTTPRequest(stream, nil)
 }
@@ -124,12 +132,13 @@ func parseHTTPRequest(stream []byte, decodedBudget *httpDecodeBudget) (HTTPReque
 		Version: protoVer[5:], // "1.1" or "1.0"
 	}
 
-	headers, bodyStart, contentLen, chunked, contentEncoding, err := parseHTTPHeaders(stream, lineEnd+2)
+	headers, bodyStart, framing, err := parseHTTPHeaders(stream, lineEnd+2)
 	if err != nil {
 		return HTTPRequest{}, 0, err
 	}
 	req.Headers = headers
-	req.ContentEncoding = contentEncoding
+	req.ContentEncoding = framing.encoding
+	req.Anomalies = framing.anomalies
 
 	var acceptLang string
 	var hasCookie, hasReferer bool
@@ -165,8 +174,9 @@ func parseHTTPRequest(stream []byte, decodedBudget *httpDecodeBudget) (HTTPReque
 	req.CookieCount = len(cookieNames)
 	req.JA4H = computeJA4H(&req, hasCookie, hasReferer, acceptLang, cookieNames, cookiePairs)
 
-	body, consumed := extractHTTPBody(stream, bodyStart, contentLen, chunked, true)
-	req.Body, req.IsDecompressed, req.Anomalies, err = decodeHTTPContent(body, contentEncoding, chunked, decodedBudget)
+	body, consumed, truncated := framing.body(stream, bodyStart, true)
+	req.Anomalies.TruncatedBody = truncated
+	req.Body, req.IsDecompressed, err = decodeHTTPContent(body, framing.encoding, framing.chunked, decodedBudget, &req.Anomalies)
 	if err != nil {
 		return HTTPRequest{}, 0, err
 	}
@@ -177,8 +187,8 @@ func parseHTTPRequest(stream []byte, decodedBudget *httpDecodeBudget) (HTTPReque
 
 // ParseHTTPResponse parses one HTTP/1.x response from stream and carves its body.
 // It decodes single gzip, x-gzip, and deflate content codings after removing chunk
-// framing. See [HTTPAnomalies] for body decoding issues. The returned byte count
-// measures the original wire message.
+// framing. See [HTTPAnomalies] for framing and decoding observations. When framing
+// cannot locate the next message, the byte count covers all input.
 func ParseHTTPResponse(stream []byte) (HTTPResponse, int, error) {
 	return parseHTTPResponse(stream, nil)
 }
@@ -203,7 +213,7 @@ func parseHTTPResponse(stream []byte, decodedBudget *httpDecodeBudget) (HTTPResp
 		statusText = statusLine[13:]
 	}
 
-	headers, bodyStart, contentLen, chunked, contentEncoding, err := parseHTTPHeaders(stream, lineEnd+2)
+	headers, bodyStart, framing, err := parseHTTPHeaders(stream, lineEnd+2)
 	if err != nil {
 		return HTTPResponse{}, 0, err
 	}
@@ -212,7 +222,8 @@ func parseHTTPResponse(stream []byte, decodedBudget *httpDecodeBudget) (HTTPResp
 		StatusCode:      code,
 		StatusText:      statusText,
 		Headers:         headers,
-		ContentEncoding: contentEncoding,
+		ContentEncoding: framing.encoding,
+		Anomalies:       framing.anomalies,
 	}
 	for i := range headers {
 		h := &headers[i]
@@ -233,8 +244,9 @@ func parseHTTPResponse(stream []byte, decodedBudget *httpDecodeBudget) (HTTPResp
 		return resp, bodyStart, nil
 	}
 
-	body, consumed := extractHTTPBody(stream, bodyStart, contentLen, chunked, false)
-	resp.Body, resp.IsDecompressed, resp.Anomalies, err = decodeHTTPContent(body, contentEncoding, chunked, decodedBudget)
+	body, consumed, truncated := framing.body(stream, bodyStart, false)
+	resp.Anomalies.TruncatedBody = truncated
+	resp.Body, resp.IsDecompressed, err = decodeHTTPContent(body, framing.encoding, framing.chunked, decodedBudget, &resp.Anomalies)
 	if err != nil {
 		return HTTPResponse{}, 0, err
 	}
@@ -252,83 +264,132 @@ func isStandardHTTPMethod(m string) bool {
 	}
 }
 
-func parseHTTPHeaders(stream []byte, start int) (headers []HTTPHeader, bodyStart int, contentLen int, chunked bool, contentEncoding string, err error) {
+type httpFraming struct {
+	length                              int64
+	chunked, hasTransfer, invalidLength bool
+	encoding                            string
+	anomalies                           HTTPAnomalies
+}
+
+func parseHTTPHeaders(stream []byte, start int) (headers []HTTPHeader, bodyStart int, f httpFraming, err error) {
 	offset := start
-	contentLen = -1
+	f.length = -1
 	var encodings strings.Builder
-	var encodingSeen bool
+	var encodingSeen, lengthSeen bool
+	lines := 0
 	for offset < len(stream) {
 		relEnd := bytes.Index(stream[offset:], []byte("\r\n"))
 		if relEnd < 0 {
-			return nil, 0, 0, false, "", fmt.Errorf("%w: unterminated HTTP headers", ErrInvalidHTTP)
+			return nil, 0, f, fmt.Errorf("%w: unterminated HTTP headers", ErrInvalidHTTP)
 		}
 		if relEnd == 0 {
 			// Empty line "\r\n" marks the end of headers.
 			if encodings.Len() != 0 {
-				contentEncoding = encodings.String()
+				f.encoding = encodings.String()
 			}
-			return headers, offset + 2, contentLen, chunked, contentEncoding, nil
+			f.anomalies.TransferEncodingWithContentLength = f.hasTransfer && lengthSeen
+			return headers, offset + 2, f, nil
 		}
 		if relEnd > MaxHTTPHeaderLineBytes {
-			return nil, 0, 0, false, "", fmt.Errorf("%w: header line exceeds %d bytes", ErrHTTPLimit, MaxHTTPHeaderLineBytes)
+			return nil, 0, f, fmt.Errorf("%w: header line exceeds %d bytes", ErrHTTPLimit, MaxHTTPHeaderLineBytes)
 		}
-		if len(headers) >= MaxHTTPHeaders {
-			return nil, 0, 0, false, "", fmt.Errorf("%w: header count exceeds %d", ErrHTTPLimit, MaxHTTPHeaders)
+		lines++
+		if lines > MaxHTTPHeaders {
+			return nil, 0, f, fmt.Errorf("%w: header count exceeds %d", ErrHTTPLimit, MaxHTTPHeaders)
 		}
 		line := stream[offset : offset+relEnd]
 		colon := bytes.IndexByte(line, ':')
-		if colon <= 0 {
-			return nil, 0, 0, false, "", fmt.Errorf("%w: malformed HTTP header line", ErrInvalidHTTP)
+		if colon <= 0 || line[0] == ' ' || line[0] == '\t' {
+			return nil, 0, f, fmt.Errorf("%w: malformed HTTP header line", ErrInvalidHTTP)
 		}
 		name := strings.TrimSpace(string(line[:colon]))
 		val := strings.TrimSpace(string(line[colon+1:]))
+		offset += relEnd + 2
+		var unfolded strings.Builder
+		for offset < len(stream) && (stream[offset] == ' ' || stream[offset] == '\t') {
+			end := bytes.Index(stream[offset:], []byte("\r\n"))
+			if end < 0 {
+				return nil, 0, f, fmt.Errorf("%w: unterminated header continuation", ErrInvalidHTTP)
+			}
+			lines++
+			if lines > MaxHTTPHeaders || end > MaxHTTPHeaderLineBytes {
+				return nil, 0, f, fmt.Errorf("%w: header continuation exceeds limit", ErrHTTPLimit)
+			}
+			if unfolded.Len() == 0 {
+				unfolded.WriteString(val)
+			}
+			f.anomalies.ObsFoldHeader = true
+			part := bytes.Trim(stream[offset:offset+end], " \t")
+			if len(name)+1+unfolded.Len()+1+len(part) > MaxHTTPHeaderLineBytes {
+				return nil, 0, f, fmt.Errorf("%w: unfolded HTTP header exceeds limit", ErrHTTPLimit)
+			}
+			unfolded.WriteByte(' ')
+			unfolded.Write(part)
+			offset += end + 2
+		}
+		if unfolded.Len() != 0 {
+			val = unfolded.String()
+		}
 		headers = append(headers, HTTPHeader{Name: name, Value: val})
 
 		if strings.EqualFold(name, "Content-Length") {
-			if n, convErr := strconv.Atoi(val); convErr == nil && n >= 0 {
-				contentLen = n
+			lengthSeen = true
+			for item := range strings.SplitSeq(val, ",") {
+				item = strings.Trim(item, " \t")
+				n, err := strconv.ParseUint(item, 10, 63)
+				if err != nil {
+					f.invalidLength = true
+				} else if f.length >= 0 && f.length != int64(n) {
+					f.anomalies.MultipleContentLength = true
+				} else {
+					f.length = int64(n)
+				}
 			}
-		} else if strings.EqualFold(name, "Transfer-Encoding") && strings.Contains(strings.ToLower(val), "chunked") {
-			chunked = true
+		} else if strings.EqualFold(name, "Transfer-Encoding") {
+			f.hasTransfer = true
+			last := val[strings.LastIndexByte(val, ',')+1:]
+			f.chunked = strings.EqualFold(strings.Trim(last, " \t"), "chunked")
 		} else if strings.EqualFold(name, "Content-Encoding") {
 			if !encodingSeen {
-				contentEncoding = val
+				f.encoding = val
 				encodingSeen = true
 			} else {
 				if encodings.Len() == 0 {
-					encodings.WriteString(contentEncoding)
+					encodings.WriteString(f.encoding)
 				}
 				encodings.WriteString(", ")
 				encodings.WriteString(val)
 			}
 		}
-		offset += relEnd + 2
 	}
-	return nil, 0, 0, false, "", fmt.Errorf("%w: missing end of HTTP headers", ErrInvalidHTTP)
+	return nil, 0, f, fmt.Errorf("%w: missing end of HTTP headers", ErrInvalidHTTP)
 }
 
-// extractHTTPBody borrows the wire body for non-chunked messages. The caller
-// copies it before returning any body that still references the input stream.
-func extractHTTPBody(stream []byte, bodyStart int, contentLen int, chunked bool, bodylessIfUnspecified bool) (body []byte, consumed int) {
-	avail := len(stream) - bodyStart
-	if avail <= 0 {
-		return nil, bodyStart
+// body consumes the remaining input when framing cannot identify the next message.
+func (f httpFraming) body(stream []byte, start int, request bool) ([]byte, int, bool) {
+	avail := len(stream) - start
+	if f.chunked {
+		decoded, consumed, complete := decodeChunkedBody(stream[start:])
+		return decoded, start + consumed, !complete
 	}
-
-	if chunked {
-		decoded, rawConsumed := decodeChunkedBody(stream[bodyStart:])
-		return decoded, bodyStart + rawConsumed
-	}
-
-	if contentLen == 0 || (contentLen < 0 && bodylessIfUnspecified) {
-		return nil, bodyStart
+	if f.hasTransfer {
+		if request {
+			return nil, len(stream), false
+		}
+		f.length = -1 // A response with a final non-chunked coding is close-delimited.
+	} else if f.invalidLength || f.anomalies.MultipleContentLength {
+		return nil, len(stream), false
 	}
 	wireLen := avail
-	if contentLen > 0 && contentLen < wireLen {
-		wireLen = contentLen
+	if f.length >= 0 {
+		wireLen = int(min(f.length, int64(avail)))
+	} else if request {
+		wireLen = 0
 	}
-	take := min(wireLen, MaxHTTPBodyBytes)
-	return stream[bodyStart : bodyStart+take], bodyStart + wireLen
+	if wireLen == 0 {
+		return nil, start, f.length > int64(avail)
+	}
+	return stream[start : start+min(wireLen, MaxHTTPBodyBytes)], start + wireLen, f.length > int64(avail)
 }
 
 var errHTTPDecodeBudget = fmt.Errorf("%w: HTTP content decoding exceeds %d bytes per capture", ErrHTTPLimit, MaxHTTPDecodedBodyBytesPerScan)
@@ -349,10 +410,9 @@ func (b *httpDecodeBudget) read(r io.Reader) ([]byte, error) {
 	return b.scratch.Bytes(), err
 }
 
-func decodeHTTPContent(body []byte, encoding string, chunked bool, budget *httpDecodeBudget) ([]byte, bool, HTTPAnomalies, error) {
-	var anomalies HTTPAnomalies
+func decodeHTTPContent(body []byte, encoding string, chunked bool, budget *httpDecodeBudget, anomalies *HTTPAnomalies) ([]byte, bool, error) {
 	if len(body) == 0 {
-		return body, false, anomalies, nil
+		return body, false, nil
 	}
 
 	if encoding != "" {
@@ -370,7 +430,7 @@ func decodeHTTPContent(body []byte, encoding string, chunked bool, budget *httpD
 			if budget != nil {
 				charged := min(len(decoded), MaxHTTPBodyBytes)
 				if charged > budget.remaining {
-					return nil, false, anomalies, errHTTPDecodeBudget
+					return nil, false, errHTTPDecodeBudget
 				}
 				// A checksum or stream error still costs the work of inflating
 				// the bytes the reader produced before reporting the error.
@@ -384,7 +444,7 @@ func decodeHTTPContent(body []byte, encoding string, chunked bool, budget *httpD
 				if budget != nil {
 					decoded = bytes.Clone(decoded)
 				}
-				return decoded, true, anomalies, nil
+				return decoded, true, nil
 			}
 			err = readErr
 		}
@@ -394,7 +454,7 @@ func decodeHTTPContent(body []byte, encoding string, chunked bool, budget *httpD
 	if !chunked {
 		body = bytes.Clone(body)
 	}
-	return body, false, anomalies, nil
+	return body, false, nil
 }
 
 func httpContentReader(body []byte, encoding string) (io.ReadCloser, error) {
@@ -417,12 +477,12 @@ func httpContentReader(body []byte, encoding string) (io.ReadCloser, error) {
 	return nil, nil
 }
 
-func decodeChunkedBody(raw []byte) ([]byte, int) {
+func decodeChunkedBody(raw []byte) ([]byte, int, bool) {
 	var out bytes.Buffer
 	offset := 0
 	for offset < len(raw) {
 		lineEnd := bytes.Index(raw[offset:], []byte("\r\n"))
-		if lineEnd <= 0 {
+		if lineEnd <= 0 || lineEnd > MaxHTTPHeaderLineBytes {
 			break
 		}
 		sizeHex := strings.TrimSpace(string(raw[offset : offset+lineEnd]))
@@ -438,13 +498,12 @@ func decodeChunkedBody(raw []byte) ([]byte, int) {
 			// Consume optional HTTP trailers up to the terminating empty line "\r\n".
 			for range MaxHTTPHeaders + 1 {
 				trEnd := bytes.Index(raw[offset:], []byte("\r\n"))
-				if trEnd < 0 {
-					offset = len(raw)
+				if trEnd < 0 || trEnd > MaxHTTPHeaderLineBytes {
 					break
 				}
 				offset += trEnd + 2
 				if trEnd == 0 {
-					break
+					return out.Bytes(), offset, true
 				}
 			}
 			break
@@ -455,7 +514,6 @@ func decodeChunkedBody(raw []byte) ([]byte, int) {
 			if take > 0 {
 				out.Write(raw[offset : offset+take])
 			}
-			offset = len(raw)
 			break
 		}
 		chunkLen := int(chunkSize)
@@ -464,11 +522,12 @@ func decodeChunkedBody(raw []byte) ([]byte, int) {
 			out.Write(raw[offset : offset+take])
 		}
 		offset += chunkLen
-		if offset+2 <= len(raw) && raw[offset] == '\r' && raw[offset+1] == '\n' {
-			offset += 2
+		if len(raw)-offset < 2 || raw[offset] != '\r' || raw[offset+1] != '\n' {
+			break
 		}
+		offset += 2
 	}
-	return out.Bytes(), offset
+	return out.Bytes(), len(raw), false
 }
 
 func parseCookiesForJA4H(val string, names *[]string, pairs *[]string) {

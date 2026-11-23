@@ -148,8 +148,10 @@ func ExampleParseHTTPRequest() {
 	}
 	fmt.Printf("method=%s host=%s body=%s ja4h=%s\n",
 		req.Method, req.Host, req.Body, req.JA4H[:12])
+	fmt.Printf("truncated=%t\n", req.Anomalies.TruncatedBody)
 	// Output:
 	// method=POST host=api.example.com body=hello ja4h=po11cn04enus
+	// truncated=false
 }
 
 func ExampleParseHTTPResponse_contentEncoding() {
