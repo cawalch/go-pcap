@@ -601,6 +601,19 @@ secret until it sends its own authenticated update. After 32 updates in one
 direction, the next update ends decryption for that direction and the parser
 returns the plaintext recovered so far. [TLS 1.3 traffic key updates](https://www.rfc-editor.org/rfc/rfc8446#section-7.2)
 
+### Read DNS messages from decrypted HTTP/2
+
+Call `capture.HTTP2(data)` and select records with `IsDecrypted`. For each
+stream in `record.Summary.Streams`, call `block.DNSOverHTTPS(stream.Data)`
+for each header block. The method reads the `dns` URI parameter on GET
+requests and the `application/dns-message` body of POST requests and 2xx
+responses that allow a body. It accepts an uncoded body of up to 65,535 bytes
+and limits GET request targets to `MaxHTTPHeaderLineBytes`.
+
+Check the match flag and error before using the DNS message. Inspect
+`DNSMessage.Anomalies` for partial DNS sections. Use the flow index and
+HTTP/2 stream ID to pair requests with responses. [RFC 8484](https://www.rfc-editor.org/rfc/rfc8484#section-4)
+
 ## Inspect explicit proxy tunnels
 
 TLS, HTTP, HTTP/2, SSH, SMB, and RDP capture methods inspect the payload after

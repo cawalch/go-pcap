@@ -346,6 +346,18 @@ func ExampleParseHTTP2Frames_headers() {
 	// Output: GET /
 }
 
+func ExampleHTTP2HeaderBlock_DNSOverHTTPS() {
+	block := pcap.HTTP2HeaderBlock{Method: "GET", Path: "/dns-query?dns=AAABAAABAAAAAAAAB2V4YW1wbGUDb3JnAAABAAE"}
+	msg, match, err := block.DNSOverHTTPS(nil)
+	if err != nil {
+		log.Fatal(err)
+	}
+	if match && len(msg.Questions) != 0 {
+		fmt.Println(msg.Questions[0].Name)
+	}
+	// Output: example.org
+}
+
 func ExampleCapture_Web() {
 	data, err := os.ReadFile("testdata/deployments/proxy.pcapng")
 	if err != nil {
