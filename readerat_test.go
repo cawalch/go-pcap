@@ -530,11 +530,11 @@ func (descriptorReader) Fd() uintptr { panic("a scan must not access the descrip
 
 // Use 64 KiB classic PCAP records so 1,024 complete records exactly consume
 // the 64 MiB read budget. The virtual capture stores one physical record.
-func TestReaderAtProtocolReadBudget(t *testing.T) {
+func TestReaderAtScanReadBudget(t *testing.T) {
 	src, dst := [4]byte{10, 0, 0, 1}, [4]byte{10, 0, 0, 2}
 	const recordBytes = 64 << 10
 	const records = MaxReaderAtScanBytes/recordBytes + 1
-	for _, proto := range []string{"DNS", "TLS", "QUIC"} {
+	for _, proto := range []string{"DNS", "TLS", "QUIC", "flows"} {
 		t.Run(proto, func(t *testing.T) {
 			frames := [][]byte{
 				buildEthernetIPv4UDPFrame(src, dst, 1234, 5678, make([]byte, recordBytes-16-42)),
@@ -542,6 +542,10 @@ func TestReaderAtProtocolReadBudget(t *testing.T) {
 			}
 			if proto == "TLS" {
 				frames[1] = buildEthernetIPv4TCPFrame(src, dst, 1234, 443, 1, 0, TCPFlagACK, make([]byte, recordBytes-16-54))
+			}
+			if proto == "flows" {
+				// ICMP flow accounting reads the entire declared datagram.
+				frames[1][23] = IPProtoICMP
 			}
 			if proto == "QUIC" {
 				frames[1][42] = 0xc0
@@ -591,6 +595,9 @@ func TestReaderAtProtocolReadBudget(t *testing.T) {
 				disk := descriptorReader{r}
 				var count int
 				switch proto {
+				case "flows":
+					results, e := c.FlowsFromReaderAt(disk)
+					count, err = len(results), e
 				case "DNS":
 					results, e := c.DNSFromReaderAt(disk)
 					count, err = len(results), e

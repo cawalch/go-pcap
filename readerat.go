@@ -1,6 +1,7 @@
 package pcap
 
 import (
+	"bufio"
 	"encoding/binary"
 	"errors"
 	"fmt"
@@ -10,6 +11,9 @@ import (
 )
 
 const fileWindowSize = 64 << 10
+
+// Holds one complete record or option, including its four-byte header.
+const metadataWindowSize = 8 << 10
 
 var fileWindowBuffers = sync.Pool{New: func() any { return new([fileWindowSize]byte) }}
 
@@ -229,10 +233,17 @@ func (c *Capture) PacketPayloadFromReaderAt(r io.ReaderAt, pkt PacketRecord) ([]
 
 // FlowsFromReaderAt aggregates deterministic 5-tuple flows from an [io.ReaderAt]
 // using a 256-byte prefix for common transport headers. When the prefix is
-// insufficient it extends the read under [MaxReaderAtScanBytes].
+// insufficient it extends the read up to the IP datagram boundary. Container
+// and frame reads together are limited to [MaxReaderAtScanBytes].
 func (c *Capture) FlowsFromReaderAt(r io.ReaderAt) ([]FlowSummary, error) {
 	if err := c.validateContainer(); err != nil {
 		return nil, err
+	}
+	if r == nil {
+		return nil, fmt.Errorf("%w: nil ReaderAt", ErrInvalidHeader)
+	}
+	if c.PacketCount == 0 {
+		return nil, nil
 	}
 	if w := fileWindow(r, c.fileSize, c.scanReadAhead()); w != nil {
 		defer w.release()
@@ -242,7 +253,7 @@ func (c *Capture) FlowsFromReaderAt(r io.ReaderAt) ([]FlowSummary, error) {
 	var header [256]byte
 	var scratch []byte
 	budget := scanReadBudget{r: r, remaining: MaxReaderAtScanBytes}
-	for pkt, err := range c.packetRecords(r, false) {
+	for pkt, err := range c.packetRecords(&budget, false) {
 		if err != nil {
 			return nil, err
 		}
@@ -250,14 +261,10 @@ func (c *Capture) FlowsFromReaderAt(r io.ReaderAt) ([]FlowSummary, error) {
 		if n == 0 {
 			continue
 		}
-		if err := budget.check(n); err != nil {
-			return nil, err
-		}
 		payload := header[:n]
-		if err := readExactAt(r, payload, pkt.PayloadOffset, c.fileSize); err != nil {
+		if err := readExactAt(&budget, payload, pkt.PayloadOffset, c.fileSize); err != nil {
 			return nil, err
 		}
-		budget.remaining -= n
 		frame, err := DecodeFrame(payload, pkt.LinkType)
 		if err != nil {
 			continue
@@ -390,6 +397,23 @@ func extendFramePrefix(budget *scanReadBudget, size int64, pkt PacketRecord, f *
 	for {
 		n := int64(len(data))
 		next := pkt.PayloadLength
+		// Bytes after the outer IP datagram cannot affect any nested header.
+		for _, layer := range f.LayerSlices() {
+			offset := int(layer.Offset)
+			switch layer.Proto {
+			case LayerIPv4:
+				next = min(next, int64(offset)+int64(binary.BigEndian.Uint16(data[offset+2:])))
+			case LayerIPv6:
+				next = min(next, int64(offset)+40+int64(binary.BigEndian.Uint16(data[offset+4:])))
+			default:
+				continue
+			}
+			break
+		}
+		if next <= n {
+			return data, nil
+		}
+		limit := next
 		if f.Anomalies.TruncatedLayer {
 			next = min(next, 2*n)
 		}
@@ -408,7 +432,7 @@ func extendFramePrefix(budget *scanReadBudget, size int64, pkt PacketRecord, f *
 		// DecodeFrame has already accepted this link header. Extending its
 		// backing data cannot shorten the header or change its link type.
 		*f, _ = DecodeFrame(data, pkt.LinkType)
-		if next == pkt.PayloadLength || completeFlowPrefix(f, data, pkt.PayloadLength) {
+		if next == limit || completeFlowPrefix(f, data, pkt.PayloadLength) {
 			return data, nil
 		}
 	}
@@ -417,6 +441,9 @@ func extendFramePrefix(budget *scanReadBudget, size int64, pkt PacketRecord, f *
 func (s ipFrameSource) walkReaderAt(visit func(PacketRecord, Frame, []byte) error) error {
 	if s.reader == nil {
 		return fmt.Errorf("%w: nil ReaderAt", ErrInvalidHeader)
+	}
+	if s.capture.PacketCount == 0 {
+		return nil
 	}
 	if w := fileWindow(s.reader, s.capture.fileSize, s.capture.scanReadAhead()); w != nil {
 		defer w.release()
@@ -553,7 +580,7 @@ func scanClassicPCAPReaderAt(
 		remaining := size - offset
 		if remaining < pcapPacketHeaderSize {
 			summary.anomalies.TrailingBytes = true
-			summary.declaredExtent = max(summary.declaredExtent, uint64(offset+pcapPacketHeaderSize))
+			summary.declaredExtent = max(summary.declaredExtent, uint64(offset)+pcapPacketHeaderSize)
 			break
 		}
 		if err := readExactAt(r, hdr[:], offset, size); err != nil {
@@ -662,8 +689,11 @@ func scanPCAPNGReaderAt(r io.ReaderAt, size int64, cb func(PacketRecord) error) 
 				return scanSummary{}, fmt.Errorf("%w: missing PcapNG section header", ErrInvalidHeader)
 			}
 			summary.anomalies.TrailingBytes = true
-			summary.declaredExtent = max(summary.declaredExtent, uint64(offset+pcapngMinBlockSize))
+			summary.declaredExtent = max(summary.declaredExtent, uint64(offset)+pcapngMinBlockSize)
 			break
+		}
+		if err := summary.countBlock(); err != nil {
+			return scanSummary{}, err
 		}
 
 		if err := readExactAt(r, headerBuf[:8], offset, size); err != nil {
@@ -677,7 +707,7 @@ func scanPCAPNGReaderAt(r io.ReaderAt, size int64, cb func(PacketRecord) error) 
 					return scanSummary{}, fmt.Errorf("%w: truncated PcapNG section header", ErrInvalidHeader)
 				}
 				summary.anomalies.TruncatedPacketBlock = true
-				summary.declaredExtent = max(summary.declaredExtent, uint64(offset+pcapngSHBMinSize))
+				summary.declaredExtent = max(summary.declaredExtent, uint64(offset)+pcapngSHBMinSize)
 				break
 			}
 			if err := readExactAt(r, headerBuf[8:12], offset+8, size); err != nil {
@@ -754,17 +784,33 @@ func scanPCAPNGReaderAt(r io.ReaderAt, size int64, cb func(PacketRecord) error) 
 
 		// The tail contains the trailer and any metadata following the skipped frame.
 		n := int64(blockEnd) - tailOffset
-		if n > MaxSnapLen+4096 {
-			return scanSummary{}, fmt.Errorf("%w: metadata read length %d exceeds limit", ErrInvalidBlock, n)
+		var body, trailer []byte
+		if n <= metadataWindowSize {
+			if int64(cap(scratch)) < n {
+				scratch = make([]byte, n)
+			}
+			tail := scratch[:n]
+			if err := readExactAt(r, tail, tailOffset, size); err != nil {
+				return scanSummary{}, err
+			}
+			body, trailer = tail[:n-4], tail[n-4:]
+		} else {
+			trailer = headerBuf[:4]
+			if err := readExactAt(r, trailer, bodyEnd, size); err != nil {
+				return scanSummary{}, err
+			}
+			if order.Uint32(trailer) == blockLen {
+				var err error
+				body, err = readLargeMetadata(r, tailOffset, bodyEnd, blockType, order, &summary, totalSecretBytes)
+				if errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF) {
+					return scanSummary{}, ErrOutOfBounds
+				}
+				if err != nil {
+					return scanSummary{}, err
+				}
+			}
 		}
-		if int64(cap(scratch)) < n {
-			scratch = make([]byte, n)
-		}
-		tail := scratch[:n]
-		if err := readExactAt(r, tail, tailOffset, size); err != nil {
-			return scanSummary{}, err
-		}
-		if order.Uint32(tail[n-4:]) != blockLen {
+		if order.Uint32(trailer) != blockLen {
 			return scanSummary{}, fmt.Errorf("%w: trailing block length mismatch", ErrInvalidBlock)
 		}
 		if packetErr != nil {
@@ -774,7 +820,6 @@ func scanPCAPNGReaderAt(r io.ReaderAt, size int64, cb func(PacketRecord) error) 
 			offset = int64(blockEnd)
 			continue
 		}
-		body := tail[:n-4]
 		sr := SafeReader{data: body, size: int64(len(body))}
 		switch blockType {
 		case BlockTypeSectionHeader:
@@ -822,4 +867,94 @@ func scanPCAPNGReaderAt(r io.ReaderAt, size int64, cb func(PacketRecord) error) 
 	}
 
 	return summary, nil
+}
+
+// readLargeMetadata reads meaningful fields through a fixed-size window. NRB
+// records go directly into the summary. Other decoders consume the fixed body
+// and bounded options, up to the first end option.
+func readLargeMetadata(r io.ReaderAt, start, end int64, kind uint32, order binary.ByteOrder, summary *scanSummary, secretBytes int64) ([]byte, error) {
+	reader := bufio.NewReaderSize(io.NewSectionReader(r, start, end-start), metadataWindowSize)
+	var fixed int
+	switch kind {
+	case BlockTypeSectionHeader:
+		fixed = 16
+	case BlockTypeInterfaceDesc, BlockTypeDecryptionSecrets:
+		fixed = 8
+	case BlockTypeInterfaceStats:
+		fixed = 12
+	case BlockTypeDarwinProcessEvent:
+		fixed = 4
+	}
+	body := make([]byte, fixed)
+	if _, err := io.ReadFull(reader, body); err != nil {
+		return nil, err
+	}
+	start += int64(fixed)
+	if kind == BlockTypeDecryptionSecrets {
+		length := int64(order.Uint32(body[4:]))
+		if length > end-start {
+			return nil, ErrInvalidBlock
+		}
+		if len(summary.secrets) >= MaxDecryptionSecrets || length > MaxDecryptionSecretBytes-secretBytes {
+			return nil, ErrSecretLimit
+		}
+		n := (length + 3) &^ 3
+		body = append(body, make([]byte, n)...)
+		if _, err := io.ReadFull(reader, body[fixed:]); err != nil {
+			return nil, err
+		}
+		start += n
+	}
+	records := kind == BlockTypeNameResolution
+	for options := 0; start < end; {
+		if end-start < 4 {
+			return nil, ErrInvalidBlock
+		}
+		header, err := reader.Peek(4)
+		if err != nil {
+			return nil, err
+		}
+		code, length := order.Uint16(header), int(order.Uint16(header[2:]))
+		if !records {
+			if options >= MaxOptionsPerBlock {
+				return nil, ErrOptionLimit
+			}
+			options++
+		}
+		if code == 0 {
+			if !records {
+				break
+			}
+			// Keep an NRB terminator before its options for decodeNRB.
+			body = append(body, header...)
+			records = false
+			_, _ = reader.Discard(4)
+			start += 4
+			continue
+		}
+		if length > MaxOptionStringBytes {
+			if records {
+				return nil, ErrInvalidBlock
+			}
+			return nil, ErrOptionLimit
+		}
+		n := 4 + ((length + 3) &^ 3)
+		if int64(n) > end-start {
+			return nil, ErrInvalidBlock
+		}
+		field, err := reader.Peek(n)
+		if err != nil {
+			return nil, err
+		}
+		if records {
+			if err := summary.addNRBRecord(code, field[4:4+length]); err != nil {
+				return nil, err
+			}
+		} else {
+			body = append(body, field...)
+		}
+		_, _ = reader.Discard(n)
+		start += int64(n)
+	}
+	return body, nil
 }
