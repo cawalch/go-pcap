@@ -468,6 +468,8 @@ func BenchmarkCaptureQUICInitials(b *testing.B) {
 		}
 		ch, sh := read("client"), read("server")
 		for i := range 32 {
+			// Replayed RFC packets have identical IDs. Give each exchange its own client IP.
+			client[3] = byte(10 + group*32 + i)
 			port := uint16(10000 + group*32 + i)
 			frames = append(frames, buildEthernetIPv4UDPFrame(client, server, port, 443, ch), buildEthernetIPv4UDPFrame(server, client, 443, port, sh))
 		}
