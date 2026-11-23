@@ -29,7 +29,8 @@ the default branch, run `gh workflow run ci.yml --ref main`. To test a
 reviewed branch in this repository, substitute its branch name. Each job
 checks the owner's numeric account ID and the account requesting the run or
 rerun before GitHub allocates a runner. Pushes, pull requests and schedules
-have no automatic trigger in this workflow.
+have no automatic trigger in this workflow. Dependency update jobs are
+unscheduled. The manual CI run includes the vulnerability check.
 
 GitHub also requires approval for workflows from all external fork
 contributors. Keep private-network runners unregistered from this repository.
