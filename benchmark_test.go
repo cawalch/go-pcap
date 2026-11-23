@@ -2,6 +2,7 @@ package pcap
 
 import (
 	"bytes"
+	"compress/gzip"
 	"encoding/binary"
 	"fmt"
 	"io"
@@ -118,6 +119,52 @@ func BenchmarkDecryptQUICInitial(b *testing.B) {
 		if _, err := DecryptQUICInitial(batch); err != nil {
 			b.Fatal(err)
 		}
+	}
+}
+
+var measuredHTTPRecords []HTTPRecord
+
+func BenchmarkCaptureHTTPContent(b *testing.B) {
+	plain := bytes.Repeat([]byte("Capture HTTP body for content decoding benchmark.\n"), 1<<10)
+	var compressed bytes.Buffer
+	zw := gzip.NewWriter(&compressed)
+	if _, err := zw.Write(plain); err != nil {
+		b.Fatal(err)
+	}
+	if err := zw.Close(); err != nil {
+		b.Fatal(err)
+	}
+	for _, tc := range []struct {
+		name, coding string
+		body         []byte
+	}{
+		{"plain", "", plain}, {"gzip", "Content-Encoding: gzip\r\n", compressed.Bytes()},
+	} {
+		b.Run(tc.name, func(b *testing.B) {
+			req := []byte("GET / HTTP/1.1\r\nHost: bench.invalid\r\n\r\n")
+			response := append(fmt.Appendf(nil, "HTTP/1.1 200 OK\r\n%sContent-Length: %d\r\n\r\n", tc.coding, len(tc.body)), tc.body...)
+			var frames [][]byte
+			for i := range 64 {
+				src, dst := [4]byte{192, 0, 2, 1}, [4]byte{192, 0, 2, 2}
+				sport := uint16(40000 + i)
+				frames = append(frames, buildEthernetIPv4TCPFrame(src, dst, sport, 80, 1, 1, TCPFlagPSH|TCPFlagACK, req))
+				frames = append(frames, buildEthernetIPv4TCPFrame(dst, src, 80, sport, 1, 1+uint32(len(req)), TCPFlagPSH|TCPFlagACK, response))
+			}
+			raw := buildClassicPCAP(binary.LittleEndian, false, LinkTypeEthernet, 65535, frames)
+			capture, err := New(raw)
+			if err != nil {
+				b.Fatal(err)
+			}
+			b.ReportAllocs()
+			for b.Loop() {
+				records, err := capture.HTTP(raw)
+				if len(records) != 128 || err != nil {
+					b.Fatalf("records = %d, err = %v", len(records), err)
+				}
+				measuredHTTPRecords = records
+			}
+			b.ReportMetric(float64(len(measuredHTTPRecords[127].Response.Body)), "returned-B/body")
+		})
 	}
 }
 

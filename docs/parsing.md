@@ -105,7 +105,8 @@ The following limits bound parsing work and memory allocation on each call:
 | `MaxQUICPacketsPerFlow` | 64 packets | Bounds Initial UDP datagrams inspected per QUIC flow |
 | `MaxQUICFlowsPerScan` | 16,384 flows | Bounds QUIC Initial flows returned per capture scan |
 | `MaxHTTPHeaders` | 128 headers | Bounds HTTP header lines per request or response |
-| `MaxHTTPBodyBytes` | 4 MiB | Bounds carved HTTP request or response body size |
+| `MaxHTTPBodyBytes` | 4 MiB | Bounds each carved HTTP body before and after content decoding |
+| `MaxHTTPDecodedBodyBytesPerScan` | 64 MiB | Bounds cumulative HTTP/1.x content decoding per `Capture.HTTP` call, including failed attempts |
 | `MaxHTTPMessagesPerScan` | 16,384 messages | Bounds HTTP/1.x and HTTP/2 records returned per capture scan |
 | `MaxSSHKexPacketBytes` | 32 KiB | Bounds SSH `SSH_MSG_KEXINIT` packet length |
 | `MaxSSHHandshakesPerScan` | 16,384 handshakes | Bounds SSH handshakes returned per capture scan |
@@ -399,6 +400,24 @@ or call `capture.HTTP(data)` to extract HTTP/1.x requests, responses, FoxIO
 `JA4H` fingerprints, and carved `Body` payloads (`Content-Length` and
 `Transfer-Encoding: chunked`) from both cleartext TCP streams and DSB-decrypted
 TLS 1.2 and TLS 1.3 flows.
+
+For a single `gzip`, `x-gzip`, or `deflate` content coding, the parser removes
+chunk framing before decoding the content. Deflate supports zlib streams and raw
+DEFLATE streams without a zlib header. `ContentEncoding` carries the header
+value, and `IsDecompressed` reports whether `Body` contains decoded bytes.
+Unsupported or stacked codings leave the carved body as-is. A decoding failure
+keeps the carved body and sets `Anomalies.InvalidContentEncoding`. If decoded
+output exceeds 4 MiB, `Body` contains the first 4 MiB and
+`Anomalies.DecompressionLimitExceeded` is true.
+
+`BodyLength` is the length of the returned body. `BodyOffset` and the parser's
+consumed byte count refer to the original stream, so use the consumed count
+to locate the next pipelined message.
+
+A call to `capture.HTTP(data)` shares a 64 MiB decoding budget across all
+cleartext and decrypted directions. The budget counts bytes produced before a
+decoding failure and charges up to 4 MiB per message. On budget exhaustion,
+the call returns an error wrapping `ErrHTTPLimit` and no records.
 
 For HTTP/2 (`h2c` cleartext or decrypted TLS `h2`), call
 `ParseHTTP2Frames(stream)` or `capture.HTTP2(data)` to parse the 24-byte HTTP/2

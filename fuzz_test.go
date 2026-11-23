@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"compress/gzip"
 	"encoding/binary"
+	"fmt"
 	"io"
 	"net/netip"
 	"reflect"
@@ -173,16 +174,28 @@ func FuzzParseHTTP(f *testing.F) {
 	f.Add([]byte("GET /index.html HTTP/1.1\r\nHost: example.com\r\nCookie: a=1; b=2\r\n\r\n"))
 	f.Add([]byte("HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n4\r\ntest\r\n0\r\n\r\n"))
 
+	gzipBody := compressHTTPTestBody(f, "gzip", []byte("test"))
+	f.Add(fmt.Appendf(nil, "POST / HTTP/1.1\r\nContent-Encoding: gzip\r\nContent-Length: %d\r\n\r\n%s", len(gzipBody), gzipBody))
+	deflateBody := compressHTTPTestBody(f, "zlib", []byte("test"))
+	f.Add(fmt.Appendf(nil, "HTTP/1.1 200 OK\r\nContent-Encoding: deflate\r\nTransfer-Encoding: chunked\r\n\r\n%x\r\n%s\r\n0\r\n\r\n", len(deflateBody), deflateBody))
+
 	f.Fuzz(func(t *testing.T, data []byte) {
-		if req, _, err := ParseHTTPRequest(data); err == nil {
-			if len(req.Body) > MaxHTTPBodyBytes {
-				t.Fatalf("HTTP request body %d exceeds %d", len(req.Body), MaxHTTPBodyBytes)
+		check := func(body []byte, length, offset, consumed int, decoded bool, anomalies HTTPAnomalies) {
+			if len(body) > MaxHTTPBodyBytes || len(body) != length ||
+				offset < 0 || offset > consumed || consumed > len(data) {
+				t.Fatalf("invalid bounds: body size %d, length %d, offset %d, consumed %d, input size %d",
+					len(body), length, offset, consumed, len(data))
+			}
+			if (anomalies.InvalidContentEncoding && decoded) ||
+				(anomalies.DecompressionLimitExceeded && (!decoded || length != MaxHTTPBodyBytes)) {
+				t.Fatalf("invalid decoding state: decoded %t, anomalies %+v", decoded, anomalies)
 			}
 		}
-		if resp, _, err := ParseHTTPResponse(data); err == nil {
-			if len(resp.Body) > MaxHTTPBodyBytes {
-				t.Fatalf("HTTP response body %d exceeds %d", len(resp.Body), MaxHTTPBodyBytes)
-			}
+		if req, n, err := ParseHTTPRequest(data); err == nil {
+			check(req.Body, req.BodyLength, req.BodyOffset, n, req.IsDecompressed, req.Anomalies)
+		}
+		if resp, n, err := ParseHTTPResponse(data); err == nil {
+			check(resp.Body, resp.BodyLength, resp.BodyOffset, n, resp.IsDecompressed, resp.Anomalies)
 		}
 	})
 }

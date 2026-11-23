@@ -285,7 +285,12 @@ const (
 	MaxHTTPHeaderLineBytes = 8192
 	MaxHTTPCookies         = 64
 	MaxHTTPBodyBytes       = 4 << 20 // 4 MiB carved HTTP payload per message
-	MaxHTTPMessagesPerScan = 16_384
+
+	// MaxHTTPDecodedBodyBytesPerScan caps the total bytes charged to HTTP/1.x
+	// content decoding in one [Capture.HTTP] call. It counts bytes produced by
+	// failed decoding attempts and charges at most [MaxHTTPBodyBytes] per body.
+	MaxHTTPDecodedBodyBytesPerScan = 64 << 20
+	MaxHTTPMessagesPerScan         = 16_384
 
 	// SSH parser limits.
 	MaxSSHBannerBytes       = 255
