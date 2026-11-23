@@ -263,10 +263,11 @@ type flowSegments struct {
 // Streams reassembles bounded TCP byte streams for all TCP flows in the capture
 // in deterministic first-seen flow order.
 func (c *Capture) Streams(data []byte) ([]TCPStream, error) {
-	return collectStreams(ipFrameSource{capture: c, data: data})
+	return collectStreams(ipFrameSource{capture: c, data: data}, 0)
 }
 
-func collectStreams(source ipFrameSource) ([]TCPStream, error) {
+// A nonzero port restricts reassembly after global flow indices are assigned.
+func collectStreams(source ipFrameSource, port uint16) ([]TCPStream, error) {
 
 	var table flowIndexTable
 	tcpSlotByFlow := make(map[int]int)
@@ -279,6 +280,10 @@ func collectStreams(source ipFrameSource) ([]TCPStream, error) {
 			return err
 		}
 		if frame.IPProtocol != IPProtoTCP || !frame.hasPorts || frame.Anomalies.IPFragment || frame.Anomalies.TruncatedLayer || frame.Anomalies.InvalidTCPDataOffset {
+			return nil
+		}
+
+		if port != 0 && frame.SrcPort != port && frame.DstPort != port {
 			return nil
 		}
 
