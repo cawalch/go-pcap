@@ -123,7 +123,8 @@ func mixedWebCapture(t testing.TB, h2, keyed bool) ([]byte, *Capture) {
 	req := []byte("POST /sample HTTP/1.1\r\nContent-Length: 5\r\n\r\nhello")
 	if h2 {
 		alpn = "h2"
-		req = append(bytes.Clone(HTTP2ClientPreface), buildHTTP2Frame(HTTP2FrameData, 1, 1, body)...)
+		req = append(bytes.Clone(HTTP2ClientPreface), buildHTTP2Frame(HTTP2FrameHeaders, 4, 1, []byte{0x83, 0x87, 0x84})...)
+		req = append(req, buildHTTP2Frame(HTTP2FrameData, 1, 1, body)...)
 	}
 	client, server := [4]byte{10, 0, 0, 1}, [4]byte{10, 0, 0, 2}
 	var frames [][]byte
@@ -173,6 +174,10 @@ func TestMixedWebCapture(t *testing.T) {
 		for i, r := range h2 {
 			if !r.Summary.HasClientPreface || r.FlowIndex != i || r.IsDecrypted != (i == 32) || len(r.Summary.Streams) != 1 || string(r.Summary.Streams[0].Data) != "hello" {
 				t.Fatalf("HTTP2 record %d: %+v", i, r)
+			}
+			blocks := r.Summary.Streams[0].HeaderBlocks
+			if len(blocks) != 1 || blocks[0].Method != "POST" || blocks[0].Path != "/" {
+				t.Fatalf("HTTP/2 transaction on flow %d: %+v", i, blocks)
 			}
 		}
 		for _, scan := range []func() error{
