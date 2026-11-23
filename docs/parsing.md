@@ -506,6 +506,19 @@ and `Certificate` handshake messages:
   list exceeds the limit, `SANsTruncated` is true for that certificate.
   `RawDER` retains the complete certificate. Cleartext and decrypted client and server
   certificates follow the same rules for slice and ReaderAt scans.
+- Supply a known capture packet timestamp to
+  `cert.ValidityAt(time.Unix(0, pkt.TimestampNs))` to check that certificate's
+  inclusive validity window. If the timestamp is unavailable (for example,
+  in a PcapNG Simple Packet Block), pass `time.Time{}` for `TLSValidityUnknown`.
+  You can check each server or client certificate independently.
+- Use `match, known := record.Handshake.ServerNameMatch()` to compare the observed
+  ClientHello DNS name with the server leaf's DNS SANs. Matching follows Go's
+  X.509 case and wildcard rules. With Encrypted Client Hello, the observed
+  name can be the outer public name. A missing or invalid DNS name, an IP
+  literal, missing leaf or DNS SANs, or invalid certificate DER gives an unknown
+  result. A match in the retained DNS names is conclusive. A miss is unknown
+  if further DNS names might have been omitted. Both helpers describe the
+  captured evidence independently of chain trust and revocation policy.
 - `TLSCertificate.JA4X` (and standalone `JA4XFromDER` / `JA4XFromCert`) reports
   the FoxIO JA4X fingerprint over the certificate's raw ASN.1 issuer RDNs,
   subject RDNs, and X.509 extension OIDs. When a PcapNG `DSB` block or

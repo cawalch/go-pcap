@@ -9,6 +9,7 @@ import (
 	"log"
 	"net/netip"
 	"os"
+	"time"
 
 	"github.com/cawalch/go-pcap"
 )
@@ -445,4 +446,21 @@ func ExampleCapture_DecryptedTLSStreams_earlyData() {
 	// The trace sends six early bytes followed by 50 client application bytes.
 	fmt.Println(string(streams[0].Client.Data[:6]), len(streams[0].Client.Data))
 	// Output: ABCDEF 56
+}
+
+func ExampleTLSCertificate_ValidityAt() {
+	cert := pcap.TLSCertificate{Version: 3, NotBefore: 1700000000, NotAfter: 1800000000}
+	at := time.Unix(1750000000, 0)
+	fmt.Println(cert.ValidityAt(at) == pcap.TLSValidityCurrent)
+	// Output: true
+}
+
+func ExampleTLSHandshake_ServerNameMatch() {
+	hs := pcap.TLSHandshake{
+		HasClientHello: true,
+		ClientHello:    pcap.TLSClientHello{SNI: "api.example.org"},
+		Certificates:   []pcap.TLSCertificate{{DNSNames: []string{"*.example.org"}}},
+	}
+	fmt.Println(hs.ServerNameMatch())
+	// Output: true true
 }

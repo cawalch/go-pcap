@@ -13,6 +13,7 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"time"
 )
 
 // TLSAnomalies reports structural or security anomalies in a TLS handshake.
@@ -102,6 +103,35 @@ type TLSCertificate struct {
 	RawDER        []byte
 }
 
+// TLSCertificateValidity describes a certificate's validity window at an observation time.
+type TLSCertificateValidity uint8
+
+const (
+	// TLSValidityUnknown indicates missing time or certificate data, or a reversed window.
+	TLSValidityUnknown TLSCertificateValidity = iota
+	// TLSValidityNotYetValid indicates a time before NotBefore.
+	TLSValidityNotYetValid
+	// TLSValidityCurrent indicates a time within the inclusive validity window.
+	TLSValidityCurrent
+	// TLSValidityExpired indicates a time after NotAfter.
+	TLSValidityExpired
+)
+
+// ValidityAt compares the supplied capture time with the certificate's X.509 validity window.
+// Pass a zero time when the capture timestamp is unavailable.
+func (c TLSCertificate) ValidityAt(at time.Time) TLSCertificateValidity {
+	if at.IsZero() || c.Version == 0 || c.NotAfter < c.NotBefore {
+		return TLSValidityUnknown
+	}
+	if at.Before(time.Unix(c.NotBefore, 0)) {
+		return TLSValidityNotYetValid
+	}
+	if at.After(time.Unix(c.NotAfter, 0)) {
+		return TLSValidityExpired
+	}
+	return TLSValidityCurrent
+}
+
 // TLSHandshake aggregates the ClientHello, ServerHello, and X.509 certificates
 // decoded from a TLS record stream.
 type TLSHandshake struct {
@@ -119,6 +149,43 @@ type TLSHandshake struct {
 	// ClientCertificates holds the chain presented by the client, in wire order.
 	ClientCertificates []TLSCertificate
 	Anomalies          TLSAnomalies
+}
+
+// ServerNameMatch compares the observed ClientHello DNS name with the server
+// leaf's DNS SANs using [x509.Certificate.VerifyHostname]. The second result
+// is false when the name, server leaf, or DNS SAN evidence is insufficient.
+func (hs *TLSHandshake) ServerNameMatch() (match, known bool) {
+	if !hs.HasClientHello || len(hs.Certificates) == 0 || hs.Anomalies.InvalidCertificateDER {
+		// An invalid leaf may have been skipped while parsing the chain.
+		return false, false
+	}
+	name := strings.TrimSuffix(hs.ClientHello.SNI, ".")
+	if len(name) == 0 || len(name) > 253 {
+		return false, false
+	}
+	if _, err := netip.ParseAddr(name); err == nil {
+		return false, false
+	}
+	for label := range strings.SplitSeq(name, ".") {
+		if len(label) == 0 || len(label) > 63 || label[0] == '-' || label[len(label)-1] == '-' {
+			return false, false
+		}
+		for i := range len(label) {
+			c := label[i]
+			if c != '-' && !isASCIIAlphaNum(c) {
+				return false, false
+			}
+		}
+	}
+	leaf := &hs.Certificates[0]
+	if len(leaf.DNSNames) == 0 {
+		return false, false
+	}
+	cert := x509.Certificate{DNSNames: leaf.DNSNames}
+	if cert.VerifyHostname(name) == nil {
+		return true, true
+	}
+	return false, !leaf.SANsTruncated || len(leaf.DNSNames) < MaxTLSCertSANsPerKind
 }
 
 // TLSRecord associates a parsed [TLSHandshake] with its 5-tuple flow metadata
