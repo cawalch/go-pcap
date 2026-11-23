@@ -518,6 +518,35 @@ func BenchmarkCaptureQUICInitials(b *testing.B) {
 	}
 }
 
+// Measure CID lookup across a port change for each two-packet ClientHello.
+// All exchanges share both IPs and the server port.
+func BenchmarkCaptureQUICRebinding(b *testing.B) {
+	client, server := [4]byte{192, 0, 2, 1}, [4]byte{192, 0, 2, 2}
+	hello := buildTLS13ClientHelloRecord("rebound.example", "h3")[5:]
+	half := len(hello) / 2
+	var frames [][]byte
+	for i := range 64 {
+		dcid, scid := []byte{1, byte(i)}, []byte{2, byte(i)}
+		start := buildEncryptedQUICInitialDatagram(b, QUICVersion1, dcid, scid, nil, 1, 0, hello[:half])
+		end := buildEncryptedQUICInitialDatagram(b, QUICVersion1, dcid, scid, nil, 2, uint16(half), hello[half:])
+		frames = append(frames, buildEthernetIPv4UDPFrame(client, server, uint16(10000+i), 443, start),
+			buildEthernetIPv4UDPFrame(client, server, uint16(20000+i), 443, end))
+	}
+	raw := buildPCAPNGFixture(binary.LittleEndian, nil, frames)
+	r := bytes.NewReader(raw)
+	c, err := NewFromReaderAt(r, int64(len(raw)))
+	if err != nil {
+		b.Fatal(err)
+	}
+	b.ReportAllocs()
+	for b.Loop() {
+		records, err := c.QUICFromReaderAt(r)
+		if err != nil || len(records) != 64 || records[63].Handshake.ClientHello.SNI != "rebound.example" {
+			b.Fatalf("got %d records, err %v", len(records), err)
+		}
+	}
+}
+
 // BenchmarkCaptureFingerprints includes flow grouping, reassembly and parsing
 // for 32 independent connections carrying the same application exchange.
 func BenchmarkCaptureFingerprints(b *testing.B) {
