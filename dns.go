@@ -746,6 +746,27 @@ func DNSLabelEntropy(qname string) float64 {
 	return entropy
 }
 
+var commonMultiLabelPublicSuffixes = map[string]struct{}{
+	"co.uk": {}, "org.uk": {}, "ac.uk": {}, "gov.uk": {}, "me.uk": {}, "net.uk": {},
+	"com.au": {}, "net.au": {}, "org.au": {}, "edu.au": {}, "gov.au": {},
+	"co.jp": {}, "ne.jp": {}, "or.jp": {}, "ac.jp": {}, "go.jp": {},
+	"co.nz": {}, "org.nz": {}, "govt.nz": {},
+	"co.za": {}, "org.za": {}, "gov.za": {},
+	"com.br": {}, "org.br": {}, "gov.br": {},
+	"com.cn": {}, "net.cn": {}, "org.cn": {}, "gov.cn": {},
+	"com.mx": {}, "org.mx": {}, "gob.mx": {},
+	"co.in": {}, "net.in": {}, "org.in": {}, "gov.in": {},
+	"co.kr": {}, "or.kr": {}, "go.kr": {},
+	"com.sg": {}, "org.sg": {}, "gov.sg": {},
+	"com.hk": {}, "org.hk": {}, "gov.hk": {},
+	"com.tw": {}, "org.tw": {}, "gov.tw": {},
+	"co.il": {}, "org.il": {}, "gov.il": {},
+	"com.tr": {}, "org.tr": {}, "gov.tr": {},
+	"co.id": {}, "or.id": {}, "go.id": {},
+	"com.ar": {}, "com.my": {}, "com.ph": {}, "com.vn": {}, "com.ua": {},
+	"co.th": {}, "in.th": {}, "ac.th": {},
+}
+
 func splitDNSSubdomainAndApex(qname string) (subdomain string, apex string) {
 	clean := strings.TrimSuffix(strings.ToLower(strings.TrimSpace(qname)), ".")
 	if clean == "" {
@@ -759,7 +780,15 @@ func splitDNSSubdomainAndApex(qname string) (subdomain string, apex string) {
 	if secondLastDot < 0 {
 		return "", clean
 	}
-	return clean[:secondLastDot], clean[secondLastDot+1:]
+	tail2 := clean[secondLastDot+1:]
+	if _, ok := commonMultiLabelPublicSuffixes[tail2]; ok {
+		thirdLastDot := strings.LastIndexByte(clean[:secondLastDot], '.')
+		if thirdLastDot < 0 {
+			return "", clean
+		}
+		return clean[:thirdLastDot], clean[thirdLastDot+1:]
+	}
+	return clean[:secondLastDot], tail2
 }
 
 // DNSDomainStats aggregates DNS query entropy, label lengths, unique subdomain
@@ -884,6 +913,127 @@ func (c *Capture) DNSDomainStats(data []byte) ([]DNSDomainStats, error) {
 			EncodedCharRatio:     encRatio,
 			TXTAnswerBytes:       da.txtBytes,
 			TunnelScore:          tunnelScore,
+		}
+	}
+	return out, nil
+}
+
+// DNSSourceStats aggregates per-client-IP DNS query and NXDOMAIN DGA burst
+// indicators across all queried apex domains.
+type DNSSourceStats struct {
+	SrcAddr             netip.Addr
+	QueryCount          int
+	ResponseCount       int
+	NXDomainCount       int
+	UniqueApexes        int
+	UniqueNXDomainApex  int
+	NXDomainRatio       float64
+	MaxSubdomainEntropy float64
+	DGAScore            float64
+}
+
+// DNSSourceStats aggregates per-source-IP DNS query counts, NXDOMAIN counts,
+// unique apex fan-out, and a composite DGAScore in [0.0, 1.0] in deterministic
+// first-seen order.
+func (c *Capture) DNSSourceStats(data []byte) ([]DNSSourceStats, error) {
+	records, err := c.DNS(data)
+	if err != nil {
+		return nil, err
+	}
+	if len(records) == 0 {
+		return nil, nil
+	}
+
+	type srcAccum struct {
+		addr       netip.Addr
+		queries    int
+		responses  int
+		nxCount    int
+		apexes     map[string]struct{}
+		nxApexes   map[string]struct{}
+		maxEntropy float64
+	}
+
+	indexBySrc := make(map[netip.Addr]int)
+	var accums []srcAccum
+	getAccum := func(addr netip.Addr) *srcAccum {
+		idx, exists := indexBySrc[addr]
+		if !exists {
+			idx = len(accums)
+			indexBySrc[addr] = idx
+			accums = append(accums, srcAccum{
+				addr:     addr,
+				apexes:   make(map[string]struct{}),
+				nxApexes: make(map[string]struct{}),
+			})
+		}
+		return &accums[idx]
+	}
+
+	for i := range records {
+		rec := &records[i]
+		msg := &rec.Message
+		clientAddr := rec.SrcAddr
+		if msg.IsResponse {
+			clientAddr = rec.DstAddr
+		}
+		if !clientAddr.IsValid() {
+			continue
+		}
+		sa := getAccum(clientAddr)
+		if msg.IsResponse {
+			sa.responses++
+			if msg.RCode == DNSRCodeNameError {
+				sa.nxCount++
+			}
+		} else {
+			sa.queries++
+		}
+		for qIdx := range msg.Questions {
+			qname := msg.Questions[qIdx].Name
+			_, apex := splitDNSSubdomainAndApex(qname)
+			if apex == "" {
+				continue
+			}
+			if msg.IsResponse {
+				if msg.RCode == DNSRCodeNameError && len(sa.nxApexes) < MaxDNSMessagesPerScan {
+					sa.nxApexes[apex] = struct{}{}
+				}
+				continue
+			}
+			if len(sa.apexes) < MaxDNSMessagesPerScan {
+				sa.apexes[apex] = struct{}{}
+			}
+			if ent := DNSLabelEntropy(qname); ent > sa.maxEntropy {
+				sa.maxEntropy = ent
+			}
+		}
+	}
+
+	out := make([]DNSSourceStats, len(accums))
+	for i := range accums {
+		sa := &accums[i]
+		denom := max(sa.responses, sa.queries)
+		var nxRatio float64
+		if denom > 0 {
+			nxRatio = min(1.0, float64(sa.nxCount)/float64(denom))
+		}
+		var dgaScore float64
+		if sa.nxCount >= 5 && len(sa.nxApexes) >= 3 {
+			fanOutScore := min(1.0, float64(len(sa.nxApexes))/15.0)
+			entScore := min(1.0, sa.maxEntropy/4.0)
+			dgaScore = 0.45*nxRatio + 0.35*fanOutScore + 0.20*entScore
+		}
+		out[i] = DNSSourceStats{
+			SrcAddr:             sa.addr,
+			QueryCount:          sa.queries,
+			ResponseCount:       sa.responses,
+			NXDomainCount:       sa.nxCount,
+			UniqueApexes:        len(sa.apexes),
+			UniqueNXDomainApex:  len(sa.nxApexes),
+			NXDomainRatio:       nxRatio,
+			MaxSubdomainEntropy: sa.maxEntropy,
+			DGAScore:            dgaScore,
 		}
 	}
 	return out, nil
