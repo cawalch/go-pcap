@@ -547,6 +547,13 @@ and TLS 1.3 (`CLIENT_TRAFFIC_SECRET_0` / `SERVER_TRAFFIC_SECRET_0` with
 secrets embedded in PcapNG Decryption Secrets Blocks (`DSB`) or supplied in
 `extraKeyLog` (`SSLKEYLOGFILE` format).
 
+For example, if the client sends a TLS 1.3 `KeyUpdate` during an HTTP request,
+the client traffic secret for generation zero lets the parser recover request
+bytes both before and after the update. The server keeps its current traffic
+secret until it sends its own authenticated update. After 32 updates in one
+direction, the next update ends decryption for that direction and the parser
+returns the plaintext recovered so far. [TLS 1.3 traffic key updates](https://www.rfc-editor.org/rfc/rfc8446#section-7.2)
+
 ## Inspect explicit proxy tunnels
 
 TLS, HTTP, HTTP/2, SSH, SMB, and RDP capture methods inspect the payload after
