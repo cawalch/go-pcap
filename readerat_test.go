@@ -620,7 +620,7 @@ func TestReaderAtScanReadBudget(t *testing.T) {
 	}
 }
 
-func checkReaderParity[T any](t *testing.T, raw []byte, slice func([]byte) ([]T, error), reader func(io.ReaderAt) ([]T, error)) {
+func checkReaderParity[T any](t *testing.T, raw []byte, slice func([]byte) ([]T, error), reader func(io.ReaderAt) ([]T, error)) []T {
 	t.Helper()
 	want, err := slice(raw)
 	if err != nil {
@@ -630,6 +630,7 @@ func checkReaderParity[T any](t *testing.T, raw []byte, slice func([]byte) ([]T,
 	if err != nil || !reflect.DeepEqual(got, want) {
 		t.Fatalf("ReaderAt = %+v, %v; slice = %+v", got, err, want)
 	}
+	return want
 }
 
 func TestReaderAtProtocolErrors(t *testing.T) {

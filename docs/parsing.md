@@ -315,6 +315,46 @@ The method computes the ID only when called and returns an empty string for
 unsupported protocols, invalid or mixed-family addresses, or a summary with
 `PortsUnavailable` set. A decoded port value of zero is valid.
 
+## Trace a guest connection and a TLS proxy
+
+Suppose a guest can resolve a service name but reports that connecting to it
+fails. Capture guest Ethernet traffic at the gateway's pre-NAT VLAN interface,
+or at an access point or controller mirror after wireless decapsulation.
+Capture both directions. When the service uses a TLS-terminating proxy, also
+capture the proxy's client-facing and origin-facing interfaces. Preserve the
+interface names and use synchronized capture clocks.
+
+1. In the [guest fixture](../testdata/deployments/guest.pcapng), call `DNS` to
+   find the answer `guest.example → 198.51.100.80`. Follow the response's
+   `PacketIndex` to check its capture timestamp. `Flows` shows the TCP tuple
+   `192.0.2.14:50000 → 198.51.100.80:443`. The first connection has visible
+   ClientHello and ServerHello messages, followed by a TCP reset. A later SYN
+   and distinct initial sequence numbers show the tuple being reused.
+   `ExtractFlowPCAPNG` for flow 1 exports both attempts because the flow key is
+   the bidirectional 5-tuple. The export preserves the later packet's captured
+   length of 58 bytes and original length of 76 bytes.
+2. In the [proxy fixture](../testdata/deployments/proxy.pcapng), call `TLS`
+   and match each `FlowIndex` with its `Flows` entry. The client-facing
+   ClientHello offers `app.example` and `h2`. The origin-facing ClientHello
+   offers `origin.example` and `http/1.1`. The second ClientHello comes from
+   the proxy's upstream socket. Each leg has its own ServerHello and TLS
+   session. The visible ALPN values are client offers. The certificate
+   chains, server-selected ALPN, and application bytes in TLS 1.3 require the
+   corresponding TLS secrets when those encrypted records are available.
+   Use the proxy request log to associate a front-end request with an
+   upstream TCP session, especially when the proxy pools connections.
+3. To associate a pre-NAT IP with a device at the time of the capture, check
+   a contemporaneous Dynamic Host Configuration Protocol (DHCP) ACK or lease
+   log. In the [IoT fixture](../testdata/deployments/iot.pcapng), `DHCPv4`
+   reports a Discover and an Offer with `YourAddr` set to `203.0.113.42`.
+   The Offer gives a candidate assignment. Use controller association logs
+   to identify the access point and station on the guest
+   VLAN. A capture taken after NAT also needs the gateway's translation log
+   to associate a translated tuple with the original client.
+
+The [reference decoder commands and packet numbers](../testdata/deployments/README.md)
+let you repeat these checks on the synthetic fixtures.
+
 ## Reassemble TCP streams
 
 Call `capture.Streams(data)` to reassemble ordered directional TCP byte streams
