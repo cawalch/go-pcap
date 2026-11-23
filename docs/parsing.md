@@ -388,6 +388,14 @@ handshake metadata even when application payloads remain opaque.
 [QUIC v1 Initial secrets](https://www.rfc-editor.org/rfc/rfc9001#section-5.2) ·
 [QUIC v2 changes](https://www.rfc-editor.org/rfc/rfc9369#section-3.3)
 
+`QUIC` and `QUICFromReaderAt` group Initials across a client port change when
+the same endpoint IPs and server port have a unique matching nonempty connection
+ID. The record keeps the original flow index and ports. A matching Retry can
+supply a new destination ID for a subsequent client Initial. For example, read
+`record.Handshake.HasRetry` or `record.Handshake.HasVersionNegotiation` on
+each returned record to check which server responses appeared in the capture.
+These flags describe packet observations. Retry integrity tags are not verified.
+
 ## Decrypt TLS 1.2 and TLS 1.3 streams offline
 
 Call `capture.DecryptedTLSStreams(data, extraKeyLog)` to decrypt TLS 1.2

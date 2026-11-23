@@ -367,7 +367,7 @@ func (c *Capture) TLSFromReaderAt(r io.ReaderAt) ([]TLSRecord, error) {
 func (c *Capture) QUICFromReaderAt(r io.ReaderAt) ([]QUICRecord, error) {
 	return scanQUIC(ipFrameSource{capture: c, reader: r, needsPayload: func(f Frame, start []byte) bool {
 		return f.IPProtocol == IPProtoUDP && (f.Anomalies.IPFragment ||
-			f.PayloadLength >= 7 && (len(start) == 0 || start[0]&0xc0 == 0xc0))
+			f.PayloadLength >= 7 && (len(start) == 0 || start[0]&0x80 != 0 && (start[0]&0x40 != 0 || len(start) < 5 || binary.BigEndian.Uint32(start[1:5]) == 0)))
 	}})
 }
 

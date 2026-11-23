@@ -43,18 +43,21 @@ type QUICInitialHeader struct {
 // QUICHandshake contains the decrypted metadata and embedded TLS 1.3
 // ClientHello/ServerHello (with 'q13...' JA4/JA4S) of a QUIC Initial exchange.
 type QUICHandshake struct {
-	Version        uint32
-	DCID           []byte
-	SCID           []byte
-	Token          []byte
-	HasClientHello bool
-	HasServerHello bool
-	ClientHello    TLSClientHello
-	ServerHello    TLSServerHello
-	Anomalies      TLSAnomalies
+	Version uint32
+	DCID    []byte
+	SCID    []byte
+	Token   []byte
+	// HasRetry and HasVersionNegotiation report matching server packets observed by [Capture.QUIC].
+	HasRetry              bool
+	HasVersionNegotiation bool
+	HasClientHello        bool
+	HasServerHello        bool
+	ClientHello           TLSClientHello
+	ServerHello           TLSServerHello
+	Anomalies             TLSAnomalies
 }
 
-// QUICRecord associates a parsed [QUICHandshake] with its 5-tuple UDP flow in
+// QUICRecord associates a parsed [QUICHandshake] with its first observed Initial UDP flow in
 // a [Capture].
 type QUICRecord struct {
 	FlowIndex int
@@ -122,22 +125,10 @@ func parseQUICInitialPacketView(datagram []byte) (QUICInitialHeader, error) {
 		return QUICInitialHeader{}, fmt.Errorf("%w: unsupported QUIC version %#08x", ErrInvalidQUIC, version)
 	}
 
-	offset := 5
-	dcidLen := int(datagram[offset])
-	offset++
-	if dcidLen > MaxQUICConnIDBytes || offset+dcidLen+1 > len(datagram) {
-		return QUICInitialHeader{}, fmt.Errorf("%w: invalid DCID length %d", ErrInvalidQUIC, dcidLen)
+	dcid, scid, offset, ok := quicConnectionIDs(datagram)
+	if !ok {
+		return QUICInitialHeader{}, fmt.Errorf("%w: invalid connection ID lengths", ErrInvalidQUIC)
 	}
-	dcid := datagram[offset : offset+dcidLen]
-	offset += dcidLen
-
-	scidLen := int(datagram[offset])
-	offset++
-	if scidLen > MaxQUICConnIDBytes || offset+scidLen > len(datagram) {
-		return QUICInitialHeader{}, fmt.Errorf("%w: invalid SCID length %d", ErrInvalidQUIC, scidLen)
-	}
-	scid := datagram[offset : offset+scidLen]
-	offset += scidLen
 
 	tokenLen, n, ok := ReadQUICVarint(datagram[offset:])
 	if !ok || tokenLen > MaxQUICTokenBytes || offset+n+int(tokenLen) > len(datagram) {
@@ -168,6 +159,28 @@ func parseQUICInitialPacketView(datagram []byte) (QUICInitialHeader, error) {
 		PayloadLength: int(remLen),
 		PacketLength:  pktLen,
 	}, nil
+}
+
+// The caller has checked the seven-byte minimum long header.
+func quicConnectionIDs(datagram []byte) (dcid, scid []byte, offset int, ok bool) {
+	offset = 5
+	dcidLen := int(datagram[offset])
+	offset++
+	if dcidLen > MaxQUICConnIDBytes || offset+dcidLen+1 > len(datagram) {
+		return nil, nil, 0, false
+	}
+	dcid = datagram[offset : offset+dcidLen]
+	offset += dcidLen
+
+	scidLen := int(datagram[offset])
+	offset++
+	if scidLen > MaxQUICConnIDBytes || offset+scidLen > len(datagram) {
+		return nil, nil, 0, false
+	}
+	scid = datagram[offset : offset+scidLen]
+	offset += scidLen
+
+	return dcid, scid, offset, true
 }
 
 type quicInitialKeys struct {
@@ -501,21 +514,80 @@ func DecryptQUICInitial(datagrams [][]byte) (QUICHandshake, error) {
 
 // QUIC decrypts QUIC v1 and QUIC v2 Initial flows across all UDP packets in the
 // capture and extracts their embedded TLS 1.3 ClientHello and 'q13...' JA4
-// fingerprints.
+// fingerprints. It correlates unique nonempty connection IDs across client port
+// changes and reports observed Retry and Version Negotiation responses.
 func (c *Capture) QUIC(data []byte) ([]QUICRecord, error) {
 	return scanQUIC(ipFrameSource{capture: c, data: data})
+}
+
+// quicScanHeader checks an Initial, Retry, or Version Negotiation header for
+// flow correlation. The returned IDs borrow the UDP payload.
+func quicScanHeader(udpPayload []byte) (version uint32, dcid, scid []byte, vn, retry, ok bool) {
+	first := udpPayload[0]
+	if first&0x80 == 0 {
+		return 0, nil, nil, false, false, false
+	}
+	version = binary.BigEndian.Uint32(udpPayload[1:5])
+	vn = version == 0
+	retry = (version == QUICVersion1 && first&0xf0 == 0xf0) || (version == QUICVersion2 && first&0xf0 == 0xc0)
+	if vn || retry {
+		var n int
+		var ok bool
+		dcid, scid, n, ok = quicConnectionIDs(udpPayload)
+		if !ok {
+			return 0, nil, nil, false, false, false
+		}
+		tail := len(udpPayload) - n
+		if vn && (tail == 0 || tail%4 != 0) || retry && (tail <= 16 || tail-16 > MaxQUICTokenBytes) {
+			return 0, nil, nil, false, false, false
+		}
+	} else {
+		if first&0x40 == 0 {
+			return 0, nil, nil, false, false, false
+		}
+		hdr, err := parseQUICInitialPacketView(udpPayload)
+		if err != nil {
+			return 0, nil, nil, false, false, false
+		}
+		dcid, scid = hdr.DCID, hdr.SCID
+	}
+	return version, dcid, scid, vn, retry, true
 }
 
 func scanQUIC(source ipFrameSource) ([]QUICRecord, error) {
 
 	type quicFlowBuf struct {
-		flowIndex int
-		srcAddr   netip.Addr
-		dstAddr   netip.Addr
-		srcPort   uint16
-		dstPort   uint16
-		clientPkt [][]byte
-		serverPkt [][]byte
+		flowIndex       int
+		srcAddr         netip.Addr
+		dstAddr         netip.Addr
+		srcPort         uint16
+		dstPort         uint16
+		version         uint32
+		dcid, scid      []byte
+		hasRetry, hasVN bool
+		count           int
+		clientPkt       [][]byte
+		serverPkt       [][]byte
+	}
+
+	// Index the client's DCID in the forward direction and SCID in reverse.
+	// Include the server port so only the client port can change.
+	type cidKey struct {
+		client   netip.Addr
+		server   netip.AddrPort
+		id       string
+		response bool
+	}
+	byCID := make(map[cidKey]int)
+	register := func(key cidKey, slot int) {
+		if key.id == "" {
+			return
+		}
+		if prev, found := byCID[key]; found && prev != slot {
+			byCID[key] = -1 // More than one exchange uses this ID.
+		} else {
+			byCID[key] = slot
+		}
 	}
 
 	var table flowIndexTable
@@ -547,38 +619,71 @@ func scanQUIC(source ipFrameSource) ([]QUICRecord, error) {
 		if frame.IPProtocol != IPProtoUDP || len(udpPayload) < 7 {
 			return nil
 		}
-		if (udpPayload[0] & 0xc0) != 0xc0 {
-			return nil
-		}
-		if _, err := parseQUICInitialPacketView(udpPayload); err != nil {
+		version, dcid, scid, vn, retry, ok := quicScanHeader(udpPayload)
+		if !ok {
 			return nil
 		}
 
-		slot, hasSlot := slotByFlow[flowIdx]
-		if !hasSlot {
+		forward := cidKey{frame.SrcAddr, netip.AddrPortFrom(frame.DstAddr, frame.DstPort), string(dcid), false}
+		reverse := cidKey{frame.DstAddr, netip.AddrPortFrom(frame.SrcAddr, frame.SrcPort), string(dcid), true}
+		slot, found := slotByFlow[flowIdx]
+		client := true
+		if found {
+			fb := &flows[slot]
+			client = frame.DstAddr == fb.dstAddr && frame.DstPort == fb.dstPort
+		} else {
+			f, fOK := byCID[forward]
+			r, rOK := byCID[reverse]
+			// A changed client SCID identifies a separate Initial exchange,
+			// even when both clients chose the same destination ID.
+			if !vn && !retry && fOK && f >= 0 && !rOK && flows[f].version == version && bytes.Equal(flows[f].scid, scid) {
+				slot, found = f, true
+			} else if rOK && r >= 0 && !fOK && (vn || flows[r].version == version) {
+				slot, found, client = r, true, false
+			}
+		}
+		if vn || retry {
+			if !found || client {
+				return nil
+			}
+			fb := &flows[slot]
+			if fb.count >= MaxQUICPacketsPerFlow || !bytes.Equal(dcid, fb.scid) {
+				return nil
+			}
+			if vn && bytes.Equal(scid, fb.dcid) {
+				fb.hasVN = true
+				fb.count++
+			}
+			if retry && version == fb.version && !fb.hasRetry && !bytes.Equal(scid, fb.dcid) {
+				fb.hasRetry = true
+				fb.count++
+				register(cidKey{fb.srcAddr, netip.AddrPortFrom(fb.dstAddr, fb.dstPort), string(scid), false}, slot)
+			}
+			return nil
+		}
+		if !found {
 			if len(flows) >= MaxQUICFlowsPerScan {
 				return fmt.Errorf("%w: exceeds %d QUIC flows", ErrQUICLimit, MaxQUICFlowsPerScan)
 			}
 			slot = len(flows)
-			slotByFlow[flowIdx] = slot
 			flows = append(flows, quicFlowBuf{
-				flowIndex: flowIdx,
-				srcAddr:   frame.SrcAddr,
-				dstAddr:   frame.DstAddr,
-				srcPort:   frame.SrcPort,
-				dstPort:   frame.DstPort,
+				flowIndex: flowIdx, srcAddr: frame.SrcAddr, dstAddr: frame.DstAddr,
+				srcPort: frame.SrcPort, dstPort: frame.DstPort, version: version, dcid: dcid, scid: scid,
 			})
+			register(forward, slot)
+			register(cidKey{forward.client, forward.server, string(scid), true}, slot)
 		}
 
 		fb := &flows[slot]
-		if frame.SrcAddr == fb.srcAddr && frame.SrcPort == fb.srcPort {
-			if len(fb.clientPkt) < MaxQUICPacketsPerFlow {
-				fb.clientPkt = append(fb.clientPkt, udpPayload)
-			}
+		if fb.count >= MaxQUICPacketsPerFlow {
+			return nil
+		}
+		slotByFlow[flowIdx] = slot
+		fb.count++
+		if client {
+			fb.clientPkt = append(fb.clientPkt, udpPayload)
 		} else {
-			if len(fb.serverPkt) < MaxQUICPacketsPerFlow {
-				fb.serverPkt = append(fb.serverPkt, udpPayload)
-			}
+			fb.serverPkt = append(fb.serverPkt, udpPayload)
 		}
 		return nil
 	})
@@ -608,6 +713,8 @@ func scanQUIC(source ipFrameSource) ([]QUICRecord, error) {
 		if err != nil {
 			continue
 		}
+		hs.HasRetry = fb.hasRetry
+		hs.HasVersionNegotiation = fb.hasVN
 		// Optionally decrypt server Initial packets using the active client DCID.
 		if len(serverPkt) > 0 {
 			if sh, ok := decryptQUICServerInitial(serverPkt, hs.DCID, hs.Version); ok {

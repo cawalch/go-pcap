@@ -23,7 +23,12 @@ func buildEncryptedQUICInitialDatagram(
 	cryptoChunk []byte,
 ) []byte {
 	t.Helper()
-	keys, err := deriveQUICInitialKeys(dcid, version, true)
+	return buildQUICInitialWithKeys(t, version, dcid, scid, token, packetNumber, cryptoOffset, cryptoChunk, dcid, true)
+}
+
+func buildQUICInitialWithKeys(t testing.TB, version uint32, dcid, scid, token []byte, packetNumber, cryptoOffset uint16, cryptoChunk, keyID []byte, client bool) []byte {
+	t.Helper()
+	keys, err := deriveQUICInitialKeys(keyID, version, client)
 	if err != nil {
 		t.Fatalf("deriveQUICInitialKeys: %v", err)
 	}
@@ -217,5 +222,114 @@ func TestQUICRetryDCIDAndServerFirstOrdering(t *testing.T) {
 	recs, err := c.QUIC(raw)
 	if err != nil || len(recs) != 1 || recs[0].Handshake.ClientHello.SNI != "retry-quic.example" {
 		t.Fatalf("Capture.QUIC(server-first) = (%+v, %v)", recs, err)
+	}
+}
+
+func quicTestRecords(t *testing.T, frames ...[]byte) []QUICRecord {
+	t.Helper()
+	raw := buildClassicPCAP(binary.LittleEndian, false, LinkTypeEthernet, 65535, frames)
+	c, err := New(raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	checkReaderParity(t, raw, c.QUIC, c.QUICFromReaderAt)
+	records, err := c.QUIC(raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return records
+}
+
+func quicControlPacket(first byte, version uint32, dcid, scid, tail []byte) []byte {
+	p := binary.BigEndian.AppendUint32([]byte{first}, version)
+	p = append(p, byte(len(dcid)))
+	p = append(p, dcid...)
+	p = append(p, byte(len(scid)))
+	p = append(p, scid...)
+	return append(p, tail...)
+}
+
+func TestQUICRebindingAndObservations(t *testing.T) {
+	client, server := [4]byte{192, 0, 2, 1}, [4]byte{192, 0, 2, 2}
+	fromClient := func(port uint16, payload []byte) []byte {
+		return buildEthernetIPv4UDPFrame(client, server, port, 443, payload)
+	}
+	fromServer := func(port uint16, payload []byte) []byte {
+		return buildEthernetIPv4UDPFrame(server, client, 443, port, payload)
+	}
+	hello := buildTLS13ClientHelloRecord("rebound.example", "h3")[5:]
+	dcid, scid, retryID := []byte("original"), []byte("client"), []byte("retry")
+	for _, v := range []uint32{QUICVersion1, QUICVersion2} {
+		first := byte(0xf0)
+		if v == QUICVersion2 {
+			first = 0xc0
+		}
+		half := len(hello) / 2
+		start := fromClient(10001, buildEncryptedQUICInitialDatagram(t, v, dcid, scid, nil, 1, 0, hello[:half]))
+		vn := quicControlPacket(0x81, 0, scid, dcid, []byte{0, 0, 0, 42})
+		retry := quicControlPacket(first, v, scid, retryID, make([]byte, 17))
+		for _, useRetry := range []bool{false, true} {
+			frames := [][]byte{start, fromServer(10002, vn)}
+			activeID := dcid
+			if useRetry {
+				frames = append(frames, fromServer(10002, retry))
+				activeID = retryID
+			}
+			last := buildEncryptedQUICInitialDatagram(t, v, activeID, scid, nil, 2, uint16(half), hello[half:])
+			records := quicTestRecords(t, append(frames, fromClient(10003, last))...)
+			if len(records) != 1 {
+				t.Fatalf("v=%x retry=%v got %d records", v, useRetry, len(records))
+			}
+			r := records[0]
+			if r.FlowIndex != 0 || r.SrcPort != 10001 || !r.Handshake.HasVersionNegotiation || r.Handshake.HasRetry != useRetry || r.Handshake.ClientHello.SNI != "rebound.example" || !bytes.Equal(r.Handshake.DCID, activeID) {
+				t.Fatalf("rebound record = %+v", r)
+			}
+		}
+		complete := fromClient(10001, buildEncryptedQUICInitialDatagram(t, v, dcid, scid, nil, 1, 0, hello))
+		serverInitial := buildQUICInitialWithKeys(t, v, scid, []byte("server"), nil, 1, 0, buildTLSServerHelloRecord()[5:], dcid, false)
+		rebound := quicTestRecords(t, complete, fromServer(10004, serverInitial))
+		if len(rebound) != 1 || !rebound[0].Handshake.HasServerHello {
+			t.Fatalf("server Initial after rebinding: %+v", rebound)
+		}
+		records := quicTestRecords(t, complete, fromServer(10001, retry[:len(retry)-1]), fromClient(10001, retry), fromServer(10001, vn[:len(vn)-1]), fromServer(10001, quicControlPacket(0x80, 0, scid, retryID, []byte{0, 0, 0, 42})))
+		if len(records) != 1 || records[0].Handshake.HasRetry || records[0].Handshake.HasVersionNegotiation {
+			t.Fatalf("unexpected observation: %+v", records)
+		}
+		frames := make([][]byte, MaxQUICPacketsPerFlow)
+		for i := range frames {
+			frames[i] = complete
+		}
+		records = quicTestRecords(t, append(frames, fromServer(10002, retry))...)
+		if len(records) != 1 || records[0].Handshake.HasRetry {
+			t.Fatalf("packet limit: %+v", records)
+		}
+	}
+}
+
+func TestQUICRebindingDistinctAndAmbiguousIDs(t *testing.T) {
+	client, server := [4]byte{192, 0, 2, 1}, [4]byte{192, 0, 2, 2}
+	hello := buildTLS13ClientHelloRecord("distinct.example", "h3")[5:]
+	var frames [][]byte
+	add := func(port uint16, dcid, scid string) {
+		wire := buildEncryptedQUICInitialDatagram(t, QUICVersion1, []byte(dcid), []byte(scid), nil, 1, 0, hello)
+		frames = append(frames, buildEthernetIPv4UDPFrame(client, server, port, 443, wire))
+	}
+	add(10001, "one", "shared")
+	add(10002, "two", "shared")
+	// Either flow could have received this Retry on a new port.
+	retry := quicControlPacket(0xf0, QUICVersion1, []byte("shared"), []byte("new"), make([]byte, 17))
+	frames = append(frames, buildEthernetIPv4UDPFrame(server, client, 443, 10003, retry))
+	add(10004, "one", "different")
+	add(10005, "one", "shared") // The forward DCID now has two owners.
+	add(10006, "", "empty")
+	add(10007, "", "empty")
+	records := quicTestRecords(t, frames...)
+	if len(records) != 6 {
+		t.Fatalf("got %d records, want 6", len(records))
+	}
+	for _, r := range records {
+		if r.Handshake.HasRetry {
+			t.Fatalf("ambiguous Retry attached to %+v", r)
+		}
 	}
 }
