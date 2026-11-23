@@ -23,7 +23,7 @@ requires Go 1.26 or later. The API is experimental and can change before v1.0.
 
 ## Inspect a capture file
 
-From a Go module, install the library with `go get github.com/cawalch/go-pcap`.
+From a Go module, install the library with `go get github.com/cawalch/go-pcap@v0.1.0`.
 Save this program as `main.go` and run `go run . sample.pcapng`. It also accepts
 classic PCAP. It reads container metadata first, then prints one line per
 bidirectional flow. An open file implements `io.ReaderAt`, so the example can
@@ -80,7 +80,8 @@ func main() {
 - **A seekable file or other random-access source.** Call `NewFromReaderAt`
   with the source and its size. Keep the source available and its contents
   stable. `PacketSeqFromReaderAt` lets you stop iteration early. Flows, DNS,
-  TLS, and QUIC have dedicated ReaderAt methods with per-call read limits.
+  TLS, QUIC, DHCPv4 and neighbor discovery have dedicated ReaderAt methods
+  with per-call read limits.
 - **File metadata only.** `Open(path)` reads the entire file and returns a
   metadata snapshot. Use `NewFromReaderAt` when whole-file loading is costly.
 

@@ -33,3 +33,6 @@ requires otherwise.
    git tag -a v0.1.0 -m 'Experimental MVP v0.1.0'
    git push origin v0.1.0
    ```
+5. Publish a GitHub release using the existing tag and the matching changelog
+   entry. Verify the tag resolves to the reviewed commit, then close the
+   release milestone.
