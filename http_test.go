@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"reflect"
 	"slices"
 	"strings"
 	"testing"
@@ -351,5 +352,78 @@ func TestCaptureHTTPDecodedBodyBudget(t *testing.T) {
 				t.Fatal("Capture.HTTP() lost wire offsets or decoded content after a pipelined message")
 			}
 		})
+	}
+}
+
+func TestHTTPFraming(t *testing.T) {
+	for _, tc := range []struct {
+		name, fields, payload, body string
+		flags                       HTTPAnomalies
+	}{
+		{"equal lengths", "Content-Length: 01, 1\r\n", "x", "x", HTTPAnomalies{}},
+		{"conflicting lengths", "Content-Length: 1\r\nContent-Length: 2\r\n", "xyz", "", HTTPAnomalies{MultipleContentLength: true}},
+		{"short body", "Content-Length: 9\r\n", "x", "x", HTTPAnomalies{TruncatedBody: true}},
+		{"short chunks", "Transfer-Encoding: chunked\r\n", "1\r\nx\r\n0\r\n", "x", HTTPAnomalies{TruncatedBody: true}},
+		{"missing delimiter", "Transfer-Encoding: chunked\r\n", "1\r\nx0\r\n\r\n", "x", HTTPAnomalies{TruncatedBody: true}},
+		{"nonchunked token", "Transfer-Encoding: xchunked\r\nContent-Length: 1\r\n", "xyz", "", HTTPAnomalies{TransferEncodingWithContentLength: true}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			wire := []byte("POST / HTTP/1.1\r\n" + tc.fields + "\r\n" + tc.payload)
+			r, n, err := ParseHTTPRequest(wire)
+			if err != nil || n != len(wire) || string(r.Body) != tc.body || r.Anomalies != tc.flags {
+				t.Fatalf("consumed %d/%d, body %q, flags %+v, err %v", n, len(wire), r.Body, r.Anomalies, err)
+			}
+		})
+	}
+}
+
+func TestHTTPFramingCaptureParity(t *testing.T) {
+	first := "POST /first HTTP/1.1\r\nX-Note: one\r\n two\r\nContent-Length: 17\r\nTransfer-Encoding: Chunked\r\n\r\n1\r\nx\r\n0\r\n\r\n"
+	next := "GET /next HTTP/1.1\r\n\r\n"
+	src, dst := [4]byte{192, 0, 2, 1}, [4]byte{192, 0, 2, 2}
+	frame := buildEthernetIPv4TCPFrame(src, dst, 45000, 80, 1, 1, TCPFlagPSH|TCPFlagACK, []byte(first+next))
+	raw := buildClassicPCAP(binary.LittleEndian, false, LinkTypeEthernet, 65535, [][]byte{frame})
+	c, err := New(raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want, err := c.HTTP(raw)
+	if err != nil || len(want) != 2 {
+		t.Fatalf("HTTP returned %d records, %v", len(want), err)
+	}
+	r := want[0].Request
+	if r.Headers[0].Value != "one two" || string(r.Body) != "x" || r.Anomalies != (HTTPAnomalies{ObsFoldHeader: true, TransferEncodingWithContentLength: true}) || want[1].Request.Path != "/next" || want[1].Request.BodyOffset != len(first+next) {
+		t.Fatalf("unexpected records %+v", want)
+	}
+	reader := bytes.NewReader(raw)
+	index, err := NewFromReaderAt(reader, int64(len(raw)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	streams, err := collectStreams(ipFrameSource{capture: index, reader: reader, needsPayload: func(f Frame, _ []byte) bool { return f.IPProtocol == IPProtoTCP }})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var got []HTTPRecord
+	if err := scanHTTPStreams(streams, nil, &got, nil, nil); err != nil || !reflect.DeepEqual(want, got) {
+		t.Fatalf("ReaderAt mismatch: %+v, %v", got, err)
+	}
+}
+
+func TestHTTPResponseFraming(t *testing.T) {
+	for _, tc := range []struct {
+		head, wire, body string
+		flags            HTTPAnomalies
+	}{
+		{"200 OK\r\nTransfer-Encoding: chunked\r\nContent-Length: 2", "1\r\nx\r\n0\r\nTrailer: yes\r\n\r\n", "x", HTTPAnomalies{TransferEncodingWithContentLength: true}},
+		{"200 OK\r\nContent-Length: 1,2", "ignored", "", HTTPAnomalies{MultipleContentLength: true}},
+		{"200 OK\r\nContent-Length: 4294967296", "x", "x", HTTPAnomalies{TruncatedBody: true}},
+		{"304 Unmodified\r\nContent-Length: 99", "", "", HTTPAnomalies{}},
+	} {
+		raw := []byte("HTTP/1.1 " + tc.head + "\r\n\r\n" + tc.wire)
+		r, n, err := ParseHTTPResponse(raw)
+		if err != nil || n != len(raw) || string(r.Body) != tc.body || r.Anomalies != tc.flags {
+			t.Fatalf("%q: consumed %d/%d, body %q, flags %+v, err %v", tc.head, n, len(raw), r.Body, r.Anomalies, err)
+		}
 	}
 }
