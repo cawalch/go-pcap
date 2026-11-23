@@ -232,10 +232,12 @@ const (
 	MaxDecompressedCaptureBytes = 64 << 20 // 64 MiB of output across gzip members.
 	MaxInterfaces               = 256
 	MaxPackets                  = 1_048_576
+	MaxPCAPNGBlocks             = 2 * MaxPackets // All block types across all sections.
 	MaxFlows                    = 65_536
 	MaxDecryptionSecrets        = 256
 	MaxDecryptionSecretBytes    = 4 << 20 // 4 MiB across all DSB blocks
 	MaxNameResolutionRecords    = 16_384
+	MaxNamesPerRecord           = 64 // Nonempty names in one PcapNG name resolution record.
 	MaxInterfaceStats           = 1024
 	MaxProcessEvents            = 16_384
 	MaxOptionsPerBlock          = 64
@@ -303,7 +305,7 @@ const (
 	MaxBPFFilterInstructions = 4096
 	DefaultLiveSnapLen       = 65535
 	DefaultLiveBufferSize    = 256 << 10
-	MaxReaderAtScanBytes     = 64 << 20 // 64 MiB per call: flow frame reads or all DNS/TLS/QUIC reads
+	MaxReaderAtScanBytes     = 64 << 20 // 64 MiB per call: all flow/DNS/TLS/QUIC scan reads
 
 	// IPv4 / IPv6 defragmentation limits.
 	MaxFragmentGroups           = 1024
@@ -483,7 +485,7 @@ var (
 	ErrLiveCaptureUnsupported = errors.New("live capture unsupported on this platform")
 	// ErrInterfaceLimit indicates the capture exceeds [MaxInterfaces].
 	ErrInterfaceLimit = errors.New("interface count exceeds limit")
-	// ErrPacketLimit indicates the capture exceeds [MaxPackets].
+	// ErrPacketLimit indicates a packet, block, or scan read limit was exceeded.
 	ErrPacketLimit = errors.New("packet count exceeds limit")
 	// ErrFlowLimit indicates the capture exceeds [MaxFlows].
 	ErrFlowLimit = errors.New("flow count exceeds limit")

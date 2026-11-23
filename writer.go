@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"math"
+	"strings"
 )
 
 // PCAPNGWriterOptions configures container and interface metadata written by
@@ -263,7 +264,8 @@ func (pw *PCAPNGWriter) WritePacket(pkt PacketRecord, payload []byte) error {
 }
 
 // WriteNameResolution writes a PcapNG Name Resolution Block (NRB) containing
-// IPv4 and IPv6 hostname mappings.
+// IPv4 and IPv6 hostname mappings, with at most [MaxNamesPerRecord] names
+// per record.
 func (pw *PCAPNGWriter) WriteNameResolution(records []NameResolutionRecord) error {
 	if pw == nil || pw.w == nil {
 		return ErrInvalidHeader
@@ -289,12 +291,21 @@ func (pw *PCAPNGWriter) WriteNameResolution(records []NameResolutionRecord) erro
 			val.Write(a16[:])
 		}
 		wroteName := false
+		names := 0
 		for _, name := range rec.Names {
 			if name == "" {
 				continue
 			}
 			if len(name) > MaxOptionStringBytes-val.Len()-1 {
 				return fmt.Errorf("%w: NRB record length exceeds %d", ErrOptionLimit, MaxOptionStringBytes)
+			}
+			for part := range strings.SplitSeq(name, "\x00") {
+				if strings.TrimSpace(part) != "" {
+					names++
+				}
+			}
+			if names > MaxNamesPerRecord {
+				return fmt.Errorf("%w: NRB record exceeds %d names", ErrOptionLimit, MaxNamesPerRecord)
 			}
 			val.WriteString(name)
 			val.WriteByte(0)

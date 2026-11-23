@@ -36,13 +36,15 @@ its window. Other readers receive exact range requests. Opening a PcapNG capture
 validates its metadata blocks. Later packet walks reuse that validation and skip
 name resolution, interface statistics, and decryption secrets block bodies.
 They still read interface descriptions, process events, packet headers,
-options and block trailers. Each buffered PcapNG metadata read is limited to
-`MaxSnapLen + 4096` bytes. Use `PacketSeqFromReaderAt` to process records
+options and block trailers. Large metadata blocks use a bounded read window
+for name records and options, including name resolution blocks larger than
+16 MiB. The block and record totals below apply when scanning a capture.
+Streaming writers check individual calls and can continue across those totals. Use `PacketSeqFromReaderAt` to process records
 in order and break when you have enough. `PacketsFromReaderAt` collects a
 packet record slice. `FlowsFromReaderAt` starts with a 256-byte prefix or the
 whole frame when shorter. It reads additional bytes into a reusable buffer
-when needed to resolve flow headers and lengths. All frame reads count toward
-the 64 MiB flow budget. Flow metadata incurs additional I/O.
+when needed to resolve flow headers and lengths. Both container metadata and frame reads
+count toward the 64 MiB flow budget.
 
 `DNSFromReaderAt`, `TLSFromReaderAt`, and `QUICFromReaderAt` each allow
 64 MiB of total reads, including container metadata, frame prefixes, and
@@ -77,7 +79,9 @@ The following limits bound parsing work and memory allocation on each call:
 | `MaxFlows` | 65,536 flows | Bounds distinct 5-tuple flows aggregated by `Flows` and L7 dissectors |
 | `MaxDecryptionSecrets` | 256 blocks | Bounds PcapNG `DSB` blocks per capture |
 | `MaxDecryptionSecretBytes` | 4 MiB | Bounds cumulative secret payload bytes copied across all `DSB` blocks |
-| `MaxNameResolutionRecords` | 16,384 records | Bounds IPv4 and IPv6 hostname mappings across PcapNG `NRB` blocks |
+| `MaxPCAPNGBlocks` | 2,097,152 blocks | Bounds all PcapNG block types across sections |
+| `MaxNamesPerRecord` | 64 names | Bounds nonempty names retained from a single name resolution record |
+| `MaxNameResolutionRecords` | 16,384 records | Counts all non-terminator records across PcapNG name resolution blocks |
 | `MaxInterfaceStats` | 1,024 blocks | Bounds PcapNG `ISB` statistics blocks per capture |
 | `MaxProcessEvents` | 16,384 entries | Bounds Darwin Process Event Blocks (`DPEB`) per capture |
 | `MaxOptionsPerBlock` | 64 options | Bounds PcapNG TLV options per block |
@@ -113,7 +117,7 @@ The following limits bound parsing work and memory allocation on each call:
 | `MaxNTLMTokenBytes` | 16 KiB | Bounds NTLMSSP token length |
 | `MaxSMBRecordsPerScan` | 16,384 records | Bounds SMB2/3 records returned per capture scan |
 | `MaxBPFFilterInstructions` | 4,096 instructions | Bounds classic BPF filter program length in `OpenLive` and `EvalBPF` |
-| `MaxReaderAtScanBytes` | 64 MiB | Bounds flow frame reads, or all reads per DNS, TLS or QUIC ReaderAt scan |
+| `MaxReaderAtScanBytes` | 64 MiB | Bounds total reads per flow, DNS, TLS or QUIC ReaderAt scan |
 | `MaxFragmentGroups` | 1,024 groups | Bounds concurrent IPv4/IPv6 fragment groups tracked per scan |
 | `MaxFragmentsPerGroup` | 16 fragments | Bounds IP fragments reassembled per fragmented packet |
 | `MaxReassembledIPPacketBytes` | 65,535 bytes | Bounds reassembled IPv4/IPv6 packet payload size |
@@ -190,7 +194,7 @@ If you need a slice of all packet records, call `capture.Packets(data)` (or
 - `ProcessID`, `ThreadID`, `UserID`, `ProcessName`, `ProcessArgs`,
   `ContainerID`, `Flags`, and `DropCount`: Process attribution and packet
   metadata decoded from PcapNG Enhanced Packet Block options and Darwin Process
-  Event Blocks (`DPEB`).
+  Event Blocks (`DPEB`). A packet references process entries in its own section.
 
 ## Decode L2–L4 frames and tunnels
 

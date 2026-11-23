@@ -490,7 +490,10 @@ func classicInterface(linkType LinkType, snapLen uint32, nano bool) InterfaceDes
 }
 
 type scanSummary struct {
+	blocks               int
 	sectionInterfaceBase int
+	sectionProcessBase   int
+	nrbRecords           int
 	packetCount          int
 	declaredExtent       uint64
 	anomalies            CaptureAnomalies
@@ -505,6 +508,16 @@ type scanSummary struct {
 	nameRecords          []NameResolutionRecord
 	interfaceStats       []InterfaceStatistics
 	processes            []ProcessEvent
+}
+
+var errPCAPNGBlockLimit = fmt.Errorf("%w: exceeds %d PcapNG blocks", ErrPacketLimit, MaxPCAPNGBlocks)
+
+func (s *scanSummary) countBlock() error {
+	if s.blocks >= MaxPCAPNGBlocks {
+		return errPCAPNGBlockLimit
+	}
+	s.blocks++
+	return nil
 }
 
 func scanClassicPCAPPackets(
@@ -543,7 +556,7 @@ func scanClassicPCAPPacketsWithCallback(
 		remaining := size - offset
 		if remaining < pcapPacketHeaderSize {
 			summary.anomalies.TrailingBytes = true
-			summary.declaredExtent = max(summary.declaredExtent, uint64(offset+pcapPacketHeaderSize))
+			summary.declaredExtent = max(summary.declaredExtent, uint64(offset)+pcapPacketHeaderSize)
 			break
 		}
 		header := r.data[offset : offset+pcapPacketHeaderSize]
@@ -744,8 +757,11 @@ func walkPCAPNGBlockBytes(r *SafeReader, summary *scanSummary, visit func(uint32
 				return fmt.Errorf("%w: missing PcapNG section header", ErrInvalidHeader)
 			}
 			summary.anomalies.TrailingBytes = true
-			summary.declaredExtent = max(summary.declaredExtent, uint64(offset+pcapngMinBlockSize))
+			summary.declaredExtent = max(summary.declaredExtent, uint64(offset)+pcapngMinBlockSize)
 			break
+		}
+		if err := summary.countBlock(); err != nil {
+			return err
 		}
 
 		// For a Section Header Block, determine endianness from the byte-order magic at offset+8.
@@ -757,7 +773,7 @@ func walkPCAPNGBlockBytes(r *SafeReader, summary *scanSummary, visit func(uint32
 					return fmt.Errorf("%w: truncated PcapNG section header", ErrInvalidHeader)
 				}
 				summary.anomalies.TruncatedPacketBlock = true
-				summary.declaredExtent = max(summary.declaredExtent, uint64(offset+pcapngSHBMinSize))
+				summary.declaredExtent = max(summary.declaredExtent, uint64(offset)+pcapngSHBMinSize)
 				break
 			}
 			boMagicLE := binary.LittleEndian.Uint32(header[8:12])
@@ -829,6 +845,7 @@ func decodeSHB(
 	}
 
 	summary.sectionInterfaceBase = len(summary.interfaces)
+	summary.sectionProcessBase = len(summary.processes)
 	if !*haveSection {
 		summary.bigEndian = order == binary.BigEndian
 		summary.vMajor = vMajor
@@ -1054,9 +1071,9 @@ func decodeEPBOptions(options []byte, order binary.ByteOrder, summary *scanSumma
 			}
 		case optEPBDarwinDPEB:
 			if len(val) == 4 {
-				dpebIdx := int(order.Uint32(val))
-				if dpebIdx >= 0 && dpebIdx < len(summary.processes) {
-					pe := summary.processes[dpebIdx]
+				idx := order.Uint32(val)
+				if idx < uint32(len(summary.processes)-summary.sectionProcessBase) {
+					pe := summary.processes[summary.sectionProcessBase+int(idx)]
 					if !rec.HasProcessID {
 						rec.ProcessID = pe.ProcessID
 						rec.HasProcessID = true
@@ -1209,31 +1226,8 @@ func decodeNRB(
 		}
 		offset += padded
 
-		switch recType {
-		case nrbRecordIPv4:
-			if len(val) < 5 {
-				return fmt.Errorf("%w: NRB IPv4 record shorter than 5 bytes", ErrInvalidBlock)
-			}
-			if len(summary.nameRecords) >= MaxNameResolutionRecords {
-				return fmt.Errorf("%w: NRB records exceed %d", ErrOptionLimit, MaxNameResolutionRecords)
-			}
-			addr := netip.AddrFrom4([4]byte(val[0:4]))
-			names := parseNRBNames(val[4:])
-			if len(names) > 0 {
-				summary.nameRecords = append(summary.nameRecords, NameResolutionRecord{Addr: addr, Names: names})
-			}
-		case nrbRecordIPv6:
-			if len(val) < 17 {
-				return fmt.Errorf("%w: NRB IPv6 record shorter than 17 bytes", ErrInvalidBlock)
-			}
-			if len(summary.nameRecords) >= MaxNameResolutionRecords {
-				return fmt.Errorf("%w: NRB records exceed %d", ErrOptionLimit, MaxNameResolutionRecords)
-			}
-			addr := netip.AddrFrom16([16]byte(val[0:16]))
-			names := parseNRBNames(val[16:])
-			if len(names) > 0 {
-				summary.nameRecords = append(summary.nameRecords, NameResolutionRecord{Addr: addr, Names: names})
-			}
+		if err := summary.addNRBRecord(recType, val); err != nil {
+			return err
 		}
 	}
 	if offset < bodyEnd {
@@ -1242,15 +1236,41 @@ func decodeNRB(
 	return nil
 }
 
-func parseNRBNames(raw []byte) []string {
+func (s *scanSummary) addNRBRecord(kind uint16, val []byte) error {
+	if s.nrbRecords >= MaxNameResolutionRecords {
+		return fmt.Errorf("%w: NRB records exceed %d", ErrOptionLimit, MaxNameResolutionRecords)
+	}
+	s.nrbRecords++
+	var addr netip.Addr
+	switch kind {
+	case nrbRecordIPv4:
+		if len(val) < 5 {
+			return fmt.Errorf("%w: short NRB IPv4 record", ErrInvalidBlock)
+		}
+		addr = netip.AddrFrom4([4]byte(val))
+		val = val[4:]
+	case nrbRecordIPv6:
+		if len(val) < 17 {
+			return fmt.Errorf("%w: short NRB IPv6 record", ErrInvalidBlock)
+		}
+		addr = netip.AddrFrom16([16]byte(val))
+		val = val[16:]
+	default:
+		return nil
+	}
 	var names []string
-	for part := range bytes.SplitSeq(raw, []byte{0}) {
-		s := strings.TrimSpace(string(part))
-		if s != "" {
-			names = append(names, s)
+	for part := range bytes.SplitSeq(val, []byte{0}) {
+		if part = bytes.TrimSpace(part); len(part) != 0 {
+			if len(names) >= MaxNamesPerRecord {
+				return fmt.Errorf("%w: NRB record exceeds %d names", ErrOptionLimit, MaxNamesPerRecord)
+			}
+			names = append(names, string(part))
 		}
 	}
-	return names
+	if len(names) != 0 {
+		s.nameRecords = append(s.nameRecords, NameResolutionRecord{Addr: addr, Names: names})
+	}
+	return nil
 }
 
 func decodeISB(
