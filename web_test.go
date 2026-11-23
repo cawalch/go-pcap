@@ -103,7 +103,7 @@ func TestWebParity(t *testing.T) {
 	if len(out.TLS) != 2 || keyed1 != 2 || keyed2 != 2 {
 		t.Fatalf("TLS=%d decrypted HTTP=%d HTTP2=%d", len(out.TLS), keyed1, keyed2)
 	}
-	for _, name := range []string{"guest", "proxy", "iot"} {
+	for _, name := range []string{"client", "proxy", "iot"} {
 		raw, err := os.ReadFile("testdata/deployments/" + name + ".pcapng")
 		if err != nil {
 			t.Fatal(err)

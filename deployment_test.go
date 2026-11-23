@@ -38,7 +38,7 @@ func TestDeploymentCaptures(t *testing.T) {
 		truncatedFrame  int
 	}{
 		{
-			name:        "guest",
+			name:        "client",
 			wireLengths: []uint32{73, 54, 89, 54, 54, 202, 149, 54, 54, 54, 54, 54, 76, 54},
 			flows: []flow{
 				{IPProtoUDP, "192.0.2.14:53000", "192.0.2.53:53", 2},
@@ -47,11 +47,11 @@ func TestDeploymentCaptures(t *testing.T) {
 			},
 			dnsFrames:       []int{1, 3},
 			dnsFlow:         0,
-			dnsName:         "guest.example",
+			dnsName:         "trace.example",
 			dnsAnswer:       "198.51.100.80",
-			handshakes:      []handshake{{1, "guest.example", "h2", 0x1301}},
+			handshakes:      []handshake{{1, "trace.example", "h2", 0x1301}},
 			exportFlow:      1,
-			exportInterface: "guest-before-nat",
+			exportInterface: "client-before-nat",
 			exportFrames:    []int{2, 4, 5, 6, 7, 8, 9, 11, 12, 13, 14},
 			truncatedFrame:  13,
 		},
@@ -138,8 +138,8 @@ func TestDeploymentCaptures(t *testing.T) {
 					t.Errorf("flow %d = %+v, want %+v", i, got, want)
 				}
 			}
-			if tc.name == "guest" && (!flows[1].Anomalies.IPTotalLengthExceedsFrame || flows[2].TCPFlags != TCPFlagSYN) {
-				t.Errorf("guest truncation or unanswered SYN missing: %+v", flows)
+			if tc.name == "client" && (!flows[1].Anomalies.IPTotalLengthExceedsFrame || flows[2].TCPFlags != TCPFlagSYN) {
+				t.Errorf("client truncation or unanswered SYN missing: %+v", flows)
 			}
 			if tc.name == "proxy" && (flows[0].HasProcessID || !flows[1].HasProcessID || flows[1].ProcessName != "fixture-proxy") {
 				t.Errorf("front and back flow attribution = %+v", flows)

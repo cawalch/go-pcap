@@ -125,8 +125,8 @@ func TestMetadataSnapshot(t *testing.T) {
 	}
 }
 
-func TestGuestRecordOrder(t *testing.T) {
-	raw, err := os.ReadFile("../deployments/guest.pcapng")
+func TestClientRecordOrder(t *testing.T) {
+	raw, err := os.ReadFile("../deployments/client.pcapng")
 	if err != nil {
 		t.Fatal(err)
 	}
