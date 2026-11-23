@@ -3,9 +3,11 @@ package pcap
 import (
 	"bytes"
 	"encoding/binary"
+	"errors"
 	"fmt"
 	"net/netip"
 	"strconv"
+	"strings"
 )
 
 // HTTP2ClientPreface is the 24-byte RFC 9113 §3.4 HTTP/2 client connection preface.
@@ -31,10 +33,20 @@ type HTTP2Setting struct {
 	Value uint32
 }
 
-// HTTP2StreamData holds reassembled DATA frame payloads for one HTTP/2 stream ID.
+// HTTP2HeaderBlock contains one complete directional HEADERS or PUSH_PROMISE
+// block. Headers preserves wire order, including pseudo-headers. An absent
+// pseudo-header has an empty value.
+type HTTP2HeaderBlock struct {
+	Method, Scheme, Authority, Path, Status string
+	Headers                                 []HTTPHeader
+}
+
+// HTTP2StreamData holds DATA and decoded header blocks for one stream ID.
+// Informational responses and trailers retain their own blocks in wire order.
 type HTTP2StreamData struct {
-	StreamID uint32
-	Data     []byte
+	StreamID     uint32
+	Data         []byte
+	HeaderBlocks []HTTP2HeaderBlock
 }
 
 // HTTP2Summary contains the parsed HTTP/2 frames, SETTINGS parameters, and
@@ -46,6 +58,11 @@ type HTTP2Summary struct {
 	SettingsFingerprint string
 	WindowUpdate        uint32
 	Streams             []HTTP2StreamData
+	// HeadersIncomplete means a truncated or invalid HPACK block made later
+	// headers undecodable. Previously completed blocks and DATA remain available.
+	HeadersIncomplete bool
+	// AkamaiFingerprint is populated on the first decoded client request.
+	AkamaiFingerprint string
 }
 
 // HTTP2Record associates a parsed [HTTP2Summary] with its 5-tuple TCP flow and
@@ -63,9 +80,14 @@ type HTTP2Record struct {
 
 // ParseHTTP2Frames parses an HTTP/2 byte stream (starting either with the
 // 24-byte client connection preface or directly with a 9-byte HTTP/2 SETTINGS
-// frame), extracts SETTINGS parameters and their fingerprint, and reassembles
-// DATA frame payloads per stream ID under [MaxHTTPBodyBytes].
+// frame), extracts SETTINGS parameters and their fingerprint, and decodes header blocks and DATA by stream ID. Header field storage is
+// limited to [MaxHTTP2DecodedHeaderBytes] and DATA to [MaxHTTPBodyBytes].
 func ParseHTTP2Frames(stream []byte) (HTTP2Summary, error) {
+	remaining := MaxHTTP2DecodedHeaderBytes
+	return parseHTTP2Frames(stream, &remaining)
+}
+
+func parseHTTP2Frames(stream []byte, remaining *int) (HTTP2Summary, error) {
 	var out HTTP2Summary
 	offset := 0
 	if bytes.HasPrefix(stream, HTTP2ClientPreface) {
@@ -90,8 +112,18 @@ func ParseHTTP2Frames(stream []byte) (HTTP2Summary, error) {
 		}
 	}
 
-	dataByStream := make(map[uint32]*bytes.Buffer)
-	var streamOrder []uint32
+	byID := make(map[uint32]int)
+	getStream := func(id uint32) *HTTP2StreamData {
+		if i, ok := byID[id]; ok {
+			return &out.Streams[i]
+		}
+		byID[id] = len(out.Streams)
+		out.Streams = append(out.Streams, HTTP2StreamData{StreamID: id})
+		return &out.Streams[len(out.Streams)-1]
+	}
+	headers := http2Headers{table: hpackTable{limit: MaxHTTP2DynamicTableBytes}}
+	var priorities []string
+	settingsSeen := false
 	totalDataBytes := 0
 
 	for offset+9 <= len(stream) && out.FrameCount < MaxHTTP2FramesPerStream {
@@ -102,16 +134,49 @@ func ParseHTTP2Frames(stream []byte) (HTTP2Summary, error) {
 		offset += 9
 
 		if fLen > MaxHTTP2FramePayload || offset+fLen > len(stream) {
+			if isHTTP2HeaderFrame(fType) {
+				out.HeadersIncomplete = true
+			}
 			break
 		}
 		payload := stream[offset : offset+fLen]
 		offset += fLen
 		out.FrameCount++
 
+		if headers.continuation != 0 && (fType != HTTP2FrameContinuation || streamID != headers.continuation) {
+			out.HeadersIncomplete = true
+		}
 		switch fType {
+		case HTTP2FramePriority:
+			if out.HasClientPreface && out.AkamaiFingerprint == "" && streamID != 0 && len(payload) == 5 {
+				dep := binary.BigEndian.Uint32(payload)
+				priorities = append(priorities, fmt.Sprintf("%d:%d:%d:%d", streamID, dep>>31, dep&0x7fffffff, int(payload[4])+1))
+			}
+		case HTTP2FrameHeaders, HTTP2FramePushPromise, HTTP2FrameContinuation:
+			if out.HeadersIncomplete {
+				continue
+			}
+			block, complete, err := headers.consume(fType, fFlags, streamID, payload, remaining)
+			if errors.Is(err, ErrHTTPLimit) {
+				return HTTP2Summary{}, err
+			}
+			if err != nil {
+				out.HeadersIncomplete = true
+				continue
+			}
+			if !complete {
+				continue
+			}
+			st := getStream(headers.target)
+			st.HeaderBlocks = append(st.HeaderBlocks, block)
+			if out.HasClientPreface && out.AkamaiFingerprint == "" && block.Method != "" {
+				out.AkamaiFingerprint = out.fingerprint(priorities, block)
+
+			}
 		case HTTP2FrameSettings:
 			// Ignore SETTINGS ACK frames (flag 0x01 with empty payload) and non-connection streams.
-			if streamID == 0 && (fFlags&0x01) == 0 && len(out.Settings) == 0 && len(payload)%6 == 0 {
+			if streamID == 0 && (fFlags&0x01) == 0 && !settingsSeen && len(payload)%6 == 0 {
+				settingsSeen = true
 				count := min(len(payload)/6, MaxHTTP2Settings)
 				out.Settings = make([]HTTP2Setting, count)
 				var fpBuf [128]byte
@@ -153,13 +218,8 @@ func ParseHTTP2Frames(stream []byte) (HTTP2Summary, error) {
 			}
 			if len(dataPayload) > 0 && totalDataBytes < MaxHTTPBodyBytes {
 				take := min(len(dataPayload), MaxHTTPBodyBytes-totalDataBytes)
-				buf, ok := dataByStream[streamID]
-				if !ok {
-					buf = &bytes.Buffer{}
-					dataByStream[streamID] = buf
-					streamOrder = append(streamOrder, streamID)
-				}
-				buf.Write(dataPayload[:take])
+				st := getStream(streamID)
+				st.Data = append(st.Data, dataPayload[:take]...)
 				totalDataBytes += take
 			}
 		}
@@ -168,11 +228,8 @@ func ParseHTTP2Frames(stream []byte) (HTTP2Summary, error) {
 	if out.FrameCount == 0 && !out.HasClientPreface {
 		return HTTP2Summary{}, fmt.Errorf("%w: no valid HTTP/2 frames decoded", ErrInvalidHTTP)
 	}
-	for _, sid := range streamOrder {
-		out.Streams = append(out.Streams, HTTP2StreamData{
-			StreamID: sid,
-			Data:     dataByStream[sid].Bytes(),
-		})
+	if headers.continuation != 0 || (len(stream)-offset >= 4 && len(stream)-offset < 9 && isHTTP2HeaderFrame(stream[offset+3])) {
+		out.HeadersIncomplete = true
 	}
 	return out, nil
 }
@@ -185,16 +242,17 @@ func (c *Capture) HTTP2(data []byte) ([]HTTP2Record, error) {
 	if err != nil {
 		return nil, err
 	}
+	remaining := MaxHTTP2DecodedHeaderBytes
 	var records []HTTP2Record
 	for i := range streams {
-		if err := appendHTTP2FromTCPStream(&streams[i], false, &records); err != nil {
+		if err := appendHTTP2FromTCPStream(&streams[i], false, &records, &remaining); err != nil {
 			return nil, err
 		}
 	}
 	if keys, err := c.TLSKeyLog(nil); err == nil && len(keys.Entries) > 0 {
 		decStreams := decryptTLSStreams(streams, keys)
 		for i := range decStreams {
-			if err := appendHTTP2FromTCPStream(&decStreams[i], true, &records); err != nil {
+			if err := appendHTTP2FromTCPStream(&decStreams[i], true, &records, &remaining); err != nil {
 				return nil, err
 			}
 		}
@@ -202,9 +260,13 @@ func (c *Capture) HTTP2(data []byte) ([]HTTP2Record, error) {
 	return records, nil
 }
 
-func appendHTTP2FromTCPStream(st *TCPStream, isDecrypted bool, records *[]HTTP2Record) error {
+func appendHTTP2FromTCPStream(st *TCPStream, isDecrypted bool, records *[]HTTP2Record, remaining *int) error {
 	if len(st.Client.Data) >= 9 {
-		if sum, err := ParseHTTP2Frames(st.Client.Data); err == nil {
+		sum, err := parseHTTP2Frames(st.Client.Data, remaining)
+		if errors.Is(err, ErrHTTPLimit) {
+			return err
+		}
+		if err == nil {
 			if len(*records) >= MaxHTTPMessagesPerScan {
 				return fmt.Errorf("%w: exceeds %d HTTP/2 records", ErrHTTPLimit, MaxHTTPMessagesPerScan)
 			}
@@ -221,7 +283,11 @@ func appendHTTP2FromTCPStream(st *TCPStream, isDecrypted bool, records *[]HTTP2R
 		}
 	}
 	if len(st.Server.Data) >= 9 {
-		if sum, err := ParseHTTP2Frames(st.Server.Data); err == nil {
+		sum, err := parseHTTP2Frames(st.Server.Data, remaining)
+		if errors.Is(err, ErrHTTPLimit) {
+			return err
+		}
+		if err == nil {
 			if len(*records) >= MaxHTTPMessagesPerScan {
 				return fmt.Errorf("%w: exceeds %d HTTP/2 records", ErrHTTPLimit, MaxHTTPMessagesPerScan)
 			}
@@ -238,4 +304,79 @@ func appendHTTP2FromTCPStream(st *TCPStream, isDecrypted bool, records *[]HTTP2R
 		}
 	}
 	return nil
+}
+
+// fingerprint formats the observed initial client settings, window, priorities,
+// and pseudo-header order after the first request header block completes.
+func (out *HTTP2Summary) fingerprint(priorities []string, block HTTP2HeaderBlock) string {
+	var order []string
+	for _, f := range block.Headers {
+		switch f.Name {
+		case ":method", ":scheme", ":authority", ":path":
+			order = append(order, f.Name[1:2])
+		}
+	}
+	priority := "0"
+	if len(priorities) > 0 {
+		priority = strings.Join(priorities, ",")
+	}
+	return out.SettingsFingerprint + "|" + strconv.FormatUint(uint64(out.WindowUpdate), 10) + "|" + priority + "|" + strings.Join(order, ",")
+}
+
+func isHTTP2HeaderFrame(kind uint8) bool {
+	return kind == HTTP2FrameHeaders || kind == HTTP2FramePushPromise || kind == HTTP2FrameContinuation
+}
+
+// HPACK state belongs to one direction, even when its frames serve multiple streams.
+type http2Headers struct {
+	table                hpackTable
+	continuation, target uint32
+	fragments            []byte
+}
+
+func (h *http2Headers) consume(kind, flags uint8, id uint32, p []byte, remaining *int) (HTTP2HeaderBlock, bool, error) {
+	var empty HTTP2HeaderBlock
+	if id == 0 || (kind == HTTP2FrameContinuation && h.continuation != id) {
+		return empty, false, ErrInvalidHTTP
+	}
+	if kind != HTTP2FrameContinuation {
+		h.target = id
+		if flags&8 != 0 {
+			if len(p) == 0 || int(p[0]) >= len(p) {
+				return empty, false, ErrInvalidHTTP
+			}
+			p = p[1 : len(p)-int(p[0])]
+		}
+		switch {
+		case kind == HTTP2FramePushPromise:
+			if len(p) < 4 {
+				return empty, false, ErrInvalidHTTP
+			}
+			h.target = binary.BigEndian.Uint32(p) & 0x7fffffff
+			if h.target == 0 {
+				return empty, false, ErrInvalidHTTP
+			}
+			p = p[4:]
+		case flags&32 != 0:
+			if len(p) < 5 || binary.BigEndian.Uint32(p)&0x7fffffff == id {
+				return empty, false, ErrInvalidHTTP
+			}
+			p = p[5:]
+		}
+	}
+	if len(p) > MaxHTTP2HeaderBlockBytes-len(h.fragments) {
+		return empty, false, ErrHTTPLimit
+	}
+	if h.continuation != 0 || flags&4 == 0 {
+		h.fragments = append(h.fragments, p...)
+		if flags&4 == 0 {
+			h.continuation = id
+			return empty, false, nil
+		}
+		p = h.fragments
+		h.fragments = h.fragments[:0]
+	}
+	h.continuation = 0
+	block, err := h.table.decode(p, remaining)
+	return block, err == nil, err
 }

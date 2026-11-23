@@ -268,6 +268,8 @@ func FuzzDefragmentIP(f *testing.F) {
 func FuzzParseHTTP2Frames(f *testing.F) {
 	f.Add(append(append([]byte{}, HTTP2ClientPreface...), buildHTTP2Frame(HTTP2FrameSettings, 0, 0, make([]byte, 6))...))
 
+	f.Add(append(bytes.Clone(HTTP2ClientPreface), buildHTTP2Frame(HTTP2FrameHeaders, 4, 1, []byte{0x82, 0x86, 0x84, 0x41, 0x81, 0xf3})...))
+
 	f.Fuzz(func(t *testing.T, data []byte) {
 		sum, err := ParseHTTP2Frames(data)
 		if err != nil {

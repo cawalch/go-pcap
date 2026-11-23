@@ -3,6 +3,7 @@ package pcap
 import (
 	"bytes"
 	"encoding/binary"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"testing"
@@ -186,5 +187,104 @@ func TestMixedWebCapture(t *testing.T) {
 		if keyed && !errors.Is(err, ErrInvalidHeader) || !keyed && err != nil {
 			t.Fatalf("standalone decryption, keyed %v: %v", keyed, err)
 		}
+	}
+}
+
+// RFC 7541 appendix C.4, across three request streams in one direction.
+func TestHTTP2HPACKRequests(t *testing.T) {
+	var wire bytes.Buffer
+	wire.Write(HTTP2ClientPreface)
+	wire.Write(buildHTTP2Frame(HTTP2FrameSettings, 0, 0, []byte{0, 1, 0, 1, 0, 0}))
+	wire.Write(buildHTTP2Frame(HTTP2FrameWindowUpdate, 0, 0, []byte{0, 0, 0, 42}))
+	wire.Write(buildHTTP2Frame(HTTP2FramePriority, 0, 3, []byte{128, 0, 0, 0, 200}))
+	for i, encoded := range []string{"828684418cf1e3c2e5f23a6ba0ab90f4ff", "828684be5886a8eb10649cbf", "828785bf408825a849e95ba97d7f8925a849e95bb8e8b4bf"} {
+		block, err := hex.DecodeString(encoded)
+		if err != nil {
+			t.Fatal(err)
+		}
+		id := uint32(1 + 2*i)
+		wire.Write(buildHTTP2Frame(HTTP2FrameHeaders, 0x28, id, append([]byte{1, 0, 0, 0, 0, 0, block[0]}, 0)))
+		wire.Write(buildHTTP2Frame(HTTP2FrameContinuation, 4, id, block[1:]))
+	}
+	wire.Write(buildHTTP2Frame(HTTP2FrameData, 0, 1, []byte("first")))
+	sum, err := ParseHTTP2Frames(wire.Bytes())
+	if err != nil || sum.HeadersIncomplete || len(sum.Streams) != 3 || sum.AkamaiFingerprint != "1:65536|42|3:1:0:201|m,s,p,a" {
+		t.Fatalf("%+v %v", sum, err)
+	}
+	for _, st := range sum.Streams {
+		if len(st.HeaderBlocks) != 1 || st.HeaderBlocks[0].Authority != "www.example.com" || st.HeaderBlocks[0].Method != "GET" {
+			t.Fatal(st)
+		}
+	}
+	if sum.Streams[2].HeaderBlocks[0].Headers[4] != (HTTPHeader{"custom-key", "custom-value"}) || string(sum.Streams[0].Data) != "first" {
+		t.Fatal(sum.Streams)
+	}
+	srv := buildHTTP2Frame(HTTP2FrameSettings, 0, 0, nil)
+	srv = append(srv, buildHTTP2Frame(HTTP2FrameHeaders, 4, 1, []byte{0x88})...)
+	srv = append(srv, buildHTTP2Frame(HTTP2FrameHeaders, 4, 1, []byte{0x10, 1, 'x', 1, 'y'})...)
+	src, dst := [4]byte{10, 0, 0, 1}, [4]byte{10, 0, 0, 2}
+	raw := buildClassicPCAP(binary.LittleEndian, false, LinkTypeEthernet, 65535, [][]byte{
+		buildEthernetIPv4TCPFrame(src, dst, 50000, 80, 1, 0, TCPFlagACK, wire.Bytes()),
+		buildEthernetIPv4TCPFrame(dst, src, 80, 50000, 2, 0, TCPFlagACK, srv)})
+	c, err := New(raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rows, err := c.HTTP2(raw)
+	if err != nil || len(rows) != 2 {
+		t.Fatalf("%v %v", rows, err)
+	}
+	blocks := rows[1].Summary.Streams[0].HeaderBlocks
+	if !rows[1].IsServer || len(blocks) != 2 || blocks[0].Status != "200" || blocks[1].Headers[0] != (HTTPHeader{"x", "y"}) {
+		t.Fatal(rows)
+	}
+}
+
+func TestHTTP2HPACKBounds(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		data  []byte
+		limit bool
+	}{
+		{"oversize-table", []byte{0x3f, 0xe2, 0x1f}, true},
+		{"over-field-count", bytes.Repeat([]byte{0x82}, MaxHTTPHeaders+1), true},
+		{"over-block-size", make([]byte, MaxHTTP2HeaderBlockBytes+1), true},
+		{"zero-index", []byte{0x80}, false},
+		{"bad-index", []byte{0xbe}, false},
+		{"integer-overflow", append([]byte{0xff}, bytes.Repeat([]byte{0xff}, 16)...), false},
+		{"eos-as-data", []byte{0, 0x84, 255, 255, 255, 255, 0}, false},
+		{"bad-padding", []byte{0, 0x81, 0, 0}, false},
+		{"late-size-update", []byte{0x82, 0x20}, false},
+		{"entry-evicted", []byte{0x20, 0x40, 1, 'a', 1, 'b', 0xbe}, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			src := append(bytes.Clone(HTTP2ClientPreface), buildHTTP2Frame(HTTP2FrameHeaders, 4, 1, tc.data)...)
+			s, err := ParseHTTP2Frames(src)
+			if tc.limit {
+				if !errors.Is(err, ErrHTTPLimit) {
+					t.Fatalf("expected limit, got %v", err)
+				}
+			} else if err != nil || !s.HeadersIncomplete || len(s.Streams) != 0 {
+				t.Fatalf("%+v: %v", s, err)
+			}
+		})
+	}
+	for _, tail := range [][]byte{nil, buildHTTP2Frame(HTTP2FrameContinuation, 4, 3, []byte{0x84}), buildHTTP2Frame(HTTP2FrameData, 0, 1, []byte("partial"))} {
+		src := append(bytes.Clone(HTTP2ClientPreface), buildHTTP2Frame(HTTP2FrameHeaders, 0, 1, []byte{0x82})...)
+		s, err := ParseHTTP2Frames(append(src, tail...))
+		if err != nil || !s.HeadersIncomplete {
+			t.Fatalf("%+v %v", s, err)
+		}
+	}
+}
+
+func TestHTTP2PushPromiseCompressionContext(t *testing.T) {
+	src := buildHTTP2Frame(HTTP2FrameSettings, 0, 0, nil)
+	src = append(src, buildHTTP2Frame(HTTP2FramePushPromise, 0, 1, []byte{0, 0, 0, 2, 0x40, 1, 'x'})...)
+	src = append(src, buildHTTP2Frame(HTTP2FrameContinuation, 4, 1, []byte{1, 'y'})...)
+	src = append(src, buildHTTP2Frame(HTTP2FrameHeaders, 4, 1, []byte{0xbe, 0x88})...)
+	sum, err := ParseHTTP2Frames(src)
+	if err != nil || sum.HeadersIncomplete || len(sum.Streams) != 2 || sum.Streams[0].StreamID != 2 || sum.Streams[1].HeaderBlocks[0].Headers[0] != (HTTPHeader{"x", "y"}) {
+		t.Fatalf("%+v %v", sum, err)
 	}
 }

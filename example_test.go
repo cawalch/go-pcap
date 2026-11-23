@@ -313,3 +313,15 @@ func ExampleCapture_ExtractFlowPCAPNGFromReaderAt() {
 	fmt.Println(selected.Format, selected.PacketCount, selected.Interfaces[0].Name)
 	// Output: pcapng 1 en0
 }
+
+func ExampleParseHTTP2Frames_headers() {
+	// Indexed GET, http and / fields from the HPACK static table.
+	data := append(bytes.Clone(pcap.HTTP2ClientPreface), 0, 0, 3, 1, 4, 0, 0, 0, 1, 0x82, 0x86, 0x84)
+	summary, err := pcap.ParseHTTP2Frames(data)
+	if err != nil {
+		log.Fatal(err)
+	}
+	request := summary.Streams[0].HeaderBlocks[0]
+	fmt.Println(request.Method, request.Path)
+	// Output: GET /
+}
