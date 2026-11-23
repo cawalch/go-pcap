@@ -125,12 +125,12 @@ def write_pcapng(name, interfaces, packets, extra_blocks=b""):
     (OUT / (name + ".pcapng")).write_bytes(data)
 
 
-def guest():
+def client():
     client, resolver, origin = "192.0.2.14", "192.0.2.53", "198.51.100.80"
     first = TCP(client, origin, 50000, 1000, 2000)
     reused = TCP(client, origin, 50000, 7000, 8000)
     incomplete = TCP(client, "198.51.100.81", 50001, 3000, 4000)
-    hostname = "guest.example"
+    hostname = "trace.example"
     frames = [
         udp(client, resolver, 53000, 53, dns(hostname)),
         first.send(False, SYN),
@@ -144,12 +144,12 @@ def guest():
         incomplete.send(False, SYN),
         reused.send(True, SYN | ACK),
         reused.send(False, ACK),
-        reused.send(False, PSH | ACK, b"guest diagnostic bytes"),
+        reused.send(False, PSH | ACK, b"trace diagnostic bytes"),
         reused.send(True, RST | ACK),
     ]
     packets = [(0, data, 58 if number == 13 else None, b"")
                for number, data in enumerate(frames, 1)]
-    write_pcapng("guest", ["guest-before-nat"], packets)
+    write_pcapng("client", ["client-before-nat"], packets)
 
 
 def proxy():
@@ -190,6 +190,6 @@ def iot():
 
 
 if __name__ == "__main__":
-    guest()
+    client()
     proxy()
     iot()

@@ -1,6 +1,6 @@
 # Parse packet captures, frames, and protocols
 
-For a runnable first scan, follow the [guest capture quick start](../README.md#quick-start-with-a-guest-wi-fi-capture).
+For a runnable first scan, follow the [packet capture quick start](../README.md#quick-start-with-a-packet-capture).
 
 | Task | Sections |
 | --- | --- |
@@ -231,7 +231,7 @@ Control span for other frames. For an unprotected, unfragmented Data frame
 with a standard LLC/SNAP header, the decoder continues at the embedded
 EtherType. This supports four-address frames, QoS, HT Control on QoS frames,
 and the Radiotap data-padding flag. Protected frames, fragments, and
-aggregated MAC service data units (A-MSDUs) stay opaque. For guest IP
+aggregated MAC service data units (A-MSDUs) stay opaque. For IP
 and neighbor observations on an access point or controller mirror, capture
 after decapsulation and use the Ethernet link type.
 
@@ -259,7 +259,7 @@ FoxIO revisions and inputs used for compatibility tests.
 ## Observe ARP and IPv6 neighbors
 
 Use `Capture.Neighbors` or `Capture.NeighborsFromReaderAt` to read local-link
-messages as observed on the wire, in packet order. A guest VLAN observer can join each observation to
+messages as observed on the wire, in packet order. Match each observation to
 controller logs by capture interface and timestamp. Repeated observations on
 different interfaces retain their own packet indices.
 
@@ -350,17 +350,16 @@ The method computes the ID only when called and returns an empty string for
 unsupported protocols, invalid or mixed-family addresses, or a summary with
 `PortsUnavailable` set. A decoded port value of zero is valid.
 
-## Trace a guest connection and a TLS proxy
+## Trace a client connection and a TLS proxy
 
-Suppose a guest can resolve a service name but reports that connecting to it
-fails. Capture guest Ethernet traffic at the gateway's pre-NAT VLAN interface,
-or at an access point or controller mirror after wireless decapsulation.
-Capture both directions. When the service uses a TLS-terminating proxy, also
+If DNS succeeds but a connection fails, capture both directions at the
+client-facing interface before NAT.
+When the service uses a TLS-terminating proxy, also
 capture the proxy's client-facing and origin-facing interfaces. Preserve the
 interface names and use synchronized capture clocks.
 
-1. In the [guest fixture](../testdata/deployments/guest.pcapng), call `DNS` to
-   find the answer `guest.example → 198.51.100.80`. Follow the response's
+1. In the [client fixture](../testdata/deployments/client.pcapng), call `DNS` to
+   find the answer `trace.example → 198.51.100.80`. Follow the response's
    `PacketIndex` to check its capture timestamp. `Flows` shows the TCP tuple
    `192.0.2.14:50000 → 198.51.100.80:443`. The first connection has visible
    ClientHello and ServerHello messages, followed by a TCP reset. A later SYN
@@ -382,10 +381,9 @@ interface names and use synchronized capture clocks.
    a contemporaneous Dynamic Host Configuration Protocol (DHCP) ACK or lease
    log. In the [IoT fixture](../testdata/deployments/iot.pcapng), `DHCPv4`
    reports a Discover and an Offer with `YourAddr` set to `203.0.113.42`.
-   The Offer gives a candidate assignment. Use controller association logs
-   to identify the access point and station on the guest
-   VLAN. A capture taken after NAT also needs the gateway's translation log
-   to associate a translated tuple with the original client.
+   The Offer gives a candidate assignment. Use timestamped interface and lease
+   records to identify the client. After NAT, use the gateway's translation
+   log to associate the translated tuple with the original client.
 
 The [reference decoder commands and packet numbers](../testdata/deployments/README.md)
 let you repeat these checks on the synthetic fixtures.

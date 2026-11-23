@@ -9,11 +9,11 @@ The library uses the Go standard library, builds without cgo or libpcap, and
 requires Go 1.26 or later. The API is experimental and can change before v1.0.
 [v0.1.1 release](https://github.com/cawalch/go-pcap/releases/tag/v0.1.1) · [Platform verification](CHANGELOG.md#platform-verification)
 
-## Quick start with a guest Wi-Fi capture
+## Quick start with a packet capture
 
-The sample contains 14 packets seen on a guest network. The client queried
-DNS, exchanged 11 packets with one HTTPS endpoint, and sent a single SYN to another. Download the synthetic
-[guest.pcapng](testdata/deployments/guest.pcapng) into an empty directory.
+The synthetic capture contains 14 packets. The client queried
+DNS, exchanged 11 packets with one HTTPS endpoint, and sent a single SYN to another. Download
+[client.pcapng](testdata/deployments/client.pcapng) into an empty directory.
 In that directory, initialize a Go module and install the release.
 
 ```sh
@@ -21,7 +21,7 @@ go mod init example.com/inspect
 go get github.com/cawalch/go-pcap@v0.1.1
 ```
 
-Save the program below as `main.go` and run `go run . guest.pcapng`.
+Save the program below as `main.go` and run `go run . client.pcapng`.
 It prints the endpoints and packet count for each bidirectional flow.
 
 ```text
@@ -99,8 +99,8 @@ func main() {
 - **File metadata only.** `Open(path)` reads the entire file and returns a
   metadata snapshot. Use `NewFromReaderAt` when whole-file loading is costly.
 
-For a worked example of correlating records across a guest network and a TLS
-proxy, see the [deployment walkthrough](docs/parsing.md#trace-a-guest-connection-and-a-tls-proxy).
+For a worked example of correlating records from a client and a TLS
+proxy, see the [deployment walkthrough](docs/parsing.md#trace-a-client-connection-and-a-tls-proxy).
 
 ## API and references
 
@@ -113,8 +113,7 @@ proxy, see the [deployment walkthrough](docs/parsing.md#trace-a-guest-connection
 
 ## Licenses and attribution
 
-Original go-pcap code uses the [MIT license](LICENSE). FoxIO publishes JA4 TLS
-client fingerprinting under BSD-3-Clause and the other JA4+ methods under the
-FoxIO License 1.1, which restricts monetization. The distribution includes
-the [third-party notices and terms](NOTICE), [Go HPACK license](LICENSE-hpack)
-and [fingerprint fixture provenance](testdata/foxio/README.md).
+Original go-pcap code uses the [MIT license](LICENSE). JA4 TLS client
+fingerprinting uses BSD-3-Clause terms. Other JA4+ methods have separate
+terms restricting monetization. See the [third-party notices](NOTICE),
+[HPACK license](LICENSE-hpack), and [fingerprint fixture sources](testdata/foxio/README.md).
