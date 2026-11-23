@@ -113,7 +113,8 @@ proxy, see the [deployment walkthrough](docs/parsing.md#trace-a-guest-connection
 
 ## Licenses and attribution
 
-The project uses the [MIT license](LICENSE). The HPACK tables come
-from the Go project and carry its [copyright notice and license](LICENSE-hpack).
-The [fingerprint fixture notes](testdata/foxio/README.md) identify the FoxIO
-captures, reference outputs and upstream license texts.
+Original go-pcap code uses the [MIT license](LICENSE). FoxIO publishes JA4 TLS
+client fingerprinting under BSD-3-Clause and the other JA4+ methods under the
+FoxIO License 1.1, which restricts monetization. The distribution includes
+the [third-party notices and terms](NOTICE), [Go HPACK license](LICENSE-hpack)
+and [fingerprint fixture provenance](testdata/foxio/README.md).

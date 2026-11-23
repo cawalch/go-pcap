@@ -15,7 +15,7 @@ jobs:
     strategy:
       matrix:
         go: ['1.26.x', stable]
-    runs-on: ${{ github.event_name == 'pull_request' && fromJSON('["self-hosted","linux","x64","go-pcap-110"]') || 'ubuntu-latest' }}
+    runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@v7.0.1
@@ -85,7 +85,7 @@ jobs:
       - run: go test ./...
 
   vulnerabilities:
-    runs-on: ${{ github.event_name == 'pull_request' && fromJSON('["self-hosted","linux","x64","go-pcap-110"]') || 'ubuntu-latest' }}
+    runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@v7.0.1
@@ -101,7 +101,7 @@ jobs:
         run: govulncheck -test ./...
 
   lint:
-    runs-on: ${{ github.event_name == 'pull_request' && fromJSON('["self-hosted","linux","x64","go-pcap-110"]') || 'ubuntu-latest' }}
+    runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@v7.0.1

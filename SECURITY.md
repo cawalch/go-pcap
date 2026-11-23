@@ -21,3 +21,9 @@ Treat packet captures and network frames as untrusted input. Bound file sizes
 and application resource use; `Open` reads the entire file. Parser limits and
 tests do not guarantee that every input is safe. See the
 [parsing guide](docs/parsing.md) for work and output limits.
+
+## Pull request execution
+
+GitHub-hosted runners execute pull requests. Keep private-network runners
+unregistered from this repository, including while evaluating a contribution.
+A contributor can change the workflow as well as the code it runs.
