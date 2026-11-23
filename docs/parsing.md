@@ -573,6 +573,37 @@ budget shared across a capture scan. Exceeding these limits returns
 PRIORITY frames and pseudo-header order. Use cleartext or decrypted bytes for
 the observed proxy leg. [HPACK format and examples](https://www.rfc-editor.org/rfc/rfc7541)
 
+### Extract WebSocket messages
+
+Call `capture.WebSockets(data)` for HTTP/1.1 upgrades in cleartext or in
+supported TLS streams with an embedded key log. Each record identifies the
+flow, sending endpoint, direction, and whether TLS decryption supplied the
+bytes. Results contain cleartext streams first, then decrypted streams. For
+each stream, client messages precede server messages. Within each direction,
+messages appear when their final frame arrives. A ping can therefore precede
+the fragmented text message it interrupted.
+
+The scanner follows HTTP message boundaries through preceding exchanges
+and informational responses. With a one-sided capture it can use a WebSocket
+upgrade request or a 101 response naming WebSocket. Each direction needs its
+own visible HTTP boundary. A captured rejection produces no messages for
+that exchange. Negotiation detection does not authenticate the handshake.
+
+For bytes already positioned at a frame boundary, use
+`ParseWebSocketFrames(stream)`. Payloads are owned copies. Client frames are
+unmasked, continuations are joined, and close, ping and pong keep their
+opcodes. A gap suppresses the affected capture direction. Invalid frames,
+including extension frames with reserved bits (such as compressed messages),
+stop decoding that direction. Earlier complete messages remain available.
+The standalone parser reports an error for malformed or truncated input.
+
+The limits are 1,024 frames per direction, 4 MiB per message, 16,384 output
+records per capture, and 64 MiB of processed frame payload per call. A frame
+that declares an oversized payload is rejected before allocation. A capture
+scan that exceeds a WebSocket limit returns `ErrWebSocketLimit` and no records.
+HTTP/2 extended CONNECT and WebSocket extension decoding are outside this API.
+[RFC 6455 framing and examples](https://www.rfc-editor.org/rfc/rfc6455#section-5)
+
 ## Parse SSH handshakes and HASSH
 
 Call `ParseSSHHandshake(clientStream, serverStream)` or `capture.SSH(data)` to
