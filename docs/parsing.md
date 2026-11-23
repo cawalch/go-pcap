@@ -429,9 +429,19 @@ To evaluate DNS tunneling or high-entropy subdomain indicators, call
 `DNSLabelEntropy(qname)` on a domain name or `capture.DNSDomainStats(data)` to
 aggregate query counts, unique subdomain fan-out, `NXDOMAIN` counts, maximum
 label length, subdomain Shannon entropy, TXT answer payload volume, and a
-composite `TunnelScore` ($[0.0, 1.0]$) per group. Grouping uses the last two
-labels, so both
-`a.example.co.uk` and `b.other.co.uk` contribute to `co.uk`.
+composite `TunnelScore` ($[0.0, 1.0]$) per group. The apex heuristic uses the final two
+labels by default. For selected two-label suffixes, it includes one more
+label. For example, `a.example.co.uk` groups under
+`example.co.uk` and `b.other.co.uk` under `other.co.uk`. The built-in table
+covers a subset of public suffixes and has no wildcard or exception rules.
+
+`Capture.DNSSourceStats` groups observations by client address. Queries use
+their source and unicast responses use their destination. Multicast responses
+are skipped. The capture-wide DGA score combines NXDOMAIN ratio, distinct
+NXDOMAIN apex count and maximum query entropy once a client has at least five
+NXDOMAIN responses across three apexes. The ratio divides NXDOMAIN responses
+by the larger of the observed query and response counts. The score is
+independent of capture duration.
 
 ## Parse TLS handshakes and JA4+ fingerprints
 
@@ -689,6 +699,14 @@ and `RDP_NEG_REQ` / `RDP_NEG_RSP` security protocol flags (`RDPProtoTLS`,
 `RDPProtoCredSSP`, `RDPProtoHybridEx`).
 
 ## Compute C2 beacon and flow statistics
+
+Use `Capture.BeaconsWithOptions` with `GroupBy3Tuple` to group flow starts
+by protocol, source address, destination address and destination port. Each
+distinct five-tuple supplies one sample, so a change of source port can
+contribute to the same group. Port 53 on either endpoint is excluded unless
+`IncludeDNSPort` is set. Median intervals below one second suppress the
+periodicity and beacon scores by default. Set `MinIntervalNs` to adjust this
+threshold or use a negative value to disable it.
 
 Call `ComputeBeaconStats(timestampsNs, payloadBytes, clientBytes, serverBytes)`
 or `capture.Beacons(data)` to calculate median inter-arrival intervals, median

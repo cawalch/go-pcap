@@ -709,8 +709,9 @@ type DNSDomainStats struct {
 }
 
 // DNSLabelEntropy computes the Shannon entropy (in bits per byte, [0.0, 8.0])
-// of the subdomain prefix of qname (excluding its final two registrable apex
-// labels, or over the entire name if qname has two or fewer labels).
+// of the prefix before the estimated apex of qname, or of the entire name if
+// there is no prefix. The apex includes the final two labels by default and
+// one additional label for selected two-label suffixes such as co.uk.
 func DNSLabelEntropy(qname string) float64 {
 	sub, apex := splitDNSSubdomainAndApex(qname)
 	if sub == "" {
@@ -918,8 +919,8 @@ func (c *Capture) DNSDomainStats(data []byte) ([]DNSDomainStats, error) {
 	return out, nil
 }
 
-// DNSSourceStats aggregates per-client-IP DNS query and NXDOMAIN DGA burst
-// indicators across all queried apex domains.
+// DNSSourceStats aggregates DNS observations and DGA indicators for one client
+// across the entire capture.
 type DNSSourceStats struct {
 	SrcAddr             netip.Addr
 	QueryCount          int
@@ -934,7 +935,8 @@ type DNSSourceStats struct {
 
 // DNSSourceStats aggregates per-source-IP DNS query counts, NXDOMAIN counts,
 // unique apex fan-out, and a composite DGAScore in [0.0, 1.0] in deterministic
-// first-seen order.
+// first-seen order. The score uses capture-wide counts without a time window.
+// Multicast responses have no individual destination client and are skipped.
 func (c *Capture) DNSSourceStats(data []byte) ([]DNSSourceStats, error) {
 	records, err := c.DNS(data)
 	if err != nil {
@@ -975,6 +977,9 @@ func (c *Capture) DNSSourceStats(data []byte) ([]DNSSourceStats, error) {
 		msg := &rec.Message
 		clientAddr := rec.SrcAddr
 		if msg.IsResponse {
+			if rec.DstAddr.IsMulticast() {
+				continue
+			}
 			clientAddr = rec.DstAddr
 		}
 		if !clientAddr.IsValid() {

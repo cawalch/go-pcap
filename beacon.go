@@ -288,7 +288,7 @@ func (c *Capture) BeaconsWithOptions(data []byte, opts BeaconOptions) ([]FlowBea
 	var groups []tuple3Accum
 	for i := range flows {
 		fa := &flows[i]
-		if !opts.IncludeDNSPort && fa.dstPort == 53 {
+		if !opts.IncludeDNSPort && (fa.srcPort == 53 || fa.dstPort == 53) {
 			continue
 		}
 		tk := tuple3Key{

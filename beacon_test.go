@@ -76,6 +76,10 @@ func TestBeacons3TupleAndExclusions(t *testing.T) {
 		frames = append(frames, buildEthernetIPv4UDPFrame([4]byte{10, 0, 0, 10}, [4]byte{8, 8, 8, 8}, uint16(50000+i), 53, bytes.Repeat([]byte{'D'}, 32)))
 		timestamps = append(timestamps, baseTS+int64(i)*100_000_000)
 	}
+	// This flow starts with a resolver reply, so port 53 is the source.
+	frames = append(frames, buildEthernetIPv4UDPFrame([4]byte{192, 0, 2, 53}, [4]byte{192, 0, 2, 8}, 53, 40001, []byte{1}))
+	timestamps = append(timestamps, baseTS)
+
 	var buf bytes.Buffer
 	pw, err := NewPCAPWriter(&buf, LinkTypeEthernet, 65535)
 	if err != nil {
@@ -114,7 +118,7 @@ func TestBeacons3TupleAndExclusions(t *testing.T) {
 
 	// With IncludeDNSPort=true and default 1s MinIntervalNs, port 53 (100ms) is still zero-scored.
 	b3DNS, err := c.BeaconsWithOptions(rawPCAP, BeaconOptions{GroupBy3Tuple: true, IncludeDNSPort: true})
-	if err != nil || len(b3DNS) != 2 {
+	if err != nil || len(b3DNS) != 3 {
 		t.Fatalf("BeaconsWithOptions(IncludeDNSPort) = (%+v, %v)", b3DNS, err)
 	}
 	for _, b := range b3DNS {

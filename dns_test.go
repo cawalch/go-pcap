@@ -8,6 +8,7 @@ import (
 	"slices"
 	"strings"
 	"testing"
+	"time"
 )
 
 func buildDNSQueryResponsePacket() []byte {
@@ -286,12 +287,12 @@ func TestDNSTCPReassemblyAndDomainStatsNoDoubleCount(t *testing.T) {
 	}
 }
 
-func TestDNSPSLSplitAndSourceDGABurst(t *testing.T) {
-	if sub, apex := splitDNSSubdomainAndApex("www.bbc.co.uk."); sub != "www" || apex != "bbc.co.uk" {
-		t.Fatalf("splitDNSSubdomainAndApex(www.bbc.co.uk.) = (%q, %q), want (www, bbc.co.uk)", sub, apex)
+func TestDNSApexAndCaptureWideSourceStats(t *testing.T) {
+	if sub, apex := splitDNSSubdomainAndApex("www.alpha.co.uk."); sub != "www" || apex != "alpha.co.uk" {
+		t.Fatalf("splitDNSSubdomainAndApex(www.alpha.co.uk.) = (%q, %q), want (www, alpha.co.uk)", sub, apex)
 	}
-	if sub, apex := splitDNSSubdomainAndApex("bbc.co.uk"); sub != "" || apex != "bbc.co.uk" {
-		t.Fatalf("splitDNSSubdomainAndApex(bbc.co.uk) = (%q, %q), want (\"\", bbc.co.uk)", sub, apex)
+	if sub, apex := splitDNSSubdomainAndApex("alpha.co.uk"); sub != "" || apex != "alpha.co.uk" {
+		t.Fatalf("splitDNSSubdomainAndApex(alpha.co.uk) = (%q, %q), want (\"\", alpha.co.uk)", sub, apex)
 	}
 
 	buildDNSWire := func(txID uint16, resp bool, rcode uint8, qname string) []byte {
@@ -305,7 +306,7 @@ func TestDNSPSLSplitAndSourceDGABurst(t *testing.T) {
 		binary.BigEndian.PutUint16(hdr[2:4], flags)
 		binary.BigEndian.PutUint16(hdr[4:6], 1)
 		buf = append(buf, hdr[:]...)
-		for _, label := range splitDotLabels(qname) {
+		for label := range strings.SplitSeq(qname, ".") {
 			buf = append(buf, byte(len(label)))
 			buf = append(buf, label...)
 		}
@@ -315,11 +316,11 @@ func TestDNSPSLSplitAndSourceDGABurst(t *testing.T) {
 
 	var frames [][]byte
 	// Legitimate multi-label .co.uk queries (no NXDOMAINs).
-	for i, name := range []string{"bbc.co.uk", "sky.co.uk", "gov.co.uk", "shop.co.uk", "bank.co.uk"} {
+	for i, name := range []string{"alpha.co.uk", "bravo.co.uk", "gov.co.uk", "shop.co.uk", "bank.co.uk"} {
 		q := buildDNSWire(uint16(100+i), false, 0, name)
 		frames = append(frames, buildEthernetIPv4UDPFrame([4]byte{10, 0, 0, 20}, [4]byte{8, 8, 8, 8}, uint16(41000+i), 53, q))
 	}
-	// DGA burst from 10.0.0.50: 10 distinct high-entropy .com NXDOMAINs.
+	// Queries from 10.0.0.50: 10 distinct high-entropy .com NXDOMAINs.
 	dgaNames := []string{
 		"x8k2m9p4q1.com", "z3v7n1b5c8.com", "q9w2e4r6t8.com", "m1n3b5v7c9.com", "k4j6h8g2f1.com",
 		"p7o5i3u1y9.com", "a2s4d6f8g0.com", "l9k7j5h3g1.com", "r8t6y4u2i0.com", "w1q3e5r7t9.com",
@@ -330,6 +331,10 @@ func TestDNSPSLSplitAndSourceDGABurst(t *testing.T) {
 		frames = append(frames, buildEthernetIPv4UDPFrame([4]byte{10, 0, 0, 50}, [4]byte{8, 8, 8, 8}, uint16(42000+i), 53, q))
 		frames = append(frames, buildEthernetIPv4UDPFrame([4]byte{8, 8, 8, 8}, [4]byte{10, 0, 0, 50}, 53, uint16(42000+i), r))
 	}
+
+	// A multicast announcement has no individual destination client.
+	announcement := buildDNSWire(0, true, 0, "printer.local")
+	frames = append(frames, buildEthernetIPv4UDPFrame([4]byte{192, 0, 2, 22}, [4]byte{224, 0, 0, 251}, 5353, 5353, announcement))
 
 	raw := buildClassicPCAP(binary.LittleEndian, false, LinkTypeEthernet, 65535, frames)
 	c, err := New(raw)
@@ -357,18 +362,23 @@ func TestDNSPSLSplitAndSourceDGABurst(t *testing.T) {
 	if srcStats[1].NXDomainCount != 10 || srcStats[1].UniqueNXDomainApex != 10 || srcStats[1].DGAScore < 0.8 {
 		t.Fatalf("DGA client stats = %+v, want NXDomainCount=10 UniqueNXDomainApex=10 DGAScore>=0.8", srcStats[1])
 	}
-}
-
-func splitDotLabels(name string) []string {
-	var out []string
-	start := 0
-	for i := 0; i <= len(name); i++ {
-		if i == len(name) || name[i] == '.' {
-			if i > start {
-				out = append(out, name[start:i])
-			}
-			start = i + 1
+	// Spreading the same observations across weeks preserves a capture-wide score.
+	var spread bytes.Buffer
+	writer, err := NewPCAPWriter(&spread, LinkTypeEthernet, 65535)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for i, frame := range frames {
+		if err := writer.WritePacket(int64(i)*int64(24*time.Hour), frame); err != nil {
+			t.Fatal(err)
 		}
 	}
-	return out
+	spreadCapture, err := New(spread.Bytes())
+	if err != nil {
+		t.Fatal(err)
+	}
+	spreadStats, err := spreadCapture.DNSSourceStats(spread.Bytes())
+	if err != nil || !slices.Equal(srcStats, spreadStats) {
+		t.Fatalf("time-spread stats = %+v, err = %v", spreadStats, err)
+	}
 }
