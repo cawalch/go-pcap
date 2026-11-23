@@ -511,6 +511,15 @@ are capture-wide and can describe other flows. Classic PCAP input becomes a
 single-interface PcapNG capture. An absent flow returns `ErrOutOfBounds`
 before writing output.
 
+For a file opened with `NewFromReaderAt`, pass the same unchanged file to
+`ExtractFlowPCAPNGFromReaderAt(r, w, flowIndex)`. The method reads frame
+prefixes to identify flows. For PcapNG it then copies selected blocks in
+chunks of up to 32 KiB and skips unrelated packet bodies. Classic PCAP
+conversion buffers one selected packet at a time. All source reads during the
+export share the 64 MiB `MaxReaderAtScanBytes` budget, including copied metadata
+and repeated reads. Budget exhaustion returns `ErrPacketLimit`. Discard partial
+output after a read, write, or budget error.
+
 ## Capture live interface traffic
 
 Use `OpenLive(ifaceName, opts)` to capture live packets from an OS network
