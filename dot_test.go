@@ -73,6 +73,32 @@ func TestDNSOverTLSCaptureParity(t *testing.T) {
 			}
 		})
 	}
+	t.Run("skip unrelated payload tail", func(t *testing.T) {
+		unrelated := bytes.Repeat([]byte{0x7f}, 8192)
+		packets := append([][]byte{buildEthernetIPv4TCPFrame(clientIP, serverIP, clientPort, 443, 1, 0, TCPFlagACK, unrelated)}, frames[2:]...)
+		raw := buildPCAPNGFixture(binary.LittleEndian, keys, packets)
+		source := bytes.NewReader(raw)
+		c, err := NewFromReaderAt(source, source.Size())
+		if err != nil {
+			t.Fatal(err)
+		}
+		start := bytes.Index(raw, unrelated)
+		if start < 0 {
+			t.Fatal("missing unrelated TCP payload")
+		}
+		// Leave the frame prefix readable for global flow indexing.
+		lo, hi := int64(start+512), int64(start+len(unrelated))
+		reader := readAtFunc(func(p []byte, off int64) (int, error) {
+			if off < hi && off+int64(len(p)) > lo {
+				t.Fatal("read unrelated TCP payload tail")
+			}
+			return source.ReadAt(p, off)
+		})
+		rows, err := c.DNSOverTLSFromReaderAt(reader, nil)
+		if err != nil || len(rows) != 3 || rows[0].FlowIndex != 1 {
+			t.Fatalf("got %d records, err %v", len(rows), err)
+		}
+	})
 	t.Run("reader failure in last flow", func(t *testing.T) {
 		raw := buildPCAPNGFixture(binary.LittleEndian, keys, frames)
 		source := bytes.NewReader(raw)

@@ -369,7 +369,7 @@ func (c *Capture) DNSFromReaderAt(r io.ReaderAt) ([]DNSRecord, error) {
 // TLSFromReaderAt extracts TLS handshakes and fingerprints from reassembled
 // TCP payloads on any port under [MaxReaderAtScanBytes].
 func (c *Capture) TLSFromReaderAt(r io.ReaderAt) ([]TLSRecord, error) {
-	streams, err := collectStreams(ipFrameSource{capture: c, reader: r, needsPayload: func(f Frame, _ []byte) bool { return f.IPProtocol == IPProtoTCP }})
+	streams, err := collectStreams(ipFrameSource{capture: c, reader: r, needsPayload: func(f Frame, _ []byte) bool { return f.IPProtocol == IPProtoTCP }}, 0)
 	if err != nil {
 		return nil, err
 	}

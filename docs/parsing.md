@@ -442,6 +442,30 @@ you locate the message in the original capture even when the final bytes
 arrived later. Slice and ReaderAt scans return records in packet-index order.
 [DNS over TCP (RFC 7766)](https://www.rfc-editor.org/rfc/rfc7766)
 
+For DNS-over-TLS on TCP/853, use `capture.DNSOverTLS(data, extraKeyLog)` or
+`capture.DNSOverTLSFromReaderAt(r, extraKeyLog)`. Both use the existing TLS
+1.2 and TLS 1.3 decryptors with embedded or caller-supplied NSS key logs.
+Only complete length-prefixed messages from authenticated plaintext are
+passed to `ParseDNS`. Inspect `Message.Anomalies` for DNS section truncation.
+A known TCP gap excludes that direction. Missing or incorrect keys can yield
+an empty result. Each record identifies the flow and directional endpoints.
+[DNS over TLS (RFC 7858)](https://www.rfc-editor.org/rfc/rfc7858#section-3.3)
+
+For example, given a capture opened with `NewFromReaderAt` and its original
+reader `r`, print the DNS questions recovered with embedded keys:
+
+```go
+records, err := capture.DNSOverTLSFromReaderAt(r, nil)
+if err != nil {
+	return err
+}
+for _, record := range records {
+	for _, question := range record.Message.Questions {
+		fmt.Println(record.FlowIndex, record.SrcAddr, record.DstAddr, question.Name)
+	}
+}
+```
+
 For SVCB and HTTPS records, inspect `rr.ServiceBinding` for the priority,
 ordered ALPN identifiers, optional port, and presence of a nonempty ECH
 configuration. `rr.Target` is the advertised name (empty for the DNS root).

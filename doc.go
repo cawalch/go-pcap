@@ -9,7 +9,7 @@
 // (discarding the file bytes after parsing). Use [NewFromReaderAt] (with
 // [Capture.PacketSeqFromReaderAt], [Capture.PacketsFromReaderAt],
 // [Capture.PacketPayloadFromReaderAt], [Capture.FlowsFromReaderAt],
-// [Capture.DNSFromReaderAt], [Capture.TLSFromReaderAt], and
+// [Capture.DNSFromReaderAt], [Capture.DNSOverTLSFromReaderAt], [Capture.TLSFromReaderAt], and
 // [Capture.QUICFromReaderAt]) to read bounded container metadata, packet
 // headers, flows, and handshake records from an [io.ReaderAt] without loading
 // large captures into memory.
