@@ -67,6 +67,34 @@ func TestClassicWriter(t *testing.T) {
 	}
 }
 
+func TestClassicWriterOriginalLen(t *testing.T) {
+	var buf bytes.Buffer
+	pw, err := NewPCAPWriter(&buf, LinkTypeRaw, 3)
+	if err != nil {
+		t.Fatal(err)
+	}
+	start := buf.Len()
+	if err := pw.WritePacketWithOriginalLen(1, []byte{1, 2, 3, 4}, 3); !errors.Is(err, ErrInvalidPacket) || buf.Len() != start {
+		t.Fatalf("invalid length wrote %d bytes, err = %v", buf.Len()-start, err)
+	}
+	for _, payload := range [][]byte{nil, {1, 2}, {1, 2, 3, 4}} {
+		if err := pw.WritePacketWithOriginalLen(123456789, payload, 1500); err != nil {
+			t.Fatal(err)
+		}
+	}
+	c, pkts := readWrittenPackets(t, buf.Bytes())
+	want := [][]byte{nil, {1, 2}, {1, 2, 3}}
+	if len(pkts) != len(want) {
+		t.Fatalf("got %d packets", len(pkts))
+	}
+	for i, pkt := range pkts {
+		got, err := c.PacketPayload(buf.Bytes(), pkt)
+		if err != nil || !bytes.Equal(got, want[i]) || pkt.CaptureLen != uint32(len(want[i])) || pkt.OriginalLen != 1500 || pkt.TimestampNs != 123456789 {
+			t.Fatalf("packet %d: %+v, payload %x, err %v", i, pkt, got, err)
+		}
+	}
+}
+
 func TestMultiInterfaceWriter(t *testing.T) {
 	var buf bytes.Buffer
 	pw, err := NewPCAPNGWriter(&buf, PCAPNGWriterOptions{})

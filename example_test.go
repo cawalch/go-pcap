@@ -237,6 +237,29 @@ func ExampleNewPCAPWriter() {
 	// Output: pcap 1 true
 }
 
+func ExamplePCAPWriter_WritePacketWithOriginalLen() {
+	var buf bytes.Buffer
+	w, err := pcap.NewPCAPWriter(&buf, pcap.LinkTypeEthernet, 65535)
+	if err != nil {
+		log.Fatal(err)
+	}
+	// Only the first 96 bytes of a 1,500-byte packet were captured.
+	if err := w.WritePacketWithOriginalLen(123456789, make([]byte, 96), 1500); err != nil {
+		log.Fatal(err)
+	}
+	c, err := pcap.New(buf.Bytes())
+	if err != nil {
+		log.Fatal(err)
+	}
+	for pkt, err := range c.PacketSeq(buf.Bytes()) {
+		if err != nil {
+			log.Fatal(err)
+		}
+		fmt.Println(pkt.CaptureLen, pkt.OriginalLen)
+	}
+	// Output: 96 1500
+}
+
 func ExamplePCAPNGWriter_AddInterface() {
 	var buf bytes.Buffer
 	w, err := pcap.NewPCAPNGWriter(&buf, pcap.PCAPNGWriterOptions{InterfaceName: "eth0"})
