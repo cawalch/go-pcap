@@ -260,4 +260,8 @@ func TestWebSocketCaptureRecordLimit(t *testing.T) {
 	if records, err := c.WebSockets(raw); records != nil || !errors.Is(err, ErrWebSocketLimit) {
 		t.Fatal(len(records), err)
 	}
+	web, ws, err := c.WebWithWebSockets(raw)
+	if !errors.Is(err, ErrWebSocketLimit) || web.HTTP != nil || web.TLS != nil || web.HTTP2 != nil || ws != nil {
+		t.Fatalf("combined scan returned partial results or unexpected error: %v", err)
+	}
 }

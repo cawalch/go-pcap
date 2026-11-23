@@ -272,54 +272,61 @@ func (c *Capture) WebSockets(data []byte) ([]WebSocketRecord, error) {
 	if err != nil {
 		return nil, err
 	}
-	var records []WebSocketRecord
-	remaining := MaxTotalStreamBytes
-	scan := func(streams []TCPStream, decrypted bool) error {
-		for _, st := range streams {
-			if bytes.HasPrefix(st.Client.Data, []byte("HTTP/1.")) || bytes.HasPrefix(st.Server.Data, []byte("GET ")) {
-				st.Client, st.Server = st.Server, st.Client
-				st.SrcAddr, st.DstAddr = st.DstAddr, st.SrcAddr
-				st.SrcPort, st.DstPort = st.DstPort, st.SrcPort
-			}
-			client, server := st.Client.Data, st.Server.Data
-			if st.Client.Anomalies.SequenceGap {
-				client = nil
-			}
-			if st.Server.Anomalies.SequenceGap {
-				server = nil
-			}
-			client, server = wsUpgraded(client, server)
-			for side, payload := range [2][]byte{client, server} {
-				err := walkWebSocketFrames(payload, side == 0, &remaining, func(m WebSocketMessage) error {
-					if len(records) >= MaxHTTPMessagesPerScan {
-						return ErrWebSocketLimit
-					}
-					rec := WebSocketRecord{FlowIndex: st.FlowIndex, SrcAddr: st.SrcAddr, DstAddr: st.DstAddr, SrcPort: st.SrcPort, DstPort: st.DstPort, IsServer: side == 1, IsDecrypted: decrypted, Message: m}
-					if rec.IsServer {
-						rec.SrcAddr, rec.DstAddr = rec.DstAddr, rec.SrcAddr
-						rec.SrcPort, rec.DstPort = rec.DstPort, rec.SrcPort
-					}
-					records = append(records, rec)
-					return nil
-				})
-				if err != nil && !errors.Is(err, ErrInvalidWebSocket) {
-					return err
-				}
-			}
+	scan := webSocketScan{remaining: MaxTotalStreamBytes}
+	for _, st := range streams {
+		if err := scan.appendStream(st, false); err != nil {
+			return nil, err
 		}
-		return nil
-	}
-	if err := scan(streams, false); err != nil {
-		return nil, err
 	}
 	keys, err := c.TLSKeyLog(nil)
 	if err != nil {
 		return nil, err
 	}
 	if len(keys.Entries) > 0 {
-		if err := scan(decryptTLSStreams(streams, keys), true); err != nil {
-			return nil, err
+		for _, st := range decryptTLSStreams(streams, keys) {
+			if err := scan.appendStream(st, true); err != nil {
+				return nil, err
+			}
 		}
 	}
-	return records, nil
+	return scan.records, nil
+}
+
+type webSocketScan struct {
+	records   []WebSocketRecord
+	remaining int
+}
+
+func (scan *webSocketScan) appendStream(st TCPStream, decrypted bool) error {
+	if bytes.HasPrefix(st.Client.Data, []byte("HTTP/1.")) || bytes.HasPrefix(st.Server.Data, []byte("GET ")) {
+		st.Client, st.Server = st.Server, st.Client
+		st.SrcAddr, st.DstAddr = st.DstAddr, st.SrcAddr
+		st.SrcPort, st.DstPort = st.DstPort, st.SrcPort
+	}
+	client, server := st.Client.Data, st.Server.Data
+	if st.Client.Anomalies.SequenceGap {
+		client = nil
+	}
+	if st.Server.Anomalies.SequenceGap {
+		server = nil
+	}
+	client, server = wsUpgraded(client, server)
+	for side, payload := range [2][]byte{client, server} {
+		err := walkWebSocketFrames(payload, side == 0, &scan.remaining, func(m WebSocketMessage) error {
+			if len(scan.records) >= MaxHTTPMessagesPerScan {
+				return ErrWebSocketLimit
+			}
+			rec := WebSocketRecord{FlowIndex: st.FlowIndex, SrcAddr: st.SrcAddr, DstAddr: st.DstAddr, SrcPort: st.SrcPort, DstPort: st.DstPort, IsServer: side == 1, IsDecrypted: decrypted, Message: m}
+			if rec.IsServer {
+				rec.SrcAddr, rec.DstAddr = rec.DstAddr, rec.SrcAddr
+				rec.SrcPort, rec.DstPort = rec.DstPort, rec.SrcPort
+			}
+			scan.records = append(scan.records, rec)
+			return nil
+		})
+		if err != nil && !errors.Is(err, ErrInvalidWebSocket) {
+			return err
+		}
+	}
+	return nil
 }

@@ -617,7 +617,7 @@ func (c *Capture) HTTP(data []byte) ([]HTTPRecord, error) {
 	}
 	keys, _ := c.TLSKeyLog(nil)
 	var records []HTTPRecord
-	if err := scanHTTPStreams(streams, keys, &records, nil); err != nil {
+	if err := scanHTTPStreams(streams, keys, &records, nil, nil); err != nil {
 		return nil, err
 	}
 	return records, nil

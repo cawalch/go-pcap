@@ -360,3 +360,20 @@ func ExampleParseWebSocketFrames() {
 	fmt.Println(string(messages[0].Payload))
 	// Output: Hello
 }
+
+func ExampleCapture_WebWithWebSockets() {
+	data, err := os.ReadFile("testdata/deployments/proxy.pcapng")
+	if err != nil {
+		log.Fatal(err)
+	}
+	c, err := pcap.New(data)
+	if err != nil {
+		log.Fatal(err)
+	}
+	web, messages, err := c.WebWithWebSockets(data)
+	if err != nil {
+		log.Fatal(err)
+	}
+	fmt.Println(len(web.TLS), len(messages))
+	// Output: 2 0
+}
