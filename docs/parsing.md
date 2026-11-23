@@ -337,13 +337,27 @@ and `Certificate` handshake messages:
   the next ServerHello for selection and retains the first hello for JA4S.
   For example, `hs.ClientHello.HasPSK && !hs.IsResumed` identifies a captured
   offer without observed acceptance.
+- To inspect mutual TLS, read `HasCertificateRequest` for the server's request
+  and `ClientCertificates` for the chain the client presented. Each side has
+  its own `MaxTLSCertificates` limit. For TLS 1.3, the client and server
+  handshake secrets unlock their respective directions independently. A
+  missing client chain can reflect an empty reply, missing packets, or a
+  missing secret. A presented certificate alone does not establish that the
+  server accepted it. For example:
+
+  ```go
+  for _, cert := range record.Handshake.ClientCertificates {
+      fmt.Println(record.FlowIndex, cert.JA4X, cert.DNSNames)
+  }
+  ```
+
 - Each certificate in the chain exposes DNS SANs in `DNSNames` and IPv4/IPv6
   SANs in `IPAddresses` as `netip.Addr` values. For example,
   `record.Handshake.Certificates[0].IPAddresses` gives the leaf's addresses
   when the chain is present. Each list is nil when absent and preserves the
   first 64 entries in certificate order, including duplicates. If either
   list exceeds the limit, `SANsTruncated` is true for that certificate.
-  `RawDER` retains the complete certificate. Cleartext and decrypted server
+  `RawDER` retains the complete certificate. Cleartext and decrypted client and server
   certificates follow the same rules for slice and ReaderAt scans.
 - `TLSCertificate.JA4X` (and standalone `JA4XFromDER` / `JA4XFromCert`) reports
   the FoxIO JA4X fingerprint over the certificate's raw ASN.1 issuer RDNs,

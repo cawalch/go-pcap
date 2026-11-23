@@ -411,9 +411,10 @@ const (
 	TLSRecordHandshake        uint8 = 22
 	TLSRecordApplicationData  uint8 = 23
 
-	TLSHandshakeClientHello uint8 = 1
-	TLSHandshakeServerHello uint8 = 2
-	TLSHandshakeCertificate uint8 = 11
+	TLSHandshakeClientHello        uint8 = 1
+	TLSHandshakeServerHello        uint8 = 2
+	TLSHandshakeCertificate        uint8 = 11
+	TLSHandshakeCertificateRequest uint8 = 13
 )
 
 // TLS protocol versions.
