@@ -373,7 +373,7 @@ func TestTLS12OfflineStreamDecryptionViaClientRandom(t *testing.T) {
 	_ = err
 	// Encrypt using DecryptTLS12Records' exact inverse.
 	plainHTTP := []byte("GET /tls12 HTTP/1.1\r\nHost: legacy.example.com\r\n\r\n")
-	encRec := encryptTLS12AppDataRecord(t, clientWriteKey, clientSalt, 0, plainHTTP)
+	encRec := encryptTLS12Record(t, TLSRecordApplicationData, clientWriteKey, clientSalt, 0, plainHTTP)
 
 	clientStream := append(bytes.Clone(chRec), encRec...)
 	dec, err := DecryptTLS12Records(clientStream, TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256, masterSecret, clientRandom, serverRandom, true)
@@ -398,7 +398,7 @@ func TestTLS12OfflineStreamDecryptionViaClientRandom(t *testing.T) {
 	}
 }
 
-func encryptTLS12AppDataRecord(t *testing.T, writeKey []byte, salt []byte, seqNum uint64, plaintext []byte) []byte {
+func encryptTLS12Record(t *testing.T, recordType byte, writeKey []byte, salt []byte, seqNum uint64, plaintext []byte) []byte {
 	t.Helper()
 	// Derive AES-GCM directly via stdlib helper in tls_decrypt.go.
 	explicitNonce := []byte{0, 0, 0, 0, 0, 0, 0, 1}
@@ -408,14 +408,98 @@ func encryptTLS12AppDataRecord(t *testing.T, writeKey []byte, salt []byte, seqNu
 
 	var aad [13]byte
 	binary.BigEndian.PutUint64(aad[0:8], seqNum)
-	aad[8] = TLSRecordApplicationData
+	aad[8] = recordType
 	binary.BigEndian.PutUint16(aad[9:11], TLSVersion12)
 	binary.BigEndian.PutUint16(aad[11:13], uint16(len(plaintext)))
 
 	// Re-use aes.NewCipher + cipher.NewGCM through a tiny local wrapper.
 	ciphertext := sealAESGCMTest(t, writeKey, nonce[:], plaintext, aad[:])
 	recLen := uint16(len(explicitNonce) + len(ciphertext))
-	hdr := []byte{TLSRecordApplicationData, 0x03, 0x03, byte(recLen >> 8), byte(recLen)}
+	hdr := []byte{recordType, 0x03, 0x03, byte(recLen >> 8), byte(recLen)}
 	out := append(hdr, explicitNonce...)
 	return append(out, ciphertext...)
+}
+
+func TestTLSDecryptEdgeCasesAndServerFirstOrder(t *testing.T) {
+	// 1. ParseTLSKeyLog must not count unrecognized labels against MaxTLSKeyLogEntries.
+	var klBuf bytes.Buffer
+	for i := range MaxTLSKeyLogEntries + 10 {
+		fmt.Fprintf(&klBuf, "EXPORTER_SECRET %064x %064x\n", i+1, i+2)
+	}
+	fmt.Fprintf(&klBuf, "CLIENT_RANDOM %064x %096x\n", 1, 2)
+	kl, err := ParseTLSKeyLog(klBuf.Bytes())
+	if err != nil || len(kl.Entries) != 1 {
+		t.Fatalf("ParseTLSKeyLog(unrecognized labels) = (%d, %v), want 1", len(kl.Entries), err)
+	}
+
+	// 2. TLS 1.2 encrypted Alert after ChangeCipherSpec must advance seqNum so subsequent AppData decrypts.
+	clientRandom := [32]byte{1}
+	serverRandom := [32]byte{2}
+	masterSecret := bytes.Repeat([]byte{0x44}, 48)
+	keyLen, hashFn, _ := tls12CipherSuiteParams(TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256)
+	var seed [64]byte
+	copy(seed[0:32], serverRandom[:])
+	copy(seed[32:64], clientRandom[:])
+	keyBlock := tls12PRF(hashFn, masterSecret, "key expansion", seed[:], 2*keyLen+8)
+	cKey, cSalt := keyBlock[:keyLen], keyBlock[2*keyLen:2*keyLen+4]
+
+	ccs := []byte{TLSRecordChangeCipherSpec, 0x03, 0x03, 0x00, 0x01, 0x01}
+	// Encrypt a 2-byte warning alert at seqNum 0.
+	alertPlain := []byte{0x01, 0x00}
+	var alertNonce [12]byte
+	copy(alertNonce[0:4], cSalt)
+	copy(alertNonce[4:12], []byte{0, 0, 0, 0, 0, 0, 0, 0})
+	var alertAAD [13]byte
+	binary.BigEndian.PutUint64(alertAAD[0:8], 0)
+	alertAAD[8] = TLSRecordAlert
+	binary.BigEndian.PutUint16(alertAAD[9:11], TLSVersion12)
+	binary.BigEndian.PutUint16(alertAAD[11:13], uint16(len(alertPlain)))
+	alertCipher := sealAESGCMTest(t, cKey, alertNonce[:], alertPlain, alertAAD[:])
+	alertRecLen := uint16(8 + len(alertCipher))
+	alertRec := append([]byte{TLSRecordAlert, 0x03, 0x03, byte(alertRecLen >> 8), byte(alertRecLen), 0, 0, 0, 0, 0, 0, 0, 0}, alertCipher...)
+	appRec := encryptTLS12Record(t, TLSRecordApplicationData, cKey, cSalt, 1, []byte("after-alert"))
+
+	stream12 := append(append(ccs, alertRec...), appRec...)
+	dec12, err := DecryptTLS12Records(stream12, TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256, masterSecret, clientRandom, serverRandom, true)
+	if err != nil || string(dec12) != "after-alert" {
+		t.Fatalf("DecryptTLS12Records(CCS+Alert+AppData) = (%q, %v), want %q", dec12, err, "after-alert")
+	}
+
+	finished := encryptTLS12Record(t, TLSRecordHandshake, cKey, cSalt, 0, []byte{20, 0, 0, 12, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12})
+	dec12, err = DecryptTLS12Records(append(finished, appRec...), TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256, masterSecret, clientRandom, serverRandom, true)
+	if err != nil || string(dec12) != "after-alert" {
+		t.Fatalf("capture starting at Finished: %q, %v", dec12, err)
+	}
+	// 3. TLS 1.3 undecryptable 0-RTT record before Handshake record must not flip inAppPhase prematurely.
+	hsSecret := bytes.Repeat([]byte{0x11}, 32)
+	appSecret := bytes.Repeat([]byte{0x22}, 32)
+	zeroRTT := encryptTLS13AppDataRecord(t, bytes.Repeat([]byte{0x99}, 32), TLS_AES_128_GCM_SHA256, 0, TLSRecordApplicationData, []byte("early"))
+	hsRec := encryptTLS13AppDataRecord(t, hsSecret, TLS_AES_128_GCM_SHA256, 0, TLSRecordHandshake, []byte{20, 0, 0, 0})
+	app13 := encryptTLS13AppDataRecord(t, appSecret, TLS_AES_128_GCM_SHA256, 0, TLSRecordApplicationData, []byte("ok13"))
+	hsOut, appOut, err := DecryptTLS13Records(append(append(zeroRTT, hsRec...), app13...), TLS_AES_128_GCM_SHA256, hsSecret, appSecret)
+	if err != nil || len(hsOut) != 4 || string(appOut) != "ok13" {
+		t.Fatalf("DecryptTLS13Records(0-RTT+HS+App) = (hs=%d, app=%q, err=%v)", len(hsOut), appOut, err)
+	}
+
+	// 4. Leading 0-length handshake record + server-first packet ordering in Capture.TLS.
+	ch := append([]byte{TLSRecordHandshake, 0x03, 0x01, 0x00, 0x00}, buildTLS13ClientHelloRecord("reversed.example", "h2")...)
+	sh := buildTLSServerHelloAndCertRecords(t)
+	fSrvFirst := buildEthernetIPv4TCPFrame([4]byte{10, 0, 0, 2}, [4]byte{10, 0, 0, 1}, 443, 55555, 1, 1, TCPFlagPSH|TCPFlagACK, sh)
+	fCliSecond := buildEthernetIPv4TCPFrame([4]byte{10, 0, 0, 1}, [4]byte{10, 0, 0, 2}, 55555, 443, 1, 1, TCPFlagPSH|TCPFlagACK, ch)
+	raw := buildClassicPCAP(binary.LittleEndian, false, LinkTypeEthernet, 65535, [][]byte{fSrvFirst, fCliSecond})
+	c, err := New(raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tlsRecs, err := c.TLS(raw)
+	if err != nil || len(tlsRecs) != 1 || !tlsRecs[0].Handshake.HasClientHello || !tlsRecs[0].Handshake.HasServerHello || tlsRecs[0].Handshake.ClientHello.SNI != "reversed.example" {
+		t.Fatalf("Capture.TLS(server-first) = (%+v, %v)", tlsRecs, err)
+	}
+
+	// 5. Draft supported_versions (0x7f1c) alongside TLS 1.3 must still yield JA4 version "13".
+	var chDraft TLSClientHello
+	parseClientSupportedVersions([]byte{4, 0x7f, 0x1c, 0x03, 0x04}, &chDraft)
+	if chDraft.NegotiatedVersion != TLSVersion13 || ja4VersionCode(chDraft.NegotiatedVersion) != "13" {
+		t.Fatalf("supported_versions with draft = (%#04x, %q), want (0x0304, \"13\")", chDraft.NegotiatedVersion, ja4VersionCode(chDraft.NegotiatedVersion))
+	}
 }

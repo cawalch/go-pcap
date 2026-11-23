@@ -253,10 +253,12 @@ func ParseTLSRecords(stream []byte) (TLSHandshake, error) {
 		case TLSHandshakeCertificate:
 			if len(out.Certificates) == 0 {
 				certs, certAnom, err := parseTLSCertificateBody(body)
-				if err == nil && len(certs) > 0 {
-					out.Certificates = certs
+				if err == nil {
 					out.Anomalies = mergeTLSAnomalies(out.Anomalies, certAnom)
-					parsedAny = true
+					if len(certs) > 0 {
+						out.Certificates = certs
+						parsedAny = true
+					}
 				}
 			}
 		}
@@ -483,7 +485,7 @@ func parseClientSupportedVersions(extData []byte, ch *TLSClientHello) {
 	for i := range count {
 		v := binary.BigEndian.Uint16(extData[1+i*2 : 1+i*2+2])
 		ch.SupportedVersions = append(ch.SupportedVersions, v)
-		if !IsGREASE(v) && v > maxVer {
+		if (v == TLSVersionSSL30 || v == TLSVersion10 || v == TLSVersion11 || v == TLSVersion12 || v == TLSVersion13) && v > maxVer {
 			maxVer = v
 		}
 	}
@@ -634,7 +636,7 @@ func parseTLSServerHelloWithRecordVersion(body []byte, recordVer uint16, isQUIC 
 				if len(extData) >= 4 {
 					listLen := int(binary.BigEndian.Uint16(extData[0:2]))
 					pLen := int(extData[2])
-					if 2+listLen <= len(extData) && 3+pLen <= len(extData) && pLen > 0 {
+					if 2+listLen <= len(extData) && 3+pLen <= 2+listLen && pLen > 0 {
 						sh.ALPN = string(extData[3 : 3+pLen])
 					}
 				}
@@ -940,14 +942,17 @@ func JA4XFromCert(cert *x509.Certificate) string {
 	extOIDs := scratch[:0]
 	for i, ext := range cert.Extensions {
 		rawOID, err := asn1.Marshal(ext.Id)
-		if err != nil || len(rawOID) < 3 || rawOID[0] != 0x06 {
+		if err != nil {
 			continue
 		}
-		oidContent := rawOID[2:]
+		var oidRaw asn1.RawValue
+		if _, err := asn1.Unmarshal(rawOID, &oidRaw); err != nil || oidRaw.Tag != asn1.TagOID {
+			continue
+		}
 		if i > 0 && len(extOIDs) > 0 {
 			extOIDs = append(extOIDs, ',')
 		}
-		extOIDs = hex.AppendEncode(extOIDs, oidContent)
+		extOIDs = hex.AppendEncode(extOIDs, oidRaw.Bytes)
 	}
 
 	return string(appendTruncSHA256Hex12(b, extOIDs))
@@ -1024,47 +1029,68 @@ func (c *Capture) tlsFromStreams(streams []TCPStream, extraKeyLog []byte) ([]TLS
 		return nil, nil
 	}
 
-	keyLog, _ := c.TLSKeyLog(extraKeyLog)
+	keyLog, err := c.TLSKeyLog(extraKeyLog)
+	if err != nil {
+		return nil, err
+	}
 
 	var records []TLSRecord
 	for i := range streams {
 		st := &streams[i]
+		cData, sData := st.Client.Data, st.Server.Data
+		srcAddr, dstAddr, srcPort, dstPort := st.SrcAddr, st.DstAddr, st.SrcPort, st.DstPort
 		var merged TLSHandshake
 		var found bool
 
-		if tlsOff := findTLSHandshakeStart(st.Client.Data); tlsOff >= 0 {
-			if hs, err := ParseTLSRecords(st.Client.Data[tlsOff:]); err == nil && hs.HasClientHello {
-				merged.ClientHello = hs.ClientHello
-				merged.HasClientHello = true
-				merged.Anomalies = mergeTLSAnomalies(merged.Anomalies, hs.Anomalies)
-				if len(hs.Certificates) > 0 {
-					merged.Certificates = hs.Certificates
-				}
-				found = true
+		var clientHS, serverHS TLSHandshake
+		var hasC, hasS bool
+		if tlsOff := findTLSHandshakeStart(cData); tlsOff >= 0 {
+			if hs, err := ParseTLSRecords(cData[tlsOff:]); err == nil {
+				clientHS, hasC = hs, true
 			}
 		}
-
-		if tlsOff := findTLSHandshakeStart(st.Server.Data); tlsOff >= 0 {
-			if hs, err := ParseTLSRecords(st.Server.Data[tlsOff:]); err == nil {
-				if hs.HasServerHello {
-					merged.IsResumed = hs.IsResumed && hs.ServerHello.NegotiatedVersion == TLSVersion13
-					merged.ServerHello = hs.ServerHello
-					merged.HasServerHello = true
-					found = true
-				}
-				if len(hs.Certificates) > 0 {
-					merged.Certificates = hs.Certificates
-					found = true
-				}
-				merged.Anomalies = mergeTLSAnomalies(merged.Anomalies, hs.Anomalies)
+		if tlsOff := findTLSHandshakeStart(sData); tlsOff >= 0 {
+			if hs, err := ParseTLSRecords(sData[tlsOff:]); err == nil {
+				serverHS, hasS = hs, true
 			}
+		}
+		if (!hasC || !clientHS.HasClientHello) && hasS && serverHS.HasClientHello {
+			clientHS, serverHS = serverHS, clientHS
+			hasC, hasS = hasS, hasC
+			cData, sData = sData, cData
+			srcAddr, dstAddr = dstAddr, srcAddr
+			srcPort, dstPort = dstPort, srcPort
+		}
+
+		if hasC && clientHS.HasClientHello {
+			merged.ClientHello = clientHS.ClientHello
+			merged.HasClientHello = true
+			merged.Anomalies = mergeTLSAnomalies(merged.Anomalies, clientHS.Anomalies)
+			if len(clientHS.Certificates) > 0 {
+				merged.Certificates = clientHS.Certificates
+			}
+			found = true
+		}
+
+		if hasS {
+			if serverHS.HasServerHello {
+				merged.IsResumed = serverHS.IsResumed && serverHS.ServerHello.NegotiatedVersion == TLSVersion13
+				merged.ServerHello = serverHS.ServerHello
+				merged.HasServerHello = true
+				found = true
+			}
+			if len(serverHS.Certificates) > 0 {
+				merged.Certificates = serverHS.Certificates
+				found = true
+			}
+			merged.Anomalies = mergeTLSAnomalies(merged.Anomalies, serverHS.Anomalies)
 		}
 
 		// In TLS 1.3, the server Certificate message is encrypted inside outer
 		// ApplicationData records under SERVER_HANDSHAKE_TRAFFIC_SECRET.
 		if merged.HasClientHello && merged.HasServerHello && len(merged.Certificates) == 0 && keyLog != nil && len(keyLog.Entries) > 0 {
 			if entry, ok := keyLog.Entries[merged.ClientHello.Random]; ok && len(entry.ServerHandshakeSecret) > 0 {
-				if hsPlain, _, err := DecryptTLS13Records(st.Server.Data, merged.ServerHello.CipherSuite, entry.ServerHandshakeSecret, nil); err == nil && len(hsPlain) >= 4 {
+				if hsPlain, _, err := DecryptTLS13Records(sData, merged.ServerHello.CipherSuite, entry.ServerHandshakeSecret, nil); err == nil && len(hsPlain) >= 4 {
 					parseDecryptedTLS13HandshakeCertificates(hsPlain, &merged)
 				}
 			}
@@ -1077,10 +1103,10 @@ func (c *Capture) tlsFromStreams(streams []TCPStream, extraKeyLog []byte) ([]TLS
 			}
 			records = append(records, TLSRecord{
 				FlowIndex: st.FlowIndex,
-				SrcAddr:   st.SrcAddr,
-				DstAddr:   st.DstAddr,
-				SrcPort:   st.SrcPort,
-				DstPort:   st.DstPort,
+				SrcAddr:   srcAddr,
+				DstAddr:   dstAddr,
+				SrcPort:   srcPort,
+				DstPort:   dstPort,
 				Handshake: merged,
 			})
 		}
@@ -1101,10 +1127,12 @@ func parseDecryptedTLS13HandshakeCertificates(hsData []byte, out *TLSHandshake) 
 		offset += 4 + msgLen
 
 		if msgType == TLSHandshakeCertificate && len(out.Certificates) == 0 {
-			if certs, certAnom, err := parseTLSCertificateWithTLS13Context(body); err == nil && len(certs) > 0 {
-				out.Certificates = certs
+			if certs, certAnom, err := parseTLSCertificateWithTLS13Context(body); err == nil {
 				out.Anomalies = mergeTLSAnomalies(out.Anomalies, certAnom)
-				return
+				if len(certs) > 0 {
+					out.Certificates = certs
+					return
+				}
 			}
 		}
 	}
@@ -1145,12 +1173,16 @@ func parseTLSCertificateWithTLS13Context(body []byte) ([]TLSCertificate, TLSAnom
 		pos += certLen
 
 		// TLS 1.3 CertificateEntry carries a 2-byte extensions length after cert_data.
-		if pos+2 <= end {
-			extLen := int(binary.BigEndian.Uint16(body[pos : pos+2]))
-			if pos+2+extLen <= end {
-				pos += 2 + extLen
-			}
+		if pos+2 > end {
+			anomalies.TruncatedRecord = true
+			break
 		}
+		extLen := int(binary.BigEndian.Uint16(body[pos : pos+2]))
+		if pos+2+extLen > end {
+			anomalies.TruncatedRecord = true
+			break
+		}
+		pos += 2 + extLen
 
 		certs = appendTLSCertificate(certs, der, &anomalies)
 	}
@@ -1158,12 +1190,17 @@ func parseTLSCertificateWithTLS13Context(body []byte) ([]TLSCertificate, TLSAnom
 }
 
 func findTLSHandshakeStart(buf []byte) int {
-	if len(buf) < 6 {
+	offset := 0
+	for offset+6 <= len(buf) {
+		if buf[offset] == TLSRecordHandshake && buf[offset+1] == 0x03 && buf[offset+2] <= 0x04 && buf[offset+3] == 0 && buf[offset+4] == 0 {
+			// Skip RFC 5246 leading 0-length handshake records.
+			offset += 5
+			continue
+		}
+		if isValidTLSHandshakeHeader(buf[offset:]) {
+			return offset
+		}
 		return -1
-	}
-	// Check offset 0 first (standard TLS over TCP).
-	if isValidTLSHandshakeHeader(buf) {
-		return 0
 	}
 	return -1
 }

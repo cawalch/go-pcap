@@ -179,3 +179,43 @@ func TestQUICInitialHeaderOwnership(t *testing.T) {
 		}
 	}
 }
+
+func TestQUICRetryDCIDAndServerFirstOrdering(t *testing.T) {
+	hello := buildTLS13ClientHelloRecord("retry-quic.example", "h3")
+	oldDCID := []byte{1, 2, 3, 4, 5, 6, 7, 8}
+	retryDCID := []byte{9, 10, 11, 12, 13, 14, 15, 16}
+	scid := []byte{0xaa, 0xbb, 0xcc, 0xdd}
+
+	// 1. Retry-updated DCID: first packet uses oldDCID (undecryptable/unanswered), second uses retryDCID.
+	pkt1 := make([]byte, 1200)
+	pkt1[0] = 0xc0
+	binary.BigEndian.PutUint32(pkt1[1:5], QUICVersion1)
+	pkt1[5] = byte(len(oldDCID))
+	copy(pkt1[6:], oldDCID)
+	pkt2 := buildEncryptedQUICInitialDatagram(t, QUICVersion1, retryDCID, scid, []byte("retry"), 2, 0, hello[5:])
+	hs, err := DecryptQUICInitial([][]byte{pkt1, pkt2})
+	if err != nil {
+		t.Fatalf("DecryptQUICInitial(Retry DCID) error = %v", err)
+	}
+	if !bytes.Equal(hs.DCID, retryDCID) || hs.ClientHello.SNI != "retry-quic.example" {
+		t.Fatalf("DecryptQUICInitial(Retry DCID) = (%x, %q)", hs.DCID, hs.ClientHello.SNI)
+	}
+
+	// 2. Server-first UDP packet ordering in Capture.QUIC.
+	srvInitial := make([]byte, 1200)
+	srvInitial[0] = 0xc0
+	binary.BigEndian.PutUint32(srvInitial[1:5], QUICVersion1)
+	srvInitial[5] = byte(len(retryDCID))
+	copy(srvInitial[6:], retryDCID)
+	fSrv := buildEthernetIPv4UDPFrame([4]byte{10, 0, 0, 2}, [4]byte{10, 0, 0, 1}, 443, 55555, srvInitial)
+	fCli := buildEthernetIPv4UDPFrame([4]byte{10, 0, 0, 1}, [4]byte{10, 0, 0, 2}, 55555, 443, pkt2)
+	raw := buildClassicPCAP(binary.LittleEndian, false, LinkTypeEthernet, 65535, [][]byte{fSrv, fCli})
+	c, err := New(raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	recs, err := c.QUIC(raw)
+	if err != nil || len(recs) != 1 || recs[0].Handshake.ClientHello.SNI != "retry-quic.example" {
+		t.Fatalf("Capture.QUIC(server-first) = (%+v, %v)", recs, err)
+	}
+}
