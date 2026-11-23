@@ -205,7 +205,8 @@ without heap allocations:
 
 - Supported link types: `LinkTypeEthernet` (with up to 4 nested 802.1Q / 802.1ad
   VLAN tags), `LinkTypeLinuxSLL`, `LinkTypeLinuxSLL2`, `LinkTypeNull` (BSD
-  loopback), `LinkTypeRaw`, `LinkTypeIPv4`, and `LinkTypeIPv6`.
+  loopback), `LinkTypeRaw`, `LinkTypeIPv4`, `LinkTypeIPv6`,
+  `LinkTypeIEEE80211` (105), and `LinkTypeIEEE80211RadioTap` (127).
 - Supported tunnel encapsulations: `MPLS` (`0x8847` / `0x8848`, up to 8 labels),
   `PPPoE` Session (`0x8864` over IPv4 or IPv6), `GRE` (`IPProto 47` over IPv4,
   IPv6, or Transparent Ethernet Bridging), `VXLAN` (`UDP 4789`), and `Geneve`
@@ -215,9 +216,34 @@ without heap allocations:
   Destination Options, and Authentication headers), and `ARP`.
 - Supported transport headers: `TCP` (extracting ports, sequence/acknowledgment
   numbers, flags, window size, and raw TCP option range for `JA4T`), `UDP`,
-  `ICMPv4`, and `ICMPv6`.
+  `ICMPv4`, `ICMPv6`, Encapsulating Security Payload (ESP, IP protocol 50),
+  and Internet Key Exchange version 2 (IKEv2) over UDP 500 or 4500.
 - `Frame.PayloadOffset` and `Frame.PayloadLength` identify the innermost
   transport payload slice (`payload[frame.PayloadOffset : frame.PayloadOffset+frame.PayloadLength]`).
+
+On a monitor-mode capture, `LayerRadiotap` gives the Radiotap header span.
+`LayerIEEE80211` gives the MAC header span for Data frames and the Frame
+Control span for other frames. For an unprotected, unfragmented Data frame
+with a standard LLC/SNAP header, the decoder continues at the embedded
+EtherType. This supports four-address frames, QoS, HT Control on QoS frames,
+and the Radiotap data-padding flag. Protected frames, fragments, and
+aggregated MAC service data units (A-MSDUs) stay opaque. For guest IP
+and neighbor observations on an access point or controller mirror, capture
+after decapsulation and use the Ethernet link type.
+
+`LayerESP` spans the 8-byte SPI and sequence number header in IPv4 or IPv6.
+The payload span starts at the protected body. ESP flows have no transport
+ports. IKEv2 uses the existing UDP endpoints. On port 4500,
+`LayerIKEv2` requires the four-byte Non-ESP Marker. It spans the 28-byte
+IKEv2 header and the payload span starts after it. UDP-encapsulated ESP and
+NAT keepalives retain their UDP payload spans. The decoder does not
+authenticate or decrypt IPsec traffic.
+
+The [reference frames](../testdata/framing/README.md) include a Radiotap
+header longer than the default ReaderAt prefix. See the
+[Radiotap flags](https://www.radiotap.org/fields/Flags.html),
+[ESP framing](https://www.rfc-editor.org/rfc/rfc4303#section-2), and
+[IKEv2 message format](https://www.rfc-editor.org/rfc/rfc7296#section-3.1).
 
 IPv6 reassembly discards a datagram if fragments overlap, including identical
 bytes. A first UDP or TCP fragment must contain its complete transport header.

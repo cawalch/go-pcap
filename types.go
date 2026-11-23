@@ -37,13 +37,15 @@ const (
 type LinkType uint16
 
 const (
-	LinkTypeNull      LinkType = 0   // BSD loopback encapsulation
-	LinkTypeEthernet  LinkType = 1   // IEEE 802.3 Ethernet
-	LinkTypeRaw       LinkType = 101 // Raw IP (IPv4 or IPv6)
-	LinkTypeLinuxSLL  LinkType = 113 // Linux cooked capture v1
-	LinkTypeIPv4      LinkType = 228 // Raw IPv4
-	LinkTypeIPv6      LinkType = 229 // Raw IPv6
-	LinkTypeLinuxSLL2 LinkType = 276 // Linux cooked capture v2
+	LinkTypeNull              LinkType = 0   // BSD loopback encapsulation
+	LinkTypeEthernet          LinkType = 1   // IEEE 802.3 Ethernet
+	LinkTypeRaw               LinkType = 101 // Raw IP (IPv4 or IPv6)
+	LinkTypeIEEE80211         LinkType = 105 // IEEE 802.11 MAC frames
+	LinkTypeLinuxSLL          LinkType = 113 // Linux cooked capture v1
+	LinkTypeIEEE80211RadioTap LinkType = 127 // Radiotap followed by IEEE 802.11
+	LinkTypeIPv4              LinkType = 228 // Raw IPv4
+	LinkTypeIPv6              LinkType = 229 // Raw IPv6
+	LinkTypeLinuxSLL2         LinkType = 276 // Linux cooked capture v2
 )
 
 // PcapNG block type codes.
@@ -179,6 +181,10 @@ const (
 	LayerUDP
 	LayerICMPv4
 	LayerICMPv6
+	LayerRadiotap
+	LayerIEEE80211
+	LayerESP
+	LayerIKEv2
 )
 
 // String returns the lowercase layer identifier.
@@ -222,6 +228,14 @@ func (p LayerProto) String() string {
 		return "icmpv4"
 	case LayerICMPv6:
 		return "icmpv6"
+	case LayerRadiotap:
+		return "radiotap"
+	case LayerIEEE80211:
+		return "ieee80211"
+	case LayerESP:
+		return "esp"
+	case LayerIKEv2:
+		return "ikev2"
 	default:
 		return "none"
 	}
