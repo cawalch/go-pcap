@@ -33,6 +33,21 @@ for the README, repository documentation, and prose in code comments. Follow
 - Start exported API comments with the identifier's name. Link related symbols
   with Go doc links, such as `[New]`.
 
+## Merge a change
+
+Open a pull request against `main` and resolve its review conversations.
+After reviewing the current changes, the owner applies the `run-ci` label
+to start the six required GitHub-hosted checks on the PR merge candidate:
+
+```sh
+gh pr edit NUMBER --add-label run-ci
+```
+
+Keep the branch up to date with `main`. After updating it, remove and
+reapply the label to test the new revision. Squash-merge after both Go
+test jobs, macOS and Windows tests, lint, and the vulnerability check pass.
+The sole maintainer can merge their own PR after these checks.
+
 ## Validate a change
 
 From the repository root, format the Go files and run the tests and static checks:
