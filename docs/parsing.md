@@ -488,7 +488,10 @@ scores, payload size uniformity, Producer-Consumer Ratio (PCR), and composite
 Use `NewPCAPWriter(w, linkType, snapLen)` for single-interface classic PCAP.
 Pass Unix nanoseconds and the complete packet to `WritePacket`. The writer
 stores up to `snapLen` bytes and preserves the original length. Timestamps must
-fit unsigned 32-bit Unix seconds; zero snaplen selects `DefaultLiveSnapLen`.
+fit unsigned 32-bit Unix seconds. A zero snaplen selects `DefaultLiveSnapLen`.
+When copying an already-truncated packet, call
+`WritePacketWithOriginalLen(pkt.TimestampNs, payload, pkt.OriginalLen)` to
+retain its wire length even if the destination snaplen truncates it further.
 
 Use `NewPCAPNGWriter(w, opts)` to stream PcapNG `SHB`, `IDB` (nanosecond
 resolution), `NRB` (`WriteNameResolution`), `ISB` (`WriteInterfaceStats`),

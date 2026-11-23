@@ -459,19 +459,26 @@ func NewPCAPWriter(w io.Writer, linkType LinkType, snapLen uint32) (*PCAPWriter,
 // up to the configured snaplen and records the full payload length on the wire.
 // The PCAP seconds and original-length fields must fit unsigned 32-bit values.
 func (pw *PCAPWriter) WritePacket(timestampNs int64, payload []byte) error {
+	return pw.WritePacketWithOriginalLen(timestampNs, payload, uint32(len(payload)))
+}
+
+// WritePacketWithOriginalLen writes captured bytes with their original wire
+// length and timestamp in Unix nanoseconds. It saves up to the writer's snaplen.
+// It returns [ErrInvalidPacket] if originalLen is smaller than len(payload)
+// or the timestamp cannot be represented in classic PCAP.
+func (pw *PCAPWriter) WritePacketWithOriginalLen(timestampNs int64, payload []byte, originalLen uint32) error {
 	if pw == nil || pw.w == nil {
 		return ErrInvalidHeader
 	}
 	sec := timestampNs / 1_000_000_000
-	if timestampNs < 0 || sec > math.MaxUint32 || uint64(len(payload)) > math.MaxUint32 {
+	if timestampNs < 0 || sec > math.MaxUint32 || uint64(len(payload)) > uint64(originalLen) {
 		return ErrInvalidPacket
 	}
-	orig := uint32(len(payload))
-	n := min(orig, pw.snapLen)
+	n := min(uint32(len(payload)), pw.snapLen)
 	binary.LittleEndian.PutUint32(pw.header[:4], uint32(sec))
 	binary.LittleEndian.PutUint32(pw.header[4:8], uint32(timestampNs%1_000_000_000))
 	binary.LittleEndian.PutUint32(pw.header[8:12], n)
-	binary.LittleEndian.PutUint32(pw.header[12:16], orig)
+	binary.LittleEndian.PutUint32(pw.header[12:16], originalLen)
 	if err := pw.write(pw.header[:]); err != nil {
 		return err
 	}
