@@ -333,3 +333,20 @@ func ExampleParseHTTP2Frames_headers() {
 	fmt.Println(request.Method, request.Path)
 	// Output: GET /
 }
+
+func ExampleCapture_Web() {
+	data, err := os.ReadFile("testdata/deployments/proxy.pcapng")
+	if err != nil {
+		log.Fatal(err)
+	}
+	c, err := pcap.New(data)
+	if err != nil {
+		log.Fatal(err)
+	}
+	records, err := c.Web(data)
+	if err != nil {
+		log.Fatal(err)
+	}
+	fmt.Println(len(records.TLS), len(records.HTTP), len(records.HTTP2))
+	// Output: 2 0 0
+}

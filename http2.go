@@ -239,24 +239,14 @@ func parseHTTP2Frames(stream []byte, remaining *int, sequenceGap bool) (HTTP2Sum
 // stream payloads from both cleartext TCP streams (h2c) and DSB-decrypted TLS
 // 1.2/1.3 streams.
 func (c *Capture) HTTP2(data []byte) ([]HTTP2Record, error) {
-	streams, err := c.proxyStreams(data)
+	streams, err := c.Streams(data)
 	if err != nil {
 		return nil, err
 	}
-	remaining := MaxHTTP2DecodedHeaderBytes
+	keys, _ := c.TLSKeyLog(nil)
 	var records []HTTP2Record
-	for i := range streams {
-		if err := appendHTTP2FromTCPStream(&streams[i], false, &records, &remaining); err != nil {
-			return nil, err
-		}
-	}
-	if keys, err := c.TLSKeyLog(nil); err == nil && len(keys.Entries) > 0 {
-		decStreams := decryptTLSStreams(streams, keys)
-		for i := range decStreams {
-			if err := appendHTTP2FromTCPStream(&decStreams[i], true, &records, &remaining); err != nil {
-				return nil, err
-			}
-		}
+	if err := scanHTTPStreams(streams, keys, nil, &records); err != nil {
+		return nil, err
 	}
 	return records, nil
 }
