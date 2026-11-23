@@ -284,6 +284,33 @@ uses the first applicable Ethernet link-layer option and checks all option
 lengths. Captures taken before transmit checksum offload can omit a valid
 checksum and therefore omit that observation.
 
+### Find changes in observed neighbor bindings
+
+Use `Capture.NeighborBindingChanges` or
+`Capture.NeighborBindingChangesFromReaderAt` to find where successive
+observations associate the same IP address with different hardware addresses.
+ARP requests and replies contribute the sender address pair. An IPv6 Neighbor
+Solicitation contributes its source IP and source link-layer option. A
+Neighbor Advertisement contributes its target IP and target link-layer option,
+including when its packet source differs from its target. The scan requires a
+unicast IP address and a nonzero unicast media access control (MAC) address.
+It skips duplicate address detection probes and packets without the relevant
+link-layer option.
+
+The scanners track Ethernet and Linux cooked v2 packets by capture interface,
+link type, ordered VLAN IDs, and the interface index in the cooked v2 header.
+They skip cooked v2 packets with an unknown interface index. Untagged packets
+and packets with VLAN ID 0 use separate scopes. Each accepted observation
+becomes the baseline, including repeated hardware addresses. A change reports
+both packet indices and timestamps, and results follow file order even when
+timestamps go backward. Use `Previous` and `Current` to inspect the operations
+and the Solicited and Override flags. Use deployment information to assess
+ownership and compare changes with events such as failover or reassignment.
+
+The existing neighbor scan limits apply. The scan retains at most one prior
+observation per scoped address and returns no partial changes if the scan
+exceeds the read budget or the 4096-observation limit.
+
 ## DHCPv4 address assignments
 
 Use `Capture.DHCPv4` or `Capture.DHCPv4FromReaderAt` to read Discover,
@@ -506,6 +533,19 @@ and `Certificate` handshake messages:
   list exceeds the limit, `SANsTruncated` is true for that certificate.
   `RawDER` retains the complete certificate. Cleartext and decrypted client and server
   certificates follow the same rules for slice and ReaderAt scans.
+- Supply a known capture packet timestamp to
+  `cert.ValidityAt(time.Unix(0, pkt.TimestampNs))` to check that certificate's
+  inclusive validity window. If the timestamp is unavailable (for example,
+  in a PcapNG Simple Packet Block), pass `time.Time{}` for `TLSValidityUnknown`.
+  You can check each server or client certificate independently.
+- Use `match, known := record.Handshake.ServerNameMatch()` to compare the observed
+  ClientHello DNS name with the server leaf's DNS SANs. Matching follows Go's
+  X.509 case and wildcard rules. With Encrypted Client Hello, the observed
+  name can be the outer public name. A missing or invalid DNS name, an IP
+  literal, missing leaf or DNS SANs, or invalid certificate DER gives an unknown
+  result. A match in the retained DNS names is conclusive. A miss is unknown
+  if further DNS names might have been omitted. Both helpers describe the
+  captured evidence independently of chain trust and revocation policy.
 - `TLSCertificate.JA4X` (and standalone `JA4XFromDER` / `JA4XFromCert`) reports
   the FoxIO JA4X fingerprint over the certificate's raw ASN.1 issuer RDNs,
   subject RDNs, and X.509 extension OIDs. When a PcapNG `DSB` block or
@@ -560,6 +600,19 @@ bytes both before and after the update. The server keeps its current traffic
 secret until it sends its own authenticated update. After 32 updates in one
 direction, the next update ends decryption for that direction and the parser
 returns the plaintext recovered so far. [TLS 1.3 traffic key updates](https://www.rfc-editor.org/rfc/rfc8446#section-7.2)
+
+### Read DNS messages from decrypted HTTP/2
+
+Call `capture.HTTP2(data)` and select records with `IsDecrypted`. For each
+stream in `record.Summary.Streams`, call `block.DNSOverHTTPS(stream.Data)`
+for each header block. The method reads the `dns` URI parameter on GET
+requests and the `application/dns-message` body of POST requests and 2xx
+responses that allow a body. It accepts an uncoded body of up to 65,535 bytes
+and limits GET request targets to `MaxHTTPHeaderLineBytes`.
+
+Check the match flag and error before using the DNS message. Inspect
+`DNSMessage.Anomalies` for partial DNS sections. Use the flow index and
+HTTP/2 stream ID to pair requests with responses. [RFC 8484](https://www.rfc-editor.org/rfc/rfc8484#section-4)
 
 ## Inspect explicit proxy tunnels
 
@@ -719,6 +772,11 @@ v5 `AS-REQ`, `AS-REP`, `TGS-REQ`, `TGS-REP`, and `KRB-ERROR` messages over UDP
 and TCP port 88, including client/service principal names, realm, requested
 encryption types, and the encryption types on replies. Use `HasRC4HMAC` to
 find messages mentioning encryption type 23 when auditing legacy crypto.
+For a `KRB-ERROR` message, `ErrorCode` contains the protocol error code.
+`ClientRealm` and `ClientNames` contain the optional client identity fields.
+For example, an error for `alice@CLIENT.EXAMPLE` from `SERVICE.EXAMPLE` can
+report `ClientNames` as `["alice"]`, `ClientRealm` as `CLIENT.EXAMPLE`, and
+`Realm` as `SERVICE.EXAMPLE`.
 On TCP, the scanner reassembles each port-88 direction and attributes the
 message to the packet containing the first byte of its four-byte record mark.
 [Kerberos over TCP (RFC 4120)](https://www.rfc-editor.org/rfc/rfc4120#section-7.2.2)

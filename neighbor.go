@@ -58,22 +58,42 @@ func (c *Capture) Neighbors(data []byte) ([]NeighborRecord, error) {
 // The scan skips malformed or unsupported messages and returns [ErrNeighborLimit]
 // when the observation count exceeds 4096.
 func (c *Capture) NeighborsFromReaderAt(r io.ReaderAt) ([]NeighborRecord, error) {
-	if err := c.validateContainer(); err != nil {
+	var records []NeighborRecord
+	err := c.scanNeighbors(r, func(rec NeighborRecord, _ neighborScope) {
+		records = append(records, rec)
+	})
+	if err != nil {
 		return nil, err
 	}
-	if r == nil {
-		return nil, ErrInvalidHeader
+	return records, nil
+}
+
+type neighborScope struct {
+	interfaceID        uint32
+	linkType           LinkType
+	linkInterfaceIndex uint32
+	vlanCount          uint8
+	vlanTags           [MaxVLANTags]uint16
+}
+
+func (c *Capture) scanNeighbors(r io.ReaderAt, observe func(NeighborRecord, neighborScope)) error {
+	if err := c.validateContainer(); err != nil {
+		return err
 	}
-	var records []NeighborRecord
+	if r == nil {
+		return ErrInvalidHeader
+	}
+	var count int
 	var prefix [96]byte // Link, up to four VLAN tags, IPv6 and a short NDP message.
 	var scratch []byte
 	budget := scanReadBudget{r: r, remaining: MaxReaderAtScanBytes}
-	err := c.walkPacketsFromReaderAt(&budget, false, func(pkt PacketRecord) error {
+	return c.walkPacketsFromReaderAt(&budget, false, func(pkt PacketRecord) error {
 		p := prefix[:min(int64(len(prefix)), pkt.PayloadLength)]
 		if err := readExactAt(&budget, p, pkt.PayloadOffset, c.fileSize); err != nil {
 			return err
 		}
-		rec, need := decodeNeighbor(p, pkt.LinkType)
+		scope := neighborScope{interfaceID: pkt.InterfaceID, linkType: pkt.LinkType}
+		rec, need := decodeNeighbor(p, pkt.LinkType, &scope)
 		if need > len(p) && int64(need) <= pkt.PayloadLength {
 			if cap(scratch) < need {
 				scratch = make([]byte, need)
@@ -83,26 +103,27 @@ func (c *Capture) NeighborsFromReaderAt(r io.ReaderAt) ([]NeighborRecord, error)
 			if err := readExactAt(&budget, full[len(p):], pkt.PayloadOffset+int64(len(p)), c.fileSize); err != nil {
 				return err
 			}
-			rec, _ = decodeNeighbor(full, pkt.LinkType)
+			rec, _ = decodeNeighbor(full, pkt.LinkType, &scope)
 		}
 		if rec.Operation != 0 {
-			if len(records) == maxNeighborRecords {
+			if count == maxNeighborRecords {
 				return ErrNeighborLimit
 			}
+			count++
 			rec.PacketIndex, rec.TimestampNs, rec.InterfaceID = pkt.Index, pkt.TimestampNs, pkt.InterfaceID
-			records = append(records, rec)
+			if pkt.LinkType == LinkTypeLinuxSLL2 {
+				// DecodeFrame has already checked the 20-byte cooked header.
+				scope.linkInterfaceIndex = binary.BigEndian.Uint32(p[4:8])
+			}
+			observe(rec, scope)
 		}
 		return nil
 	})
-	if err != nil {
-		return nil, err
-	}
-	return records, nil
 }
 
 // decodeNeighbor returns the required prefix length when the link-local IPv6
 // datagram is a candidate but its declared bytes are not in the prefix.
-func decodeNeighbor(data []byte, link LinkType) (NeighborRecord, int) {
+func decodeNeighbor(data []byte, link LinkType, scope *neighborScope) (NeighborRecord, int) {
 	f, err := DecodeFrame(data, link)
 	if err != nil {
 		return NeighborRecord{}, 0
@@ -118,6 +139,7 @@ func decodeNeighbor(data []byte, link LinkType) (NeighborRecord, int) {
 	if len(layers) == 0 {
 		return NeighborRecord{}, 0
 	}
+	scope.vlanCount, scope.vlanTags = f.VLANCount, f.VLANTags
 	start := int(layers[0].Offset)
 	switch layers[0].Proto {
 	case LayerARP:

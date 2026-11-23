@@ -202,3 +202,96 @@ func BenchmarkTLSCertificateSANs(b *testing.B) {
 		}
 	}
 }
+
+func TestTLSCertificateValidityAt(t *testing.T) {
+	cert := TLSCertificate{Version: 3, NotBefore: -1, NotAfter: 1}
+	for _, tc := range []struct {
+		at   time.Time
+		want TLSCertificateValidity
+	}{
+		{time.Time{}, TLSValidityUnknown},
+		{time.Unix(-1, -1), TLSValidityNotYetValid},
+		{time.Unix(-1, 0), TLSValidityCurrent},
+		{time.Unix(0, 0), TLSValidityCurrent},
+		{time.Unix(1, 0), TLSValidityCurrent},
+		{time.Unix(1, 1), TLSValidityExpired},
+	} {
+		if got := cert.ValidityAt(tc.at); got != tc.want {
+			t.Errorf("ValidityAt(%v) = %v, want %v", tc.at, got, tc.want)
+		}
+	}
+	for _, invalid := range []TLSCertificate{{}, {Version: 3, NotAfter: -1}} {
+		if invalid.ValidityAt(time.Unix(0, 0)) != TLSValidityUnknown {
+			t.Fatal("expected unknown validity")
+		}
+	}
+}
+
+func TestTLSServerNameMatch(t *testing.T) {
+	names := slices.Repeat([]string{"unrelated.example"}, MaxTLSCertSANsPerKind)
+	for _, tc := range []struct {
+		sni                     string
+		names                   []string
+		truncated, match, known bool
+	}{
+		{"LEAF.example.", []string{"leaf.EXAMPLE"}, false, true, true},
+		{"leaf.example", []string{"*.example"}, false, true, true},
+		{"a.b.example", []string{"*.example"}, false, false, true},
+		{"leaf.example", nil, false, false, false},
+		{"leaf.example", names, true, false, false},
+		{"unrelated.example", names, true, true, true},
+		{"leaf.example", []string{"other.example"}, true, false, true},
+		{"", names, false, false, false},
+		{"192.0.2.1", names, false, false, false},
+		{"[2001:db8::1]", names, false, false, false},
+		{"*.example", names, false, false, false},
+		{"a..example", names, false, false, false},
+	} {
+		hs := TLSHandshake{HasClientHello: true, ClientHello: TLSClientHello{SNI: tc.sni},
+			Certificates: []TLSCertificate{{DNSNames: tc.names, SANsTruncated: tc.truncated}, {DNSNames: []string{"leaf.example"}}}}
+		if match, known := hs.ServerNameMatch(); match != tc.match || known != tc.known {
+			t.Errorf("ServerNameMatch(%q, %d names) = %t,%t, want %t,%t", tc.sni, len(tc.names), match, known, tc.match, tc.known)
+		}
+	}
+}
+
+func TestTLSCaptureCertificateObservations(t *testing.T) {
+	chain := sanTestChain(t, []string{"leaf.example"}, nil, false)
+	for _, encrypted := range []bool{false, true} {
+		for _, invalid := range []bool{false, true} {
+			certs := chain
+			if invalid {
+				certs = append([][]byte{{0}}, chain...)
+			}
+			raw := sanTestCapture(t, certs, encrypted)
+			c, err := New(raw)
+			if err != nil {
+				t.Fatal(err)
+			}
+			r := bytes.NewReader(raw)
+			reader, err := NewFromReaderAt(r, r.Size())
+			if err != nil {
+				t.Fatal(err)
+			}
+			rows, err := c.TLS(raw)
+			if err != nil || len(rows) != 1 {
+				t.Fatalf("TLS: rows=%d, err=%v", len(rows), err)
+			}
+			fromReader, err := reader.TLSFromReaderAt(r)
+			if err != nil || !reflect.DeepEqual(rows, fromReader) {
+				t.Fatalf("TLSFromReaderAt parity: %v", err)
+			}
+			hs := rows[0].Handshake
+			if match, known := hs.ServerNameMatch(); match == invalid || known == invalid {
+				t.Errorf("encrypted=%t invalid=%t: match=%t known=%t", encrypted, invalid, match, known)
+			}
+			packets, err := c.Packets(raw)
+			if err != nil || len(packets) != 2 {
+				t.Fatalf("Packets: count=%d, err=%v", len(packets), err)
+			}
+			if got := hs.Certificates[0].ValidityAt(time.Unix(0, packets[1].TimestampNs)); got != TLSValidityCurrent {
+				t.Errorf("capture-time validity = %v", got)
+			}
+		}
+	}
+}
