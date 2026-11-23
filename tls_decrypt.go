@@ -17,11 +17,13 @@ import (
 
 // TLSKeyLogEntry holds traffic secrets indexed by a 32-byte TLS ClientHello.Random.
 type TLSKeyLogEntry struct {
-	ClientHandshakeSecret []byte
-	ServerHandshakeSecret []byte
-	ClientTrafficSecret0  []byte
-	ServerTrafficSecret0  []byte
-	MasterSecret          []byte
+	// ClientEarlyTrafficSecret decrypts client 0-RTT records on a resumed TLS 1.3 connection.
+	ClientEarlyTrafficSecret []byte
+	ClientHandshakeSecret    []byte
+	ServerHandshakeSecret    []byte
+	ClientTrafficSecret0     []byte
+	ServerTrafficSecret0     []byte
+	MasterSecret             []byte
 }
 
 // TLSKeyLog indexes parsed NSS SSLKEYLOGFILE secrets by the 32-byte client random.
@@ -71,6 +73,11 @@ func ParseTLSKeyLog(data []byte) (*TLSKeyLog, error) {
 		var exists bool
 		entry, exists = kl.Entries[clientRandom]
 		switch label {
+		case "CLIENT_EARLY_TRAFFIC_SECRET":
+			if len(secret) != sha256.Size && len(secret) != sha512.Size384 {
+				continue
+			}
+			entry.ClientEarlyTrafficSecret = secret
 		case "CLIENT_HANDSHAKE_TRAFFIC_SECRET":
 			entry.ClientHandshakeSecret = secret
 		case "SERVER_HANDSHAKE_TRAFFIC_SECRET":
@@ -210,6 +217,25 @@ func DecryptTLS13Records(
 	handshakeSecret []byte,
 	appSecret []byte,
 ) (handshakePlain []byte, appPlain []byte, err error) {
+	return decryptTLS13Records(stream, cipherSuite, handshakeSecret, appSecret, nil)
+}
+
+func decryptTLS13Records(stream []byte, cipherSuite uint16, handshakeSecret, appSecret, earlySecret []byte) (handshakePlain, appPlain []byte, err error) {
+	var earlyAEAD cipher.AEAD
+	var earlyIV [12]byte
+	var earlySeq uint64
+	if len(earlySecret) != 0 {
+		// The ticket's cipher suite can differ from the new ServerHello's.
+		// Each supported AES-GCM suite has a distinct traffic secret length.
+		earlySuite := TLS_AES_128_GCM_SHA256
+		if len(earlySecret) == sha512.Size384 {
+			earlySuite = TLS_AES_256_GCM_SHA384
+		}
+		earlyAEAD, earlyIV, err = deriveTLS13TrafficAEAD(earlySecret, earlySuite)
+		if err != nil {
+			return nil, nil, err
+		}
+	}
 	var hsAEAD, appAEAD cipher.AEAD
 	var hsIV, appIV [12]byte
 
@@ -234,11 +260,11 @@ func DecryptTLS13Records(
 	var hsFull, appFull bool
 	offset := 0
 
-	for offset+5 <= len(stream) {
+	for len(stream)-offset >= 5 {
 		contentType := stream[offset]
 		recVer := binary.BigEndian.Uint16(stream[offset+1 : offset+3])
 		recLen := int(binary.BigEndian.Uint16(stream[offset+3 : offset+5]))
-		if recVer < TLSVersionSSL30 || recVer > TLSVersion13 || recLen > MaxTLSRecordBytes || offset+5+recLen > len(stream) {
+		if recVer < TLSVersionSSL30 || recVer > TLSVersion13 || recLen > MaxTLSRecordBytes || recLen > len(stream)-offset-5 {
 			break
 		}
 		header := stream[offset : offset+5]
@@ -249,27 +275,30 @@ func DecryptTLS13Records(
 			continue
 		}
 
-		// Try current phase AEAD first; only transition permanently to appAEAD
-		// once appAEAD.Open actually succeeds (avoiding premature phase flip on 0-RTT).
+		// Each epoch starts at sequence zero. Advance a counter only after authentication.
 		var plain []byte
 		var decErr error
-		if !inAppPhase && hsAEAD != nil {
+		if earlyAEAD != nil {
+			nonce := xorTLS13Nonce(earlyIV, earlySeq)
+			plain, decErr = earlyAEAD.Open(nil, nonce[:], ciphertext, header)
+			if decErr == nil {
+				earlySeq++
+			} else {
+				earlyAEAD = nil // Retry this record with the later epochs at their own sequence numbers.
+			}
+		}
+		if plain == nil && !inAppPhase {
 			nonce := xorTLS13Nonce(hsIV, hsSeq)
 			plain, decErr = hsAEAD.Open(nil, nonce[:], ciphertext, header)
 			if decErr == nil {
 				hsSeq++
-			} else if appAEAD != nil {
-				appNonce := xorTLS13Nonce(appIV, appSeq)
-				if appPlain, appErr := appAEAD.Open(nil, appNonce[:], ciphertext, header); appErr == nil {
-					inAppPhase = true
-					plain, decErr = appPlain, nil
-					appSeq++
-				}
 			}
-		} else if appAEAD != nil {
+		}
+		if plain == nil && appAEAD != nil {
 			nonce := xorTLS13Nonce(appIV, appSeq)
 			plain, decErr = appAEAD.Open(nil, nonce[:], ciphertext, header)
 			if decErr == nil {
+				inAppPhase = true
 				appSeq++
 			}
 		}
@@ -287,6 +316,11 @@ func DecryptTLS13Records(
 		}
 		innerType := plain[idx]
 		innerContent := plain[:idx]
+		if earlyAEAD != nil && innerType != TLSRecordApplicationData {
+			// EndOfEarlyData ends the client early epoch.
+			earlyAEAD = nil
+			continue
+		}
 
 		if innerType != TLSRecordHandshake {
 			postHandshake = tls13PostHandshake{}
@@ -484,7 +518,8 @@ func DecryptTLS12Records(
 // DecryptedTLSStreams reassembles TCP streams and decrypts any TLS 1.2 or TLS
 // 1.3 flows matching secrets in the capture's PcapNG Decryption Secrets Blocks
 // (DSB) or extraKeyLog. Only flows with matching decryption secrets and
-// non-empty decrypted application payloads are returned.
+// non-empty decrypted application payloads are returned. With CLIENT_EARLY_TRAFFIC_SECRET,
+// the client stream includes authenticated 0-RTT application bytes in capture order.
 func (c *Capture) DecryptedTLSStreams(data []byte, extraKeyLog []byte) ([]TCPStream, error) {
 	keyLog, err := c.TLSKeyLog(extraKeyLog)
 	if err != nil || len(keyLog.Entries) == 0 {
@@ -532,7 +567,7 @@ func decryptTLSStreams(streams []TCPStream, keyLog *TLSKeyLog) []TCPStream {
 		var errC, errS error
 
 		if hsServer.ServerHello.NegotiatedVersion == TLSVersion13 || len(entry.ClientTrafficSecret0) > 0 || len(entry.ServerTrafficSecret0) > 0 {
-			_, clientApp, errC = DecryptTLS13Records(cData, suite, entry.ClientHandshakeSecret, entry.ClientTrafficSecret0)
+			_, clientApp, errC = decryptTLS13Records(cData, suite, entry.ClientHandshakeSecret, entry.ClientTrafficSecret0, entry.ClientEarlyTrafficSecret)
 			_, serverApp, errS = DecryptTLS13Records(sData, suite, entry.ServerHandshakeSecret, entry.ServerTrafficSecret0)
 		} else if len(entry.MasterSecret) > 0 {
 			clientApp, errC = DecryptTLS12Records(cData, suite, entry.MasterSecret, hsClient.ClientHello.Random, hsServer.ServerHello.Random, true)
