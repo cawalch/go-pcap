@@ -119,16 +119,18 @@ func ComputeBeaconStats(timestampsNs []int64, payloadBytes []uint64, clientBytes
 		}
 	}
 
-	out.BeaconScore = 0.65*out.PeriodicityScore + 0.35*out.PayloadUniformity
+	if medInterval > 0 {
+		out.BeaconScore = 0.65*out.PeriodicityScore + 0.35*out.PayloadUniformity
+	}
 	return out
 }
 
 func computePCR(clientBytes, serverBytes uint64) float64 {
-	total := clientBytes + serverBytes
+	total := float64(clientBytes) + float64(serverBytes)
 	if total == 0 {
 		return 0
 	}
-	return (float64(clientBytes) - float64(serverBytes)) / float64(total)
+	return (float64(clientBytes) - float64(serverBytes)) / total
 }
 
 func medianInt64(sorted []int64) int64 {
@@ -210,8 +212,10 @@ func (c *Capture) Beacons(data []byte) ([]FlowBeacon, error) {
 		fa := &flows[idx]
 		if frame.SrcAddr == fa.srcAddr && frame.SrcPort == fa.srcPort {
 			fa.clientBytes += uint64(frame.PayloadLength)
-			fa.timestamps = append(fa.timestamps, pkt.TimestampNs)
-			fa.sizes = append(fa.sizes, uint64(frame.PayloadLength))
+			if frame.IPProtocol != IPProtoTCP || frame.PayloadLength > 0 {
+				fa.timestamps = append(fa.timestamps, pkt.TimestampNs)
+				fa.sizes = append(fa.sizes, uint64(frame.PayloadLength))
+			}
 		} else {
 			fa.serverBytes += uint64(frame.PayloadLength)
 		}

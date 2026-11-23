@@ -1,10 +1,13 @@
 package pcap
 
 import (
+	"cmp"
 	"encoding/binary"
+	"errors"
 	"fmt"
 	"math"
 	"net/netip"
+	"slices"
 	"strings"
 )
 
@@ -94,6 +97,7 @@ type DNSMessage struct {
 
 // DNSRecord associates a parsed [DNSMessage] with its packet and flow indices
 // in a [Capture].
+// For TCP, PacketIndex and TimestampNs identify the packet containing the first length-prefix byte.
 type DNSRecord struct {
 	PacketIndex int
 	FlowIndex   int
@@ -467,7 +471,7 @@ func decodeDNSNameBounded(payload []byte, start int, limit int, allowCompression
 				anomalies.InvalidCompressionPtr = true
 				return "", 0, fmt.Errorf("%w: DNS label compression exceeds %d jumps", ErrDNSLimit, MaxDNSCompressionJumps)
 			}
-			if ptr >= cur || ptr >= len(payload) {
+			if ptr < 12 || ptr >= cur || ptr >= len(payload) {
 				anomalies.InvalidCompressionPtr = true
 				return "", 0, fmt.Errorf("%w: invalid DNS compression pointer %d at offset %d", ErrInvalidDNS, ptr, cur)
 			}
@@ -496,6 +500,7 @@ func scanDNS(source ipFrameSource) ([]DNSRecord, error) {
 	var table flowIndexTable
 	var defrag ipFragAccumulator
 	var records []DNSRecord
+	var tcp tcpMessageCollector
 
 	err := source.walk(func(pkt PacketRecord, frame Frame, l4 []byte) error {
 
@@ -565,30 +570,7 @@ func scanDNS(source ipFrameSource) ([]DNSRecord, error) {
 			})
 
 		case IPProtoTCP:
-			if len(l4) < 14 {
-				return nil
-			}
-			dnsLen := int(binary.BigEndian.Uint16(l4[0:2]))
-			if dnsLen < 12 || 2+dnsLen > len(l4) {
-				return nil
-			}
-			msg, err := ParseDNS(l4[2 : 2+dnsLen])
-			if err != nil {
-				return nil
-			}
-			if len(records) >= MaxDNSMessagesPerScan {
-				return fmt.Errorf("%w: exceeds %d messages", ErrDNSLimit, MaxDNSMessagesPerScan)
-			}
-			records = append(records, DNSRecord{
-				PacketIndex: pkt.Index,
-				FlowIndex:   flowIdx,
-				SrcAddr:     frame.SrcAddr,
-				DstAddr:     frame.DstAddr,
-				SrcPort:     frame.SrcPort,
-				DstPort:     frame.DstPort,
-				TimestampNs: pkt.TimestampNs,
-				Message:     msg,
-			})
+			return tcp.add(pkt, frame, flowIdx, l4)
 		}
 		return nil
 	})
@@ -596,6 +578,23 @@ func scanDNS(source ipFrameSource) ([]DNSRecord, error) {
 		return nil, err
 	}
 
+	err = tcp.walk(2, 12, 65535, func(dir *tcpMessageDirection, pkt messagePacket, data []byte) error {
+		msg, err := ParseDNS(data)
+		if err != nil {
+			return nil
+		}
+		if len(records) >= MaxDNSMessagesPerScan {
+			return fmt.Errorf("%w: exceeds %d messages", ErrDNSLimit, MaxDNSMessagesPerScan)
+		}
+		records = append(records, DNSRecord{PacketIndex: pkt.index, TimestampNs: pkt.timestamp, FlowIndex: dir.flowIndex, SrcAddr: dir.src.Addr(), DstAddr: dir.dst.Addr(), SrcPort: dir.src.Port(), DstPort: dir.dst.Port(), Message: msg})
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	if len(tcp.directions) > 0 {
+		slices.SortStableFunc(records, func(a, b DNSRecord) int { return cmp.Compare(a.PacketIndex, b.PacketIndex) })
+	}
 	return records, nil
 }
 
@@ -612,6 +611,7 @@ func (c *Capture) HasDNSQuery(data []byte, qname string) (bool, error) {
 	r := SafeReader{data: data, size: int64(len(data))}
 	var defrag ipFragAccumulator
 	found := false
+	var tcp tcpMessageCollector
 
 	err := c.walkPackets(&r, func(pkt PacketRecord) error {
 		payload, err := r.Slice(pkt.PayloadOffset, pkt.PayloadLength)
@@ -636,21 +636,14 @@ func (c *Capture) HasDNSQuery(data []byte, qname string) (bool, error) {
 		if !isDNSPort(frame.SrcPort) && !isDNSPort(frame.DstPort) {
 			return nil
 		}
-		l4 := payload[frame.PayloadOffset : frame.PayloadOffset+frame.PayloadLength]
-		dnsPayload := l4
 		if frame.IPProtocol == IPProtoTCP {
-			if len(l4) < 14 {
-				return nil
-			}
-			dnsLen := int(binary.BigEndian.Uint16(l4[0:2]))
-			if dnsLen < 12 || 2+dnsLen > len(l4) {
-				return nil
-			}
-			dnsPayload = l4[2 : 2+dnsLen]
-		} else if frame.IPProtocol != IPProtoUDP {
+			return tcp.add(pkt, frame, 0, payload[frame.PayloadOffset:frame.PayloadOffset+frame.PayloadLength])
+		}
+		if frame.IPProtocol != IPProtoUDP {
 			return nil
 		}
-		if dnsPayloadHasQuery(dnsPayload, target) {
+		l4 := payload[frame.PayloadOffset : frame.PayloadOffset+frame.PayloadLength]
+		if dnsPayloadHasQuery(l4, target) {
 			found = true
 			return errStopWalk
 		}
@@ -659,7 +652,19 @@ func (c *Capture) HasDNSQuery(data []byte, qname string) (bool, error) {
 	if err != nil {
 		return false, err
 	}
-	return found, nil
+	if found {
+		return true, nil
+	}
+	err = tcp.walk(2, 12, 65535, func(_ *tcpMessageDirection, _ messagePacket, data []byte) error {
+		if dnsPayloadHasQuery(data, target) {
+			return errStopWalk
+		}
+		return nil
+	})
+	if errors.Is(err, errStopWalk) {
+		return true, nil
+	}
+	return false, err
 }
 
 func dnsPayloadHasQuery(payload []byte, target string) bool {
@@ -707,7 +712,10 @@ type DNSDomainStats struct {
 // of the subdomain prefix of qname (excluding its final two registrable apex
 // labels, or over the entire name if qname has two or fewer labels).
 func DNSLabelEntropy(qname string) float64 {
-	sub, _ := splitDNSSubdomainAndApex(qname)
+	sub, apex := splitDNSSubdomainAndApex(qname)
+	if sub == "" {
+		sub = apex
+	}
 	if sub == "" {
 		return 0
 	}
@@ -745,7 +753,7 @@ func splitDNSSubdomainAndApex(qname string) (subdomain string, apex string) {
 	}
 	lastDot := strings.LastIndexByte(clean, '.')
 	if lastDot <= 0 {
-		return clean, clean
+		return "", clean
 	}
 	secondLastDot := strings.LastIndexByte(clean[:lastDot], '.')
 	if secondLastDot < 0 {
@@ -801,13 +809,17 @@ func (c *Capture) DNSDomainStats(data []byte) ([]DNSDomainStats, error) {
 				})
 			}
 			da := &accums[idx]
-			if !msg.IsResponse {
-				da.queryCount++
-			} else if msg.RCode == DNSRCodeNameError {
-				da.nxCount++
+			if msg.IsResponse {
+				if msg.RCode == DNSRCodeNameError {
+					da.nxCount++
+				}
+				continue
 			}
+			da.queryCount++
 			if sub != "" {
-				da.subdomains[sub] = struct{}{}
+				if len(da.subdomains) < MaxDNSMessagesPerScan {
+					da.subdomains[sub] = struct{}{}
+				}
 				ent := DNSLabelEntropy(qname)
 				if ent > da.maxEntropy {
 					da.maxEntropy = ent
