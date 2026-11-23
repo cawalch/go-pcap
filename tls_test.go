@@ -14,6 +14,7 @@ import (
 	"errors"
 	"fmt"
 	"math/big"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -501,5 +502,82 @@ func TestTLSDecryptEdgeCasesAndServerFirstOrder(t *testing.T) {
 	parseClientSupportedVersions([]byte{4, 0x7f, 0x1c, 0x03, 0x04}, &chDraft)
 	if chDraft.NegotiatedVersion != TLSVersion13 || ja4VersionCode(chDraft.NegotiatedVersion) != "13" {
 		t.Fatalf("supported_versions with draft = (%#04x, %q), want (0x0304, \"13\")", chDraft.NegotiatedVersion, ja4VersionCode(chDraft.NegotiatedVersion))
+	}
+}
+
+func TestTLSHandshakeRecordBudget(t *testing.T) {
+	// Use distinct record versions to verify that empty records do not supply
+	// the hello's record version.
+	empty := []byte{TLSRecordHandshake, 3, 1, 0, 0}
+	warning := []byte{TLSRecordAlert, 3, 3, 0, 2, 1, 100}
+	hello := buildTLS13ClientHelloRecord("example.org", "h2")
+	want, err := ParseTLSRecords(hello)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var fragments []byte
+	for _, b := range hello[5:] {
+		fragments = append(fragments, TLSRecordHandshake, 3, 3, 0, 1, b)
+		if len(fragments) == 6 {
+			fragments = append(fragments, warning...)
+		}
+	}
+	padding := MaxTLSHandshakeRecords - (len(hello) - 5) - 1
+	if padding < 1 {
+		t.Fatal("fixture exceeds record budget")
+	}
+	atLimit := append(bytes.Repeat(empty, padding), fragments...)
+	overLimit := append(bytes.Clone(empty), atLimit...)
+	for _, tc := range []struct {
+		name    string
+		wire    []byte
+		wantErr error
+	}{
+		{"one-byte records at limit", atLimit, nil},
+		{"one extra empty record", overLimit, ErrTLSLimit},
+		{"one extra warning", append(append(bytes.Clone(atLimit[:5]), warning...), atLimit[5:]...), ErrTLSLimit},
+		{"application data after limit", append(bytes.Clone(atLimit), bytes.Repeat([]byte{TLSRecordApplicationData, 3, 3, 0, 1, 0}, 256)...), nil},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := ParseTLSRecords(tc.wire)
+			if !errors.Is(err, tc.wantErr) || err == nil && !reflect.DeepEqual(got, want) {
+				t.Fatalf("ParseTLSRecords = %+v, %v", got, err)
+			}
+			raw := keyShareCapture(tc.wire, nil, 1)
+			c, err := New(raw)
+			if err != nil {
+				t.Fatal(err)
+			}
+			r := bytes.NewReader(raw)
+			cr, err := NewFromReaderAt(r, r.Size())
+			if err != nil {
+				t.Fatal(err)
+			}
+			rows := checkReaderParity(t, raw, c.TLS, cr.TLSFromReaderAt)
+			if tc.wantErr != nil {
+				if len(rows) != 0 {
+					t.Fatalf("got %d records for over-limit handshake", len(rows))
+				}
+			} else if len(rows) != 1 || !reflect.DeepEqual(rows[0].Handshake.ClientHello, want.ClientHello) {
+				t.Fatalf("capture hello mismatch: %+v", rows)
+			}
+		})
+	}
+	// The record budget still permits reporting a short application record
+	// following a complete one within the inspected prefix.
+	tail := []byte{TLSRecordApplicationData, 3, 3, 0, 1, 0, TLSRecordApplicationData, 3, 3, 0, 1}
+	short, err := ParseTLSRecords(append(bytes.Clone(hello), tail...))
+	if err != nil || !short.HasClientHello || !short.Anomalies.TruncatedRecord {
+		t.Fatalf("short application tail: %+v, %v", short, err)
+	}
+	for _, alert := range [][]byte{
+		{TLSRecordAlert, 3, 3, 0, 2, 2, 40}, // Fatal.
+		{TLSRecordAlert, 3, 3, 0, 2, 1, 0},  // close_notify.
+		{TLSRecordAlert, 3, 3, 0, 1, 1},     // Incomplete alert message.
+	} {
+		wire := bytes.Replace(fragments, warning, alert, 1)
+		if _, err := ParseTLSRecords(wire); !errors.Is(err, ErrInvalidTLS) {
+			t.Errorf("alert %x: got %v", alert, err)
+		}
 	}
 }

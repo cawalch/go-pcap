@@ -448,12 +448,11 @@ func decryptTLSStreams(streams []TCPStream, keyLog *TLSKeyLog) []TCPStream {
 		clientBuf, serverBuf := st.Client, st.Server
 		cData, sData := clientBuf.Data, serverBuf.Data
 		srcAddr, dstAddr, srcPort, dstPort := st.SrcAddr, st.DstAddr, st.SrcPort, st.DstPort
-		cOff, sOff := findTLSHandshakeStart(cData), findTLSHandshakeStart(sData)
-		if cOff < 0 || sOff < 0 {
+		if !hasTLSHandshakeStart(cData) || !hasTLSHandshakeStart(sData) {
 			continue
 		}
-		hsClient, err1 := ParseTLSRecords(cData[cOff:])
-		hsServer, err2 := ParseTLSRecords(sData[sOff:])
+		hsClient, err1 := ParseTLSRecords(cData)
+		hsServer, err2 := ParseTLSRecords(sData)
 		if err1 != nil || err2 != nil {
 			continue
 		}
