@@ -318,9 +318,13 @@ const (
 	MaxReassembledIPPacketBytes = 65535
 
 	// HTTP/2 parser limits.
-	MaxHTTP2FramesPerStream = 1024
-	MaxHTTP2Settings        = 64
-	MaxHTTP2FramePayload    = 1 << 20
+	MaxHTTP2FramesPerStream     = 1024
+	MaxHTTP2Settings            = 64
+	MaxHTTP2DynamicTableBytes   = 4096
+	MaxHTTP2DynamicTableEntries = 128
+	MaxHTTP2HeaderBlockBytes    = 64 << 10
+	MaxHTTP2DecodedHeaderBytes  = 4 << 20 // Logical header storage budget, shared per scan.
+	MaxHTTP2FramePayload        = 1 << 20
 
 	// Kerberos v5 and RDP parser limits.
 	MaxKRB5PacketBytes    = 64 << 10

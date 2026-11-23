@@ -445,7 +445,8 @@ func decryptTLSStreams(streams []TCPStream, keyLog *TLSKeyLog) []TCPStream {
 	var decrypted []TCPStream
 	for i := range streams {
 		st := &streams[i]
-		cData, sData := st.Client.Data, st.Server.Data
+		clientBuf, serverBuf := st.Client, st.Server
+		cData, sData := clientBuf.Data, serverBuf.Data
 		srcAddr, dstAddr, srcPort, dstPort := st.SrcAddr, st.DstAddr, st.SrcPort, st.DstPort
 		cOff, sOff := findTLSHandshakeStart(cData), findTLSHandshakeStart(sData)
 		if cOff < 0 || sOff < 0 {
@@ -459,6 +460,7 @@ func decryptTLSStreams(streams []TCPStream, keyLog *TLSKeyLog) []TCPStream {
 		if !hsClient.HasClientHello && hsServer.HasClientHello && hsClient.HasServerHello {
 			hsClient, hsServer = hsServer, hsClient
 			cData, sData = sData, cData
+			clientBuf, serverBuf = serverBuf, clientBuf
 			srcAddr, dstAddr = dstAddr, srcAddr
 			srcPort, dstPort = dstPort, srcPort
 		}
@@ -483,14 +485,15 @@ func decryptTLSStreams(streams []TCPStream, keyLog *TLSKeyLog) []TCPStream {
 		if (errC != nil && errS != nil) || (len(clientApp) == 0 && len(serverApp) == 0) {
 			continue
 		}
+		clientBuf.Data, serverBuf.Data = clientApp, serverApp
 		decrypted = append(decrypted, TCPStream{
 			FlowIndex: st.FlowIndex,
 			SrcAddr:   srcAddr,
 			DstAddr:   dstAddr,
 			SrcPort:   srcPort,
 			DstPort:   dstPort,
-			Client:    StreamBuffer{Data: clientApp},
-			Server:    StreamBuffer{Data: serverApp},
+			Client:    clientBuf,
+			Server:    serverBuf,
 		})
 	}
 	return decrypted
