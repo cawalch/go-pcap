@@ -33,6 +33,19 @@ for the README, repository documentation, and prose in code comments. Follow
 - Start exported API comments with the identifier's name. Link related symbols
   with Go doc links, such as `[New]`.
 
+## Merge a change
+
+Open a pull request against `main` and resolve its review conversations.
+The owner starts CI on the reviewed head branch with
+`gh workflow run ci.yml --ref BRANCH`. For a fork contribution, the owner
+can push the reviewed commit to a branch in this repository and dispatch
+there. Use the same commit SHA as the pull request head.
+
+Keep the branch up to date with `main`. If the head changes, dispatch CI
+for the new commit. Squash-merge once both Go test jobs, macOS and Windows
+tests, lint, and the vulnerability check pass. The sole maintainer can
+merge their own PR after these checks.
+
 ## Validate a change
 
 From the repository root, format the Go files and run the tests and static checks:
