@@ -544,3 +544,34 @@ reading packets. Each kernel counter is 32 bits, so poll before it advances by
 2³² packets. The received count follows the backend's filter accounting. The
 drop count measures capture-buffer loss. Windows and other backends without
 counters return `ErrLiveCaptureUnsupported`.
+
+### DHCPv4 address assignments
+
+Use `Capture.DHCPv4` or `Capture.DHCPv4FromReaderAt` to read Discover,
+Offer, Request, ACK and NAK messages in capture order. Each observation
+includes its packet index, timestamp and capture interface. To find an
+acknowledged allocation, select ACK records with a valid `YourAddr`. A Request
+can carry option 50 (`RequestedAddr`) or the client's existing address
+(`ClientAddr`) during renewal. `NextServerAddr` identifies the BOOTP next
+server. DHCP option 54 supplies `ServerIdentifier`. A later observation can
+associate the same address with another client.
+
+The scan accepts complete, unfragmented IPv4 UDP messages on client/server
+ports 68/67, including relay-to-server and server-to-relay datagrams on 67/67.
+It verifies the BOOTP request/reply operation, hardware address bounds, magic
+cookie and option boundaries. Missing hardware addresses and client identifiers
+are nil. Client identifiers are opaque bytes. `HasLease` and `HasHostname`
+distinguish absent options from an advertised zero duration or empty hostname.
+
+Each datagram can contain up to 4096 bytes and 128 non-padding options across
+all fields. The parser skips padding, requires an End marker in every option
+field and ignores bytes after End. Option 52 can select the file field, the
+server-name field, or both, in that order. For repeated options the first
+value wins. The parser validates subsequent lengths and does not concatenate
+split values. Hostnames and client identifiers each retain at most 255 bytes.
+Malformed and oversized messages are skipped.
+
+The scan returns `ErrDHCPv4Limit` above 4096 observations or 64 MiB of candidate
+datagrams. ReaderAt also applies the shared 64 MiB read budget to framing,
+prefixes and candidate payloads. Ordinary UDP traffic only requires header
+inspection. The default flow scan runs independently of DHCP.
