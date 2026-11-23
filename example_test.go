@@ -428,3 +428,21 @@ func ExampleCapture_BeaconsWithOptions() {
 	// 198.51.100.80 443 1
 	// 198.51.100.81 443 1
 }
+
+func ExampleCapture_DecryptedTLSStreams_earlyData() {
+	raw, err := os.ReadFile("testdata/rfc8448-0rtt.pcapng")
+	if err != nil {
+		log.Fatal(err)
+	}
+	c, err := pcap.New(raw)
+	if err != nil {
+		log.Fatal(err)
+	}
+	streams, err := c.DecryptedTLSStreams(raw, nil)
+	if err != nil {
+		log.Fatal(err)
+	}
+	// The trace sends six early bytes followed by 50 client application bytes.
+	fmt.Println(string(streams[0].Client.Data[:6]), len(streams[0].Client.Data))
+	// Output: ABCDEF 56
+}

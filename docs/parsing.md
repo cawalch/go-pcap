@@ -547,6 +547,13 @@ and TLS 1.3 (`CLIENT_TRAFFIC_SECRET_0` / `SERVER_TRAFFIC_SECRET_0` with
 secrets embedded in PcapNG Decryption Secrets Blocks (`DSB`) or supplied in
 `extraKeyLog` (`SSLKEYLOGFILE` format).
 
+When the key log includes `CLIENT_EARLY_TRAFFIC_SECRET`, the client stream
+includes authenticated 0-RTT application bytes followed by recovered 1-RTT
+bytes in wire order. Both epochs share the directional output limit. These
+bytes show what the client sent. Determining whether the server accepted early
+data requires inspecting the handshake. The keyed example capture uses the
+published records and secrets from [RFC 8448 section 4](https://www.rfc-editor.org/rfc/rfc8448#section-4).
+
 For example, if the client sends a TLS 1.3 `KeyUpdate` during an HTTP request,
 the client traffic secret for generation zero lets the parser recover request
 bytes both before and after the update. The server keeps its current traffic
