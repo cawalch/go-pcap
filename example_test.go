@@ -2,6 +2,7 @@ package pcap_test
 
 import (
 	"bytes"
+	"compress/gzip"
 	"encoding/binary"
 	"fmt"
 	"log"
@@ -141,6 +142,28 @@ func ExampleParseHTTPRequest() {
 		req.Method, req.Host, req.Body, req.JA4H[:12])
 	// Output:
 	// method=POST host=api.example.com body=hello ja4h=po11cn04enus
+}
+
+func ExampleParseHTTPResponse_contentEncoding() {
+	var compressed bytes.Buffer
+	zw := gzip.NewWriter(&compressed)
+	if _, err := zw.Write([]byte("hello")); err != nil {
+		log.Fatal(err)
+	}
+	if err := zw.Close(); err != nil {
+		log.Fatal(err)
+	}
+
+	raw := fmt.Appendf(nil, "HTTP/1.1 200 OK\r\nContent-Encoding: gzip\r\nContent-Length: %d\r\n\r\n", compressed.Len())
+	raw = append(raw, compressed.Bytes()...)
+	resp, consumed, err := pcap.ParseHTTPResponse(raw)
+	if err != nil {
+		log.Fatal(err)
+	}
+	fmt.Printf("encoding=%s decoded=%t body=%s bytes=%d complete=%t\n",
+		resp.ContentEncoding, resp.IsDecompressed, resp.Body, resp.BodyLength, consumed == len(raw))
+	// Output:
+	// encoding=gzip decoded=true body=hello bytes=5 complete=true
 }
 
 func ExampleJA4T() {

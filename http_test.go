@@ -2,8 +2,14 @@ package pcap
 
 import (
 	"bytes"
+	"compress/flate"
+	"compress/gzip"
+	"compress/zlib"
 	"encoding/binary"
 	"errors"
+	"fmt"
+	"io"
+	"slices"
 	"strings"
 	"testing"
 )
@@ -154,5 +160,193 @@ func TestHTTPKeepAlivePipeliningAndChunkedTrailers(t *testing.T) {
 	}
 	if !recs[5].IsResponse || string(recs[5].Response.Body) != "end" {
 		t.Fatalf("rec[5] = %+v, want trailing 200 end", recs[5])
+	}
+}
+
+func compressHTTPTestBody(t testing.TB, coding string, body []byte) []byte {
+	t.Helper()
+	var buf bytes.Buffer
+	var w io.WriteCloser
+	switch coding {
+	case "gzip":
+		w = gzip.NewWriter(&buf)
+	case "zlib":
+		w = zlib.NewWriter(&buf)
+	case "raw":
+		var err error
+		w, err = flate.NewWriter(&buf, flate.BestSpeed)
+		if err != nil {
+			t.Fatal(err)
+		}
+	default:
+		t.Fatalf("unexpected test coding %q", coding)
+	}
+	if _, err := w.Write(body); err != nil {
+		t.Fatal(err)
+	}
+	if err := w.Close(); err != nil {
+		t.Fatal(err)
+	}
+	return buf.Bytes()
+}
+
+func TestHTTPContentDecoding(t *testing.T) {
+	payload := []byte("carved HTTP payload")
+	gz := compressHTTPTestBody(t, "gzip", payload)
+	zlibBody := compressHTTPTestBody(t, "zlib", payload)
+	corruptZlib := bytes.Clone(zlibBody)
+	corruptZlib[len(corruptZlib)-1] ^= 1
+	corruptGzip := bytes.Clone(gz)
+	corruptGzip[len(corruptGzip)-8] ^= 1
+
+	for _, tc := range []struct {
+		name, coding string
+		wire, want   []byte
+		decoded      bool
+		invalid      bool
+	}{
+		{"gzip", "GZip", gz, payload, true, false},
+		{"alias", "x-gzip", gz, payload, true, false},
+		{"gzip members", "gzip", append(bytes.Clone(gz), gz...), bytes.Repeat(payload, 2), true, false},
+		{"zlib", "deflate", zlibBody, payload, true, false},
+		{"raw deflate", "deflate", compressHTTPTestBody(t, "raw", payload), payload, true, false},
+		{"empty decoded gzip", "gzip", compressHTTPTestBody(t, "gzip", nil), nil, true, false},
+		{"zlib checksum", "deflate", corruptZlib, corruptZlib, false, true},
+		{"gzip checksum", "gzip", corruptGzip, corruptGzip, false, true},
+		{"truncated gzip", "gzip", gz[:len(gz)-1], gz[:len(gz)-1], false, true},
+		{"gzip header", "gzip", []byte("not gzip"), []byte("not gzip"), false, true},
+		{"unsupported coding", "br", gz, gz, false, false},
+		{"stacked codings", "gzip, br", gz, gz, false, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			header := fmt.Sprintf("POST /upload HTTP/1.1\r\ncontent-encoding: %s\r\nContent-Length: %d\r\n\r\n", tc.coding, len(tc.wire))
+			next := "GET /next HTTP/1.1\r\n\r\n"
+			stream := append(append([]byte(header), tc.wire...), next...)
+			req, consumed, err := ParseHTTPRequest(stream)
+			if err != nil || consumed != len(header)+len(tc.wire) ||
+				req.BodyOffset != len(header) || req.BodyLength != len(tc.want) || !bytes.Equal(req.Body, tc.want) ||
+				req.ContentEncoding != tc.coding || req.IsDecompressed != tc.decoded ||
+				req.Anomalies != (HTTPAnomalies{InvalidContentEncoding: tc.invalid}) {
+				t.Fatalf("request = %+v, consumed = %d, err = %v", req, consumed, err)
+			}
+			follow, _, err := ParseHTTPRequest(stream[consumed:])
+			if err != nil || follow.Path != "/next" {
+				t.Fatalf("following request = %+v, err = %v", follow, err)
+			}
+			clear(stream[:consumed])
+			if !bytes.Equal(req.Body, tc.want) {
+				t.Fatal("changing the input changed the returned body")
+			}
+		})
+	}
+
+	t.Run("multiple fields", func(t *testing.T) {
+		header := fmt.Sprintf("HTTP/1.1 200 OK\r\nContent-Encoding: gzip\r\nContent-Encoding: gzip\r\nContent-Length: %d\r\n\r\n", len(gz))
+		resp, _, err := ParseHTTPResponse(append([]byte(header), gz...))
+		if err != nil || resp.ContentEncoding != "gzip, gzip" || resp.IsDecompressed ||
+			resp.Anomalies != (HTTPAnomalies{}) || !bytes.Equal(resp.Body, gz) {
+			t.Fatalf("response = %+v, err = %v", resp, err)
+		}
+	})
+
+	t.Run("bodyless response", func(t *testing.T) {
+		header := "HTTP/1.1 304 Not Modified\r\nContent-Encoding: gzip\r\nContent-Length: 100\r\n\r\n"
+		resp, consumed, err := ParseHTTPResponse([]byte(header + "HTTP/1.1 200 OK\r\n\r\n"))
+		if err != nil || consumed != len(header) || resp.BodyOffset != len(header) || len(resp.Body) != 0 ||
+			resp.ContentEncoding != "gzip" || resp.IsDecompressed || resp.Anomalies != (HTTPAnomalies{}) {
+			t.Fatalf("response = %+v, consumed = %d, err = %v", resp, consumed, err)
+		}
+	})
+}
+
+func TestHTTPContentDecodingSizeLimit(t *testing.T) {
+	for _, coding := range []string{"gzip", "deflate"} {
+		t.Run(coding, func(t *testing.T) {
+			for _, length := range []int{MaxHTTPBodyBytes, MaxHTTPBodyBytes + 4096} {
+				payload := bytes.Repeat([]byte("a"), length)
+				format := coding
+				if coding == "deflate" {
+					format = "zlib"
+				}
+				wire := compressHTTPTestBody(t, format, payload)
+				header := fmt.Sprintf("HTTP/1.1 200 OK\r\nContent-Encoding: %s\r\nTransfer-Encoding: chunked\r\n\r\n", coding)
+				message := fmt.Appendf([]byte(header), "%x\r\n%s\r\n%x\r\n%s\r\n0\r\nX-Trailer: done\r\n\r\n",
+					7, wire[:7], len(wire)-7, wire[7:])
+				stream := append(bytes.Clone(message), "HTTP/1.1 204 No Content\r\n\r\n"...)
+				resp, consumed, err := ParseHTTPResponse(stream)
+				if err != nil || consumed != len(message) || resp.BodyOffset != len(header) ||
+					!resp.IsDecompressed || resp.ContentEncoding != coding || resp.BodyLength != MaxHTTPBodyBytes ||
+					resp.Anomalies != (HTTPAnomalies{DecompressionLimitExceeded: length > MaxHTTPBodyBytes}) ||
+					!bytes.Equal(resp.Body, payload[:MaxHTTPBodyBytes]) {
+					t.Fatalf("length %d: consumed = %d, offset = %d, decoded = %t, body length = %d, anomalies = %+v, err = %v",
+						length, consumed, resp.BodyOffset, resp.IsDecompressed, resp.BodyLength, resp.Anomalies, err)
+				}
+				follow, _, err := ParseHTTPResponse(stream[consumed:])
+				if err != nil || follow.StatusCode != 204 {
+					t.Fatalf("following response = %+v, err = %v", follow, err)
+				}
+			}
+		})
+	}
+}
+
+func TestCaptureHTTPDecodedBodyBudget(t *testing.T) {
+	gz := compressHTTPTestBody(t, "gzip", bytes.Repeat([]byte("x"), MaxHTTPBodyBytes))
+	bad := bytes.Clone(gz)
+	bad[len(bad)-8] ^= 1
+	small := compressHTTPTestBody(t, "gzip", []byte("x"))
+	gzHeader := fmt.Sprintf("Content-Encoding: gzip\r\nContent-Length: %d\r\n\r\n", len(gz))
+	n := MaxHTTPDecodedBodyBytesPerScan / MaxHTTPBodyBytes
+	for _, tc := range []struct {
+		name   string
+		client []byte
+		extra  bool
+	}{
+		{"exact budget", gz, false},
+		{"over budget", gz, true},
+		{"failed decoding counts", bad, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			client := bytes.Repeat(append([]byte("POST / HTTP/1.1\r\n"+gzHeader), tc.client...), n/2)
+			server := bytes.Repeat(append([]byte("HTTP/1.1 200 OK\r\n"+gzHeader), gz...), n/2)
+			if tc.extra {
+				server = fmt.Appendf(server, "HTTP/1.1 200 OK\r\nContent-Encoding: gzip\r\nContent-Length: %d\r\n\r\n%s", len(small), small)
+			}
+			clientAddr, serverAddr := [4]byte{192, 0, 2, 1}, [4]byte{192, 0, 2, 2}
+			var frames [][]byte
+			seq := uint32(1)
+			for chunk := range slices.Chunk(client, 32<<10) {
+				frames = append(frames, buildEthernetIPv4TCPFrame(clientAddr, serverAddr, 45000, 80, seq, 1, TCPFlagPSH|TCPFlagACK, chunk))
+				seq += uint32(len(chunk))
+			}
+			ack := seq
+			seq = 1
+			for chunk := range slices.Chunk(server, 32<<10) {
+				frames = append(frames, buildEthernetIPv4TCPFrame(serverAddr, clientAddr, 80, 45000, seq, ack, TCPFlagPSH|TCPFlagACK, chunk))
+				seq += uint32(len(chunk))
+			}
+			raw := buildClassicPCAP(binary.LittleEndian, false, LinkTypeEthernet, 65535, frames)
+			c, err := New(raw)
+			if err != nil {
+				t.Fatal(err)
+			}
+			records, err := c.HTTP(raw)
+			if tc.extra {
+				if records != nil || !errors.Is(err, ErrHTTPLimit) {
+					t.Fatalf("Capture.HTTP() = (%d records, %v), want no records and ErrHTTPLimit", len(records), err)
+				}
+				return
+			}
+			if err != nil || len(records) != n {
+				t.Fatalf("Capture.HTTP() = (%d records, %v), want %d records", len(records), err, n)
+			}
+			firstRequestLen := len("POST / HTTP/1.1\r\n") + len(gzHeader) + len(gz)
+			firstResponseLen := len("HTTP/1.1 200 OK\r\n") + len(gzHeader) + len(gz)
+			if records[1].Request.BodyOffset != firstRequestLen+len("POST / HTTP/1.1\r\n")+len(gzHeader) ||
+				records[n/2+1].Response.BodyOffset != firstResponseLen+len("HTTP/1.1 200 OK\r\n")+len(gzHeader) ||
+				!records[1].Request.IsDecompressed || !records[n/2+1].Response.IsDecompressed {
+				t.Fatal("Capture.HTTP() lost wire offsets or decoded content after a pipelined message")
+			}
+		})
 	}
 }
