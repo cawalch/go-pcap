@@ -74,16 +74,16 @@ func proxyTestCapture(t *testing.T, request, response []byte) (*Capture, []byte)
 
 func TestProxyCaptureProtocols(t *testing.T) {
 	t.Run("HTTP", func(t *testing.T) {
-		c, raw := proxyTestCapture(t, []byte("POST /inner HTTP/1.1\r\nContent-Length: 1\r\n\r\nQ"), []byte("HTTP/1.1 200 OK\r\nContent-Length: 1\r\n\r\nR"))
+		c, raw := proxyTestCapture(t, []byte("POST /inner HTTP/1.1\r\nHost: inner.example\r\nContent-Length: 1\r\n\r\nQ"), []byte("HTTP/1.1 200 OK\r\nContent-Length: 1\r\n\r\nR"))
 		rows, err := c.HTTP(raw)
-		if err != nil || len(rows) != 2 || rows[0].Request.Path != "/inner" || rows[1].Response.StatusCode != 200 || rows[0].SrcPort != 51000 {
+		if err != nil || len(rows) != 4 || rows[0].Request.Method != "CONNECT" || rows[0].Request.Path != "proxy-target.example:443" || len(rows[1].Response.Body) != 0 || rows[2].Request.Path != "/inner" || rows[2].Request.Host != "inner.example" || rows[3].Response.StatusCode != 200 || rows[2].SrcPort != 51000 {
 			t.Fatalf("HTTP: %+v %v", rows, err)
 		}
 		streams, err := c.Streams(raw)
 		if err != nil || len(streams) != 1 {
 			t.Fatal(streams, err)
 		}
-		if streams[0].Client.Data[rows[1].Response.BodyOffset] != 'R' || streams[0].Server.Data[rows[0].Request.BodyOffset] != 'Q' {
+		if streams[0].Client.Data[rows[3].Response.BodyOffset] != 'R' || streams[0].Server.Data[rows[2].Request.BodyOffset] != 'Q' {
 			t.Fatal("wire body offsets")
 		}
 	})
@@ -92,6 +92,10 @@ func TestProxyCaptureProtocols(t *testing.T) {
 		req := append(buildTLS13ClientHelloRecord("inner.example", "h2"), encryptTLS13AppDataRecord(t, secret, TLS_AES_128_GCM_SHA256, 0, TLSRecordApplicationData, []byte("request"))...)
 		resp := append(buildTLSServerHelloRecord(), encryptTLS13AppDataRecord(t, secret, TLS_AES_128_GCM_SHA256, 0, TLSRecordApplicationData, []byte("response"))...)
 		c, raw := proxyTestCapture(t, req, resp)
+		outer, err := c.HTTP(raw)
+		if err != nil || len(outer) != 2 || outer[0].Request.Path != "proxy-target.example:443" || outer[1].Response.StatusCode != 200 || len(outer[1].Response.Body) != 0 {
+			t.Fatal(outer, err)
+		}
 		checkReaderParity(t, raw, c.TLS, c.TLSFromReaderAt)
 		tls, err := c.TLSWithKeyLog(raw, nil)
 		if err != nil || len(tls) != 1 || tls[0].Handshake.ClientHello.SNI != "inner.example" || !tls[0].Handshake.HasServerHello {

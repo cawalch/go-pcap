@@ -402,7 +402,9 @@ secrets embedded in PcapNG Decryption Secrets Blocks (`DSB`) or supplied in
 TLS, HTTP, HTTP/2, SSH, SMB, and RDP capture methods inspect the payload after
 one successful HTTP CONNECT or no-authentication SOCKS5 CONNECT exchange.
 `DecryptedTLSStreams` uses the inner TLS records with the supplied key log.
-The flow index and addresses identify the captured client and proxy.
+The flow index and addresses identify the captured client and proxy. `HTTP`
+returns the outer CONNECT request and 200 response as header-only records
+before any inner HTTP messages. Body offsets refer to the original stream.
 
 Use `UnwrapProxyStream(stream.Client.Data, stream.Server.Data)` on a reassembled
 request and response to get the inner byte slices, proxy type, requested host,

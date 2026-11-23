@@ -99,3 +99,16 @@ func proxyStream(st TCPStream) (TCPStream, int, int) {
 	st.Client.Data, st.Server.Data = client, server
 	return st, co, so
 }
+
+// proxyStreams prepares owned reassembly results for cleartext inspection and
+// TLS decryption. Each stream is unwrapped at most once.
+func (c *Capture) proxyStreams(data []byte) ([]TCPStream, error) {
+	streams, err := c.Streams(data)
+	if err != nil {
+		return nil, err
+	}
+	for i := range streams {
+		streams[i], _, _ = proxyStream(streams[i])
+	}
+	return streams, nil
+}

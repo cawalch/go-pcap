@@ -619,7 +619,23 @@ func (c *Capture) HTTP(data []byte) ([]HTTPRecord, error) {
 	decodedBudget := httpDecodeBudget{remaining: MaxHTTPDecodedBodyBytesPerScan}
 	for i := range streams {
 		inner, clientOffset, serverOffset := proxyStream(streams[i])
-		if err := appendHTTPFromTCPStream(&inner, false, &records, &decodedBudget, clientOffset, serverOffset); err != nil {
+		if clientOffset != 0 {
+			client, server := streams[i].Client.Data, streams[i].Server.Data
+			if inner.SrcAddr != streams[i].SrcAddr || inner.SrcPort != streams[i].SrcPort {
+				client, server = server, client
+			}
+			if bytes.HasPrefix(client, []byte("CONNECT ")) {
+				// A successful CONNECT ends at the blank line in each direction.
+				// Bound the outer response so its body cannot consume tunnel data.
+				outer := inner
+				outer.Client.Data, outer.Server.Data = client[:clientOffset], server[:serverOffset]
+				if err := appendHTTPFromTCPStream(&outer, false, &records, &decodedBudget, 0, 0); err != nil {
+					return nil, err
+				}
+			}
+		}
+		streams[i] = inner // Reuse this view for key-log decryption below.
+		if err := appendHTTPFromTCPStream(&streams[i], false, &records, &decodedBudget, clientOffset, serverOffset); err != nil {
 			return nil, err
 		}
 	}
