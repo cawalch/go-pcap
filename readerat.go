@@ -148,12 +148,8 @@ func NewFromReaderAt(r io.ReaderAt, size int64) (*Capture, error) {
 // scans may read ahead. Breaking the loop stops iteration. A read or parse error is
 // yielded once, after any preceding complete records.
 func (c *Capture) PacketSeqFromReaderAt(r io.ReaderAt) iter.Seq2[PacketRecord, error] {
-	return c.packetRecords(r, true)
-}
-
-func (c *Capture) packetRecords(r io.ReaderAt, prefetch bool) iter.Seq2[PacketRecord, error] {
 	return func(yield func(PacketRecord, error) bool) {
-		err := c.walkPacketsFromReaderAt(r, prefetch, func(pkt PacketRecord) error {
+		err := c.walkPacketsFromReaderAt(r, true, func(pkt PacketRecord) error {
 			if !yield(pkt, nil) {
 				return errStopWalk
 			}
@@ -259,34 +255,32 @@ func (c *Capture) FlowsFromReaderAt(r io.ReaderAt) ([]FlowSummary, error) {
 	var header [256]byte
 	var scratch []byte
 	budget := scanReadBudget{r: r, remaining: MaxReaderAtScanBytes}
-	for pkt, err := range c.packetRecords(&budget, false) {
-		if err != nil {
-			return nil, err
-		}
+	err := c.walkPacketsFromReaderAt(&budget, false, func(pkt PacketRecord) error {
 		n := min(pkt.PayloadLength, int64(len(header)))
 		if n == 0 {
-			continue
+			return nil
 		}
 		payload := header[:n]
 		if err := readExactAt(&budget, payload, pkt.PayloadOffset, c.fileSize); err != nil {
-			return nil, err
+			return err
 		}
 		frame, err := DecodeFrame(payload, pkt.LinkType)
 		if err != nil {
-			continue
+			return nil
 		}
 		if n < pkt.PayloadLength && !completeFlowPrefix(&frame, payload, pkt.PayloadLength) {
 			payload, err = extendFramePrefix(&budget, c.fileSize, pkt, &frame, payload, &scratch)
 			if err != nil {
-				return nil, err
+				return err
 			}
 		}
 		if frame.IPVersion == 0 {
-			continue
+			return nil
 		}
-		if err := acc.observe(&pkt, &frame, payload); err != nil {
-			return nil, err
-		}
+		return acc.observe(&pkt, &frame, payload)
+	})
+	if err != nil {
+		return nil, err
 	}
 	return acc.flows, nil
 }
