@@ -61,9 +61,9 @@ Use `BenchmarkCaptureFingerprints` and `BenchmarkCaptureQUICInitials` to
 measure formatting and decryption costs across complete capture scans.
 Schedule compiler bounds-check work when those measurements justify it.
 
-Single-flow PcapNG export currently takes a byte slice. The file-backed export
-proposal tracks equivalent output and bounded reads for large captures.
-[ReaderAt flow export, #117](https://github.com/cawalch/go-pcap/issues/117)
+Single-flow PcapNG export accepts slice and file-backed inputs. Use
+`BenchmarkFileFlowExport` to compare reading the full file with selecting
+one flow through bounded reads. [Flow export guide](parsing.md#write-captures)
 
 ### Protocol and integration proposals
 

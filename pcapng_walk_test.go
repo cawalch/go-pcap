@@ -219,6 +219,10 @@ func TestPCAPNGSectionProcessReferences(t *testing.T) {
 			if err := c.ExtractFlowPCAPNG(raw, &filtered, 0); err != nil {
 				t.Fatal(err)
 			}
+			var file bytes.Buffer
+			if err := c.ExtractFlowPCAPNGFromReaderAt(r, &file, 0); err != nil || !bytes.Equal(file.Bytes(), filtered.Bytes()) {
+				t.Fatalf("section process export parity: %v", err)
+			}
 			raw = filtered.Bytes()
 		}
 	}

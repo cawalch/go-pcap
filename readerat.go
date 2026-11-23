@@ -201,7 +201,7 @@ func (c *Capture) walkPacketsFromReaderAt(r io.ReaderAt, prefetch bool, cb func(
 		_, err := scanClassicPCAPReaderAt(r, c.fileSize, c.SnapLen, c.LinkType, order, c.NanoTimestamp, cb)
 		return err
 	}
-	_, err := scanPCAPNGReaderAt(r, c.fileSize, cb)
+	_, err := scanPCAPNGReaderAt(r, c.fileSize, cb, nil)
 	return err
 }
 
@@ -449,31 +449,8 @@ func (s ipFrameSource) walkReaderAt(visit func(PacketRecord, Frame, []byte) erro
 		defer w.release()
 		s.reader = w
 	}
-	var header [256]byte
-	var scratch []byte
 	budget := scanReadBudget{r: s.reader, remaining: MaxReaderAtScanBytes}
-	return s.capture.walkPacketsFromReaderAt(&budget, false, func(pkt PacketRecord) error {
-		n := min(pkt.PayloadLength, int64(len(header)))
-		if n == 0 {
-			return nil
-		}
-		data := header[:n]
-		if err := readExactAt(&budget, data, pkt.PayloadOffset, s.capture.fileSize); err != nil {
-			return err
-		}
-		f, err := DecodeFrame(data, pkt.LinkType)
-		if err != nil {
-			return nil
-		}
-		if n < pkt.PayloadLength && !completeFlowPrefix(&f, data, pkt.PayloadLength) {
-			data, err = extendFramePrefix(&budget, s.capture.fileSize, pkt, &f, data, &scratch)
-			if err != nil {
-				return err
-			}
-		}
-		if f.IPVersion == 0 {
-			return nil
-		}
+	return s.capture.walkFlowPrefixes(&budget, func(pkt PacketRecord, f Frame, data []byte) error {
 		start, end := int64(f.PayloadOffset), int64(f.PayloadOffset)+int64(f.PayloadLength)
 		available := data[start:min(end, int64(len(data)))]
 		if f.PayloadLength == 0 || !s.needsPayload(f, available) {
@@ -491,6 +468,37 @@ func (s ipFrameSource) walkReaderAt(visit func(PacketRecord, Frame, []byte) erro
 			return err
 		}
 		return visit(pkt, f, payload)
+	})
+}
+
+// walkFlowPrefixes supplies borrowed frame bytes through the transport header.
+// The prefix can be shorter than the frame's declared payload.
+func (c *Capture) walkFlowPrefixes(budget *scanReadBudget, visit func(PacketRecord, Frame, []byte) error) error {
+	var header [256]byte
+	var scratch []byte
+	return c.walkPacketsFromReaderAt(budget, false, func(pkt PacketRecord) error {
+		n := min(pkt.PayloadLength, int64(len(header)))
+		if n == 0 {
+			return nil
+		}
+		data := header[:n]
+		if err := readExactAt(budget, data, pkt.PayloadOffset, c.fileSize); err != nil {
+			return err
+		}
+		f, err := DecodeFrame(data, pkt.LinkType)
+		if err != nil {
+			return nil
+		}
+		if n < pkt.PayloadLength && !completeFlowPrefix(&f, data, pkt.PayloadLength) {
+			data, err = extendFramePrefix(budget, c.fileSize, pkt, &f, data, &scratch)
+			if err != nil {
+				return err
+			}
+		}
+		if f.IPVersion == 0 {
+			return nil
+		}
+		return visit(pkt, f, data)
 	})
 }
 
@@ -637,7 +645,7 @@ func scanClassicPCAPReaderAt(
 }
 
 func parsePCAPNGFromReaderAt(r io.ReaderAt, size int64) (*Capture, error) {
-	meta, err := scanPCAPNGReaderAt(r, size, nil)
+	meta, err := scanPCAPNGReaderAt(r, size, nil, nil)
 	if err != nil {
 		return nil, err
 	}
@@ -669,7 +677,7 @@ func parsePCAPNGFromReaderAt(r io.ReaderAt, size int64) (*Capture, error) {
 	}, nil
 }
 
-func scanPCAPNGReaderAt(r io.ReaderAt, size int64, cb func(PacketRecord) error) (scanSummary, error) {
+func scanPCAPNGReaderAt(r io.ReaderAt, size int64, cb func(PacketRecord) error, rawBlock func(uint32, binary.ByteOrder, int64, int64) error) (scanSummary, error) {
 	if size < pcapngSHBMinSize {
 		return scanSummary{}, fmt.Errorf("%w: PcapNG section header block shorter than %d bytes", ErrInvalidHeader, pcapngSHBMinSize)
 	}
@@ -751,6 +759,22 @@ func scanPCAPNGReaderAt(r io.ReaderAt, size int64, cb func(PacketRecord) error) 
 		}
 
 		bodyEnd := int64(blockEnd) - 4
+		if rawBlock != nil {
+			// Export already validated packet records in the selection pass.
+			// Recheck framing and leave reads of retained blocks to the writer.
+			if err := readExactAt(r, headerBuf[:4], bodyEnd, size); err != nil {
+				return scanSummary{}, err
+			}
+			if order.Uint32(headerBuf[:4]) != blockLen {
+				return scanSummary{}, fmt.Errorf("%w: trailing block length mismatch", ErrInvalidBlock)
+			}
+			if err := rawBlock(blockType, order, offset, int64(blockEnd)); err != nil {
+				return scanSummary{}, err
+			}
+			haveSection = true
+			offset = int64(blockEnd)
+			continue
+		}
 		tailOffset := bodyEnd
 		var rec PacketRecord
 		var packetErr error
