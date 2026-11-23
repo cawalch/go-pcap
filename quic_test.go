@@ -323,9 +323,12 @@ func TestQUICRebindingDistinctAndAmbiguousIDs(t *testing.T) {
 	add(10005, "one", "shared") // The forward DCID now has two owners.
 	add(10006, "", "empty")
 	add(10007, "", "empty")
+	// These IDs have the same zero-padded bytes but different wire lengths.
+	add(10008, "id", "source")
+	add(10009, "id\x00", "source")
 	records := quicTestRecords(t, frames...)
-	if len(records) != 6 {
-		t.Fatalf("got %d records, want 6", len(records))
+	if len(records) != 8 {
+		t.Fatalf("got %d records, want 8", len(records))
 	}
 	for _, r := range records {
 		if r.Handshake.HasRetry {
@@ -353,5 +356,28 @@ func TestQUICRebindOntoOccupiedTuple(t *testing.T) {
 	if len(records) != 2 || records[0].Handshake.ClientHello.SNI != "original.example" || records[0].Handshake.HasServerHello ||
 		records[1].SrcPort != 10002 || records[1].Handshake.ClientHello.SNI != "rebound.example" || !records[1].Handshake.HasServerHello {
 		t.Fatalf("occupied tuple: %+v", records)
+	}
+}
+
+func TestQUICRebindToEarlierUDPFlow(t *testing.T) {
+	client, server := [4]byte{192, 0, 2, 1}, [4]byte{192, 0, 2, 2}
+	dcid := []byte("original")
+	hello := buildTLS13ClientHelloRecord("earlier.example", "h3")[5:]
+	half := len(hello) / 2
+	start := buildEncryptedQUICInitialDatagram(t, QUICVersion1, dcid, nil, nil, 1, 0, hello[:half])
+	end := buildEncryptedQUICInitialDatagram(t, QUICVersion1, dcid, nil, nil, 2, uint16(half), hello[half:])
+	reply := buildQUICInitialWithKeys(t, QUICVersion1, nil, []byte("server"), nil, 1, 0, buildTLSServerHelloRecord()[5:], dcid, false)
+
+	// Tuple 0 predates the first QUIC exchange, which starts on tuple 1.
+	// Its empty SCID forces the server reply to use the remembered alias.
+	records := quicTestRecords(t,
+		buildEthernetIPv4UDPFrame(client, server, 10000, 443, []byte{1}),
+		buildEthernetIPv4UDPFrame(client, server, 10001, 443, start),
+		buildEthernetIPv4UDPFrame(client, server, 10000, 443, end),
+		buildEthernetIPv4UDPFrame(server, client, 443, 10000, reply),
+	)
+	if len(records) != 1 || records[0].FlowIndex != 1 || records[0].SrcPort != 10001 ||
+		records[0].Handshake.ClientHello.SNI != "earlier.example" || !records[0].Handshake.HasServerHello {
+		t.Fatalf("rebound exchange: %+v", records)
 	}
 }

@@ -554,6 +554,19 @@ func quicScanHeader(udpPayload []byte) (version uint32, dcid, scid []byte, vn, r
 	return version, dcid, scid, vn, retry, true
 }
 
+// quicCID owns the bytes of a length-validated long-header connection ID.
+// Include the length so trailing zero bytes remain significant in map keys.
+type quicCID struct {
+	data   [MaxQUICConnIDBytes]byte
+	length uint8
+}
+
+func makeQUICCID(data []byte) quicCID {
+	id := quicCID{length: uint8(len(data))}
+	copy(id.data[:], data)
+	return id
+}
+
 func scanQUIC(source ipFrameSource) ([]QUICRecord, error) {
 
 	type quicFlowBuf struct {
@@ -563,7 +576,7 @@ func scanQUIC(source ipFrameSource) ([]QUICRecord, error) {
 		srcPort         uint16
 		dstPort         uint16
 		version         uint32
-		dcid, scid      []byte
+		dcid, scid      quicCID
 		hasRetry, hasVN bool
 		count           int
 		clientPkt       [][]byte
@@ -573,14 +586,14 @@ func scanQUIC(source ipFrameSource) ([]QUICRecord, error) {
 	// Index the client's DCID in the forward direction and SCID in reverse.
 	// Include the server port so only the client port can change.
 	type cidKey struct {
-		client   netip.Addr
-		server   netip.AddrPort
-		id       string
-		response bool
+		client, server netip.Addr
+		port           uint16
+		id             quicCID
+		response       bool
 	}
 	byCID := make(map[cidKey]int)
 	register := func(key cidKey, slot int) {
-		if key.id == "" {
+		if key.id.length == 0 {
 			return
 		}
 		if prev, found := byCID[key]; found && prev != slot {
@@ -619,14 +632,20 @@ func scanQUIC(source ipFrameSource) ([]QUICRecord, error) {
 		if frame.IPProtocol != IPProtoUDP || len(udpPayload) < 7 {
 			return nil
 		}
-		version, dcid, scid, vn, retry, ok := quicScanHeader(udpPayload)
+		version, dstID, srcID, vn, retry, ok := quicScanHeader(udpPayload)
 		if !ok {
 			return nil
 		}
 
-		forward := cidKey{frame.SrcAddr, netip.AddrPortFrom(frame.DstAddr, frame.DstPort), string(dcid), false}
-		reverse := cidKey{frame.DstAddr, netip.AddrPortFrom(frame.SrcAddr, frame.SrcPort), string(dcid), true}
-		slot, hasTuple := slotByFlow[flowIdx]
+		dcid, scid := makeQUICCID(dstID), makeQUICCID(srcID)
+
+		// QUIC-only captures often assign the same index to the tuple and
+		// its exchange. Only displaced indexes and rebindings need the map.
+		slot := flowIdx
+		hasTuple := slot < len(flows) && flows[slot].flowIndex == flowIdx
+		if !hasTuple {
+			slot, hasTuple = slotByFlow[flowIdx]
+		}
 		found := hasTuple
 		client := true
 		var tupleIDsMatch bool
@@ -634,19 +653,22 @@ func scanQUIC(source ipFrameSource) ([]QUICRecord, error) {
 			fb := &flows[slot]
 			client = frame.DstAddr == fb.dstAddr && frame.DstPort == fb.dstPort
 			if client {
-				tupleIDsMatch = fb.version == version && bytes.Equal(fb.dcid, dcid) && bytes.Equal(fb.scid, scid)
+				tupleIDsMatch = fb.version == version && fb.dcid == dcid && fb.scid == scid
 			} else {
-				tupleIDsMatch = (vn || fb.version == version) && bytes.Equal(fb.scid, dcid)
+				tupleIDsMatch = (vn || fb.version == version) && fb.scid == dcid
 			}
 		}
 		// A client can rebind onto a tuple already used by another exchange.
 		// When its IDs disagree, prefer a unique directional CID match.
 		if !tupleIDsMatch {
+			forward := cidKey{frame.SrcAddr, frame.DstAddr, frame.DstPort, dcid, false}
+			reverse := cidKey{frame.DstAddr, frame.SrcAddr, frame.SrcPort, dcid, true}
+
 			f, fOK := byCID[forward]
 			r, rOK := byCID[reverse]
 			// A changed client SCID identifies a separate Initial exchange,
 			// even when both clients chose the same destination ID.
-			if !vn && !retry && fOK && f >= 0 && !rOK && flows[f].version == version && bytes.Equal(flows[f].scid, scid) {
+			if !vn && !retry && fOK && f >= 0 && !rOK && flows[f].version == version && flows[f].scid == scid {
 				slot, found, client = f, true, true
 			} else if rOK && r >= 0 && !fOK && (vn || flows[r].version == version) {
 				slot, found, client = r, true, false
@@ -657,17 +679,17 @@ func scanQUIC(source ipFrameSource) ([]QUICRecord, error) {
 				return nil
 			}
 			fb := &flows[slot]
-			if fb.count >= MaxQUICPacketsPerFlow || !bytes.Equal(dcid, fb.scid) {
+			if fb.count >= MaxQUICPacketsPerFlow || dcid != fb.scid {
 				return nil
 			}
-			if vn && bytes.Equal(scid, fb.dcid) {
+			if vn && scid == fb.dcid {
 				fb.hasVN = true
 				fb.count++
 			}
-			if retry && version == fb.version && !fb.hasRetry && !bytes.Equal(scid, fb.dcid) {
+			if retry && version == fb.version && !fb.hasRetry && scid != fb.dcid {
 				fb.hasRetry = true
 				fb.count++
-				register(cidKey{fb.srcAddr, netip.AddrPortFrom(fb.dstAddr, fb.dstPort), string(scid), false}, slot)
+				register(cidKey{fb.srcAddr, fb.dstAddr, fb.dstPort, scid, false}, slot)
 			}
 			return nil
 		}
@@ -680,15 +702,15 @@ func scanQUIC(source ipFrameSource) ([]QUICRecord, error) {
 				flowIndex: flowIdx, srcAddr: frame.SrcAddr, dstAddr: frame.DstAddr,
 				srcPort: frame.SrcPort, dstPort: frame.DstPort, version: version, dcid: dcid, scid: scid,
 			})
-			register(forward, slot)
-			register(cidKey{forward.client, forward.server, string(scid), true}, slot)
+			register(cidKey{frame.SrcAddr, frame.DstAddr, frame.DstPort, dcid, false}, slot)
+			register(cidKey{frame.SrcAddr, frame.DstAddr, frame.DstPort, scid, true}, slot)
 		}
 
 		fb := &flows[slot]
 		if fb.count >= MaxQUICPacketsPerFlow {
 			return nil
 		}
-		if !hasTuple {
+		if !hasTuple && (flowIdx != slot || fb.flowIndex != flowIdx) {
 			slotByFlow[flowIdx] = slot
 		}
 		fb.count++
