@@ -47,8 +47,7 @@ func sanTestChain(t testing.TB, names []string, ips []net.IP, issuerSANs bool) [
 	return [][]byte{leafDER, caDER}
 }
 
-func sanTestCapture(t testing.TB, chain [][]byte, encrypted bool) []byte {
-	t.Helper()
+func certificateTestRecord(chain [][]byte, encrypted bool) []byte {
 	var entries []byte
 	for _, der := range chain {
 		entries = append(entries, byte(len(der)>>16), byte(len(der)>>8), byte(len(der)))
@@ -61,7 +60,12 @@ func sanTestCapture(t testing.TB, chain [][]byte, encrypted bool) []byte {
 	if encrypted {
 		body = append([]byte{0}, body...) // Empty certificate request context.
 	}
-	rec := wrapTLSHandshakeRecord(TLSHandshakeCertificate, append(body, entries...))
+	return wrapTLSHandshakeRecord(TLSHandshakeCertificate, append(body, entries...))
+}
+
+func sanTestCapture(t testing.TB, chain [][]byte, encrypted bool) []byte {
+	t.Helper()
+	rec := certificateTestRecord(chain, encrypted)
 	var keylog []byte
 	if encrypted {
 		secret := bytes.Repeat([]byte{0x77}, 32)

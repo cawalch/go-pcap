@@ -62,7 +62,7 @@
 // Use [ParseTLSRecords], [ParseTLSClientHello], [ParseTLSServerHello],
 // [JA4XFromDER], [JA4XFromCert], [Capture.TLS], [Capture.TLSWithKeyLog],
 // [Capture.HasTLSJA4], and [Capture.HasTLSSNI] to decode TLS 1.2/1.3
-// handshakes, X.509 certificate chains (including DSB-decrypted TLS 1.3 server
+// handshakes, X.509 certificate chains (including DSB-decrypted TLS 1.3 client and server
 // certificates), and FoxIO JA4, JA4S, and JA4X fingerprints.
 //
 // Use [ParseQUICInitialPacket], [DecryptQUICInitial], [Capture.QUIC],
