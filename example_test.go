@@ -350,3 +350,13 @@ func ExampleCapture_Web() {
 	fmt.Println(len(records.TLS), len(records.HTTP), len(records.HTTP2))
 	// Output: 2 0 0
 }
+
+func ExampleParseWebSocketFrames() {
+	// The unmasked text frame from RFC 6455 section 5.7.
+	messages, err := pcap.ParseWebSocketFrames([]byte{0x81, 5, 'H', 'e', 'l', 'l', 'o'})
+	if err != nil {
+		log.Fatal(err)
+	}
+	fmt.Println(string(messages[0].Payload))
+	// Output: Hello
+}

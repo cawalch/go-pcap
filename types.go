@@ -331,6 +331,9 @@ const (
 	MaxFragmentsPerGroup        = 16
 	MaxReassembledIPPacketBytes = 65535
 
+	// MaxWebSocketFramesPerStream bounds frames in each direction, including continuations.
+	MaxWebSocketFramesPerStream = 1024
+
 	// HTTP/2 parser limits.
 	MaxHTTP2FramesPerStream     = 1024
 	MaxHTTP2Settings            = 64
@@ -526,6 +529,11 @@ var (
 	ErrTLSLimit = errors.New("TLS handshake exceeds limit")
 	// ErrQUICLimit indicates a QUIC flow or capture exceeds QUIC packet or CRYPTO stream limits.
 	ErrQUICLimit = errors.New("QUIC Initial flow exceeds limit")
+	// ErrInvalidWebSocket indicates invalid or incomplete WebSocket framing.
+	ErrInvalidWebSocket = errors.New("invalid WebSocket frame")
+	// ErrWebSocketLimit indicates a WebSocket count or size limit was exceeded.
+	ErrWebSocketLimit = errors.New("WebSocket limit exceeded")
+
 	// ErrHTTPLimit indicates an HTTP message or capture exceeds header or body limits.
 	ErrHTTPLimit = errors.New("HTTP message exceeds limit")
 	// ErrSSHLimit indicates an SSH handshake or capture exceeds banner or KEXINIT limits.
