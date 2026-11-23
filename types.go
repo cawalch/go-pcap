@@ -279,6 +279,7 @@ const (
 
 	// TLS parser limits.
 	MaxTLSRecordBytes       = 16384 + 2048 // RFC 8446 record expansion limit
+	MaxTLSHandshakeRecords  = 128          // Maximum records inspected per directional plaintext handshake scan.
 	MaxTLSHandshakeBytes    = 256 << 10    // 256 KiB coalesced handshake message
 	MaxTLSCipherSuites      = 256
 	MaxTLSExtensions        = 128

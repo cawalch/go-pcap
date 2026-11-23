@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"compress/gzip"
 	"encoding/binary"
+	"errors"
 	"fmt"
 	"log"
 	"net/netip"
@@ -130,6 +131,14 @@ func ExampleUnwrapProxyStream() {
 	_, _, kind, host, port, ok := pcap.UnwrapProxyStream(client, server)
 	fmt.Println(ok, kind, host, port)
 	// Output: true http-connect example.org 443
+}
+
+func ExampleParseTLSRecords_recordLimit() {
+	emptyRecord := []byte{pcap.TLSRecordHandshake, 3, 3, 0, 0}
+	stream := bytes.Repeat(emptyRecord, pcap.MaxTLSHandshakeRecords+1)
+	_, err := pcap.ParseTLSRecords(stream)
+	fmt.Println(errors.Is(err, pcap.ErrTLSLimit))
+	// Output: true
 }
 
 func ExampleParseHTTPRequest() {

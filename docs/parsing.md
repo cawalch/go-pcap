@@ -103,6 +103,7 @@ The following limits bound parsing work and memory allocation on each call:
 | `MaxDNSCompressionJumps` | 16 jumps | Bounds RFC 1035 label pointer hops per domain name |
 | `MaxDNSALPNProtocols` | 32 identifiers | Bounds ALPN identifiers per DNS `SVCB` or `HTTPS` record |
 | `MaxDNSMessagesPerScan` | 65,536 messages | Bounds DNS messages returned per capture scan |
+| `MaxTLSHandshakeRecords` | 128 records | Bounds the record scan for a directional plaintext handshake, including empty records and warning alerts |
 | `MaxTLSHandshakeBytes` | 256 KiB | Bounds coalesced TLS handshake payload size |
 | `MaxTLSExtensions` | 128 extensions | Bounds TLS extensions parsed per handshake message |
 | `MaxTLSCertSANsPerKind` | 64 per kind | Bounds retained DNS names and IP addresses independently for each certificate |
@@ -450,6 +451,11 @@ Call `ParseTLSRecords(stream)` on a TCP payload or reassembled stream, or call
 reassemble TCP flows and decode TLS 1.2 and TLS 1.3 `ClientHello`, `ServerHello`,
 and `Certificate` handshake messages:
 
+- A hello may span one-byte records. The parser joins the fragments across
+  complete, non-closing plaintext warning alerts. Fatal alerts and
+  `close_notify` end collection. If a handshake needs a 129th record,
+  `ParseTLSRecords` returns an error matching `ErrTLSLimit`. Capture scans
+  omit that direction and can still return a hello from the opposite direction.
 - `TLSClientHello.JA4` reports the 36-character FoxIO JA4 fingerprint (filtering
   RFC 8701 GREASE values, sorting cipher suites and non-SNI/non-ALPN extensions,
   and preserving signature scheme wire order).

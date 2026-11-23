@@ -141,6 +141,8 @@ func IsGREASE(v uint16) bool {
 // ParseTLSRecords parses one or more TLS handshake records from stream (such as
 // a TCP payload or reassembled directional TCP stream) and extracts ClientHello,
 // ServerHello, Certificate chains, JA4, JA4S, and JA4X fingerprints.
+// It coalesces fragments across plaintext warning alerts and returns [ErrTLSLimit]
+// (wrapped) if the plaintext handshake needs more than [MaxTLSHandshakeRecords].
 func ParseTLSRecords(stream []byte) (TLSHandshake, error) {
 	if len(stream) < 5 {
 		return TLSHandshake{}, fmt.Errorf("%w: buffer shorter than 5-byte TLS record header", ErrInvalidTLS)
@@ -152,11 +154,17 @@ func ParseTLSRecords(stream []byte) (TLSHandshake, error) {
 	var hsBuf bytes.Buffer
 	var firstRecordVersion uint16
 	var out TLSHandshake
-	var sawCCS, encryptedHandshakes bool
+	var sawCCS, encryptedHandshakes, sawApplicationData bool
 	offset := 0
 
-	for offset+5 <= len(stream) {
+	for records := 0; len(stream)-offset >= 5; records++ {
 		contentType := stream[offset]
+		if records == MaxTLSHandshakeRecords {
+			if encryptedHandshakes || contentType == TLSRecordApplicationData || (sawApplicationData && contentType != TLSRecordHandshake) {
+				break // The plaintext hello is still useful on a long connection.
+			}
+			return TLSHandshake{}, fmt.Errorf("%w: more than %d TLS records", ErrTLSLimit, MaxTLSHandshakeRecords)
+		}
 		recVer := binary.BigEndian.Uint16(stream[offset+1 : offset+3])
 		if recVer < TLSVersionSSL30 || recVer > TLSVersion13 {
 			if offset == 0 {
@@ -171,14 +179,22 @@ func ParseTLSRecords(stream []byte) (TLSHandshake, error) {
 			}
 			break
 		}
-		if firstRecordVersion == 0 {
+		if firstRecordVersion == 0 && contentType == TLSRecordHandshake && recLen != 0 {
 			firstRecordVersion = recVer
 		}
 		bodyStart := offset + 5
-		bodyEnd := bodyStart + recLen
-		if bodyEnd > len(stream) {
+		bodyEnd := bodyStart + min(recLen, len(stream)-bodyStart)
+		if bodyEnd-bodyStart < recLen {
 			out.Anomalies.TruncatedRecord = true
-			bodyEnd = len(stream)
+		}
+		if contentType == TLSRecordApplicationData {
+			sawApplicationData = true
+		}
+		if !encryptedHandshakes && contentType == TLSRecordAlert {
+			// Only a complete, non-closing warning can interrupt a plaintext handshake.
+			if bodyEnd-bodyStart != 2 || recLen != 2 || stream[bodyStart] != 1 || stream[bodyStart+1] == 0 {
+				break
+			}
 		}
 		if contentType == TLSRecordChangeCipherSpec && !sawCCS {
 			// TLS 1.2 subsequent handshake records are ciphertext. TLS 1.3
@@ -1060,13 +1076,13 @@ func tlsRecordsFromStreams(streams []TCPStream, keyLog *TLSKeyLog) ([]TLSRecord,
 
 		var clientHS, serverHS TLSHandshake
 		var hasC, hasS bool
-		if tlsOff := findTLSHandshakeStart(cData); tlsOff >= 0 {
-			if hs, err := ParseTLSRecords(cData[tlsOff:]); err == nil {
+		if hasTLSHandshakeStart(cData) {
+			if hs, err := ParseTLSRecords(cData); err == nil {
 				clientHS, hasC = hs, true
 			}
 		}
-		if tlsOff := findTLSHandshakeStart(sData); tlsOff >= 0 {
-			if hs, err := ParseTLSRecords(sData[tlsOff:]); err == nil {
+		if hasTLSHandshakeStart(sData) {
+			if hs, err := ParseTLSRecords(sData); err == nil {
 				serverHS, hasS = hs, true
 			}
 		}
@@ -1220,25 +1236,12 @@ func parseTLSCertificateWithTLS13Context(body []byte) ([]TLSCertificate, TLSAnom
 	return certs, anomalies, nil
 }
 
-func findTLSHandshakeStart(buf []byte) int {
-	offset := 0
-	for offset+6 <= len(buf) {
-		if buf[offset] == TLSRecordHandshake && buf[offset+1] == 0x03 && buf[offset+2] <= 0x04 && buf[offset+3] == 0 && buf[offset+4] == 0 {
-			// Skip RFC 5246 leading 0-length handshake records.
-			offset += 5
-			continue
-		}
-		if isValidTLSHandshakeHeader(buf[offset:]) {
-			return offset
-		}
-		return -1
-	}
-	return -1
-}
-
-func isValidTLSHandshakeHeader(buf []byte) bool {
+func hasTLSHandshakeStart(buf []byte) bool {
 	if len(buf) < 6 || buf[0] != TLSRecordHandshake || buf[1] != 0x03 || buf[2] > 0x04 {
 		return false
+	}
+	if buf[3] == 0 && buf[4] == 0 {
+		return true // Let ParseTLSRecords charge leading empty records to its budget.
 	}
 	hsType := buf[5]
 	return hsType == TLSHandshakeClientHello || hsType == TLSHandshakeServerHello || hsType == TLSHandshakeCertificate || hsType == TLSHandshakeCertificateRequest
