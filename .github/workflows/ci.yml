@@ -30,6 +30,23 @@ jobs:
           test -z "$(gofmt -l .)"
           go vet ./...
       - run: go test -race -cover ./...
+      - name: Check out v0.1.0 for consumer tests
+        if: matrix.go == '1.26.x'
+        uses: actions/checkout@v7.0.1
+        with:
+          ref: refs/tags/v0.1.0
+          path: .compat-baseline
+          persist-credentials: false
+      - name: Test consumer API against v0.1.0 and the checkout
+        if: matrix.go == '1.26.x'
+        working-directory: testdata/consumer
+        run: |
+          for source in "$GITHUB_WORKSPACE/.compat-baseline" "$GITHUB_WORKSPACE"; do
+            dir=$(mktemp -d "$RUNNER_TEMP/consumer.XXXXXX")
+            (cd "$dir" && go work init)
+            GOWORK="$dir/go.work" go work use . "$source"
+            GOWORK="$dir/go.work" go test -count=1 -v ./...
+          done
       - name: Test 32-bit arithmetic
         run: GOARCH=386 go test ./...
       - name: Test Linux live counters on loopback

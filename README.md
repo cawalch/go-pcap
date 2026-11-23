@@ -93,6 +93,8 @@ in the capture can leave a handshake or message incomplete.
 
 ## API and references
 
+[Consumer API compatibility](docs/compatibility.md) covers record order, input and payload ownership, limits, and error handling.
+
 - [Exported types and methods](https://pkg.go.dev/github.com/cawalch/go-pcap) · [Runnable Go examples](example_test.go)
 - [PCAP file format](https://datatracker.ietf.org/doc/draft-ietf-opsawg-pcap/) · [PcapNG blocks and options](https://datatracker.ietf.org/doc/draft-ietf-opsawg-pcapng/)
 - [Community ID v1 specification and test vectors](https://github.com/corelight/community-id-spec) · [Fingerprint reference fixtures and upstream baselines](testdata/foxio/README.md)
