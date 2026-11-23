@@ -732,6 +732,11 @@ v5 `AS-REQ`, `AS-REP`, `TGS-REQ`, `TGS-REP`, and `KRB-ERROR` messages over UDP
 and TCP port 88, including client/service principal names, realm, requested
 encryption types, and the encryption types on replies. Use `HasRC4HMAC` to
 find messages mentioning encryption type 23 when auditing legacy crypto.
+For a `KRB-ERROR` message, `ErrorCode` contains the protocol error code.
+`ClientRealm` and `ClientNames` contain the optional client identity fields.
+For example, an error for `alice@CLIENT.EXAMPLE` from `SERVICE.EXAMPLE` can
+report `ClientNames` as `["alice"]`, `ClientRealm` as `CLIENT.EXAMPLE`, and
+`Realm` as `SERVICE.EXAMPLE`.
 On TCP, the scanner reassembles each port-88 direction and attributes the
 message to the packet containing the first byte of its four-byte record mark.
 [Kerberos over TCP (RFC 4120)](https://www.rfc-editor.org/rfc/rfc4120#section-7.2.2)

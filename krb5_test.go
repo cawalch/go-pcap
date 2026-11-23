@@ -4,7 +4,10 @@ import (
 	"encoding/asn1"
 	"encoding/binary"
 	"errors"
+	"net/netip"
+	"slices"
 	"testing"
+	"time"
 )
 
 func asn1WrapExplicit(tag int, class int, inner []byte) []byte {
@@ -98,6 +101,85 @@ func TestParseKRB5AndCaptureKerberos(t *testing.T) {
 
 	if _, err := ParseKRB5([]byte{1, 2, 3}); !errors.Is(err, ErrInvalidKRB5) {
 		t.Fatalf("ParseKRB5(short) err = %v, want ErrInvalidKRB5", err)
+	}
+}
+
+func TestKRB5ErrorClientIdentity(t *testing.T) {
+	const serviceRealm = "SERVICE.EXAMPLE"
+	const clientRealm = "CLIENT.EXAMPLE"
+
+	var frames [][]byte
+	tests := []struct {
+		name        string
+		code        int32
+		clientRealm string
+		clientNames []string
+	}{
+		{"client identity", 24, clientRealm, []string{"alice", "admin"}},
+		{"client realm only", 6, clientRealm, nil},
+		{"client name only", 6, "", []string{"alice"}},
+		{"no client identity", 25, "", nil},
+	}
+	for _, tt := range tests {
+		var fields []byte
+		add := func(tag int, data []byte) {
+			fields = append(fields, asn1WrapExplicit(tag, asn1.ClassContextSpecific, data)...)
+		}
+		addInt := func(tag, value int) {
+			data, _ := asn1.Marshal(value)
+			add(tag, data)
+		}
+		addRealm := func(tag int, realm string) {
+			data, _ := asn1.Marshal(asn1.RawValue{Tag: asn1.TagGeneralString, Bytes: []byte(realm)})
+			add(tag, data)
+		}
+		addInt(0, 5)
+		addInt(1, int(KRB5MsgError))
+		stime, _ := asn1.MarshalWithParams(time.Unix(1_700_000_000, 0).UTC(), "generalized")
+		add(4, stime)
+		addInt(5, 0)
+		addInt(6, int(tt.code))
+		if tt.clientRealm != "" {
+			addRealm(7, tt.clientRealm)
+		}
+		if len(tt.clientNames) > 0 {
+			add(8, buildKRB5Principal(1, tt.clientNames...))
+		}
+		addRealm(9, serviceRealm)
+		add(10, buildKRB5Principal(2, "krbtgt", serviceRealm))
+		wire := asn1WrapExplicit(int(KRB5MsgError), asn1.ClassApplication,
+			asn1WrapExplicit(asn1.TagSequence, asn1.ClassUniversal, fields))
+		frames = append(frames, buildEthernetIPv4UDPFrame([4]byte{10, 0, 0, 88}, [4]byte{10, 0, 0, 5}, 88, 52000, wire))
+
+		t.Run(tt.name, func(t *testing.T) {
+			msg, err := ParseKRB5(wire)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if msg.MsgType != KRB5MsgError || msg.ErrorCode != tt.code || msg.Realm != serviceRealm ||
+				msg.ClientRealm != tt.clientRealm || !slices.Equal(msg.ClientNames, tt.clientNames) ||
+				!slices.Equal(msg.ServiceNames, []string{"krbtgt", serviceRealm}) {
+				t.Fatalf("KRB-ERROR = %+v", msg)
+			}
+		})
+	}
+
+	raw := buildClassicPCAP(binary.LittleEndian, false, LinkTypeEthernet, 65535, frames)
+	c, err := New(raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	records, err := c.Kerberos(raw)
+	if err != nil || len(records) != len(tests) {
+		t.Fatalf("Capture.Kerberos() = (%d, %v), want %d records", len(records), err, len(tests))
+	}
+	for i, record := range records {
+		tt := tests[i]
+		if record.PacketIndex != i || record.DstAddr != netip.MustParseAddr("10.0.0.5") ||
+			record.Message.ErrorCode != tt.code || record.Message.ClientRealm != tt.clientRealm ||
+			!slices.Equal(record.Message.ClientNames, tt.clientNames) {
+			t.Fatalf("Kerberos record %d = %+v", i, record)
+		}
 	}
 }
 

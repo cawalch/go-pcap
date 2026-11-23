@@ -15,8 +15,9 @@ import (
 type KRB5Message struct {
 	PVNO         int
 	MsgType      uint8
-	Realm        string
-	ClientNames  []string
+	Realm        string   // For KRB-ERROR, the service realm.
+	ClientRealm  string   // Optional client realm in a KRB-ERROR message.
+	ClientNames  []string // Client principal components in wire order, when present.
 	ServiceNames []string
 	ETypes       []int32
 	ErrorCode    int32
@@ -157,6 +158,10 @@ func ParseKRB5(buf []byte) (KRB5Message, error) {
 				if _, err := asn1.Unmarshal(field.Bytes, &code); err == nil && code >= math.MinInt32 && code <= math.MaxInt32 {
 					msg.ErrorCode = int32(code)
 				}
+			case 7:
+				msg.ClientRealm = parseASN1String(field.Bytes)
+			case 8:
+				msg.ClientNames = parseKRB5PrincipalName(field.Bytes)
 			case 9:
 				msg.Realm = parseASN1String(field.Bytes)
 			case 10:
