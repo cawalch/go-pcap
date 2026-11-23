@@ -33,23 +33,21 @@ stages, including input reads, TCP reassembly, and decoded output.
 
 ### v0.1.0 — capture correctness and compatibility
 
-The [v0.1.0 milestone](https://github.com/cawalch/go-pcap/milestone/1) tracks the
-work required before the first experimental tag.
+The first experimental release shipped on November 23, 2026. All seven
+milestone issues closed. The tests cover section-local PcapNG interface IDs,
+slice and ReaderAt flow parity, TCP reordering, IPv6 fragment handling, DNS TXT
+and Simple Packet Blocks, and independent QUIC and fingerprint fixtures.
+[Completed milestone](https://github.com/cawalch/go-pcap/milestone/1) ·
+[Release notes and platform verification](../CHANGELOG.md#platform-verification)
 
-| Area | Release evidence |
-| --- | --- |
-| PcapNG sections | Resolve interface IDs within their section on both reader paths. Verify two sections that reuse interface 0 with different link types and timestamp settings. [#26](https://github.com/cawalch/go-pcap/issues/26) |
-| Flow summaries | Compare complete slice and ReaderAt results for padded, truncated and long packets. [#58](https://github.com/cawalch/go-pcap/issues/58) |
-| Reassembly | Verify exact TCP bytes for reordered midstream pickup and sequence wrap. Verify IPv6 overlap rejection and atomic-fragment handling through the consuming dissectors. [#44](https://github.com/cawalch/go-pcap/issues/44), [#52](https://github.com/cawalch/go-pcap/issues/52) |
-| Compatibility fixtures | Check QUIC v1 and v2 ciphertext and fingerprint outputs against independent references. Exercise Server Initial decryption, Simple Packet Blocks and DNS TXT records. [#17](https://github.com/cawalch/go-pcap/issues/17), [#59](https://github.com/cawalch/go-pcap/issues/59), [#60](https://github.com/cawalch/go-pcap/issues/60) |
+### Toward v1.0
 
-Before tagging, verify the documented [ReaderAt limits](parsing.md#parse-capture-containers)
-and describe the extent of live capture testing for each supported platform.
-The CI workflow defines Linux, macOS, and Windows checks. The Linux PR jobs
-also exercise live loopback counters on amd64 and 386 using a test binary with
-raw-socket permissions. [CI workflow](../.github/workflows/ci.yml)
+The consumer module exercises ordering, payload ownership, limits and errors
+against v0.1.0 and the checkout. Remaining platform work includes native
+Windows tests and privileged live-capture verification on macOS and Windows.
+[Compatibility contract](compatibility.md) · [Consumer tests](../testdata/consumer/contract_test.go)
 
-### After v0.1.0 — large captures and repeated analysis
+### Large captures and repeated analysis
 
 ReaderAt packet iteration uses bounded read-ahead on files. Use
 `BenchmarkReaderAtScan` to compare read counts, bytes read and allocations

@@ -7,27 +7,29 @@ packets from a local interface and write captures for another tool to inspect.
 
 The library uses the Go standard library, builds without cgo or libpcap, and
 requires Go 1.26 or later. The API is experimental and can change before v1.0.
-[Release guide](docs/releases.md) · [Changelog](CHANGELOG.md)
+[v0.1.0 release and platform verification](https://github.com/cawalch/go-pcap/releases/tag/v0.1.0)
 
-## Start with a question
+## Quick start with a guest Wi-Fi capture
 
-| Use case | What to inspect |
-| --- | --- |
-| Match a connection in a capture to a network sensor log | Group packets from both directions with `Flows`. For IPv4 or IPv6 TCP and UDP, `flow.CommunityID(seed)` produces a join key for tools using the same seed. Compare timestamps when a host reuses a port. [Flow summaries](docs/parsing.md#aggregate-5-tuple-flows) |
-| Troubleshoot name resolution | Use `DNS` to inspect questions, answers, and response codes. Follow a record's packet index back to the capture to inspect its timing. UDP fragments and DNS messages split across TCP segments are supported. [DNS guide](docs/parsing.md#parse-dns-messages-and-tunneling-metrics) |
-| Associate a guest or IoT address with a device | Match DHCP observations to flow timestamps and the capture interface. Use lease and controller logs to confirm the association. [Deployment troubleshooting example](docs/parsing.md#trace-a-guest-connection-and-a-tls-proxy) |
-| Compare clients reaching a service | Inspect TLS ClientHello or QUIC Initial records for visible server names, offered protocols, and JA4 fingerprints. Clients with similar configurations can share a fingerprint. [TLS handshakes](docs/parsing.md#parse-tls-handshakes-and-ja4-fingerprints) · [QUIC Initials](docs/parsing.md#decrypt-quic-initial-packets) |
-| Investigate an application or authentication failure | Inspect HTTP requests and responses, SSH handshakes, Kerberos principals and encryption types, SMB share paths, or RDP negotiation. Use `Web` for TLS, HTTP/1, and HTTP/2 records from one TCP reassembly. Matching key logs can recover application bytes for supported TLS suites. [Offline TLS decryption](docs/parsing.md#decrypt-tls-12-and-tls-13-streams-offline) · [Windows protocols](docs/parsing.md#parse-smb2-ntlmssp-kerberos-v5-and-rdp-messages) |
-| Hand one connection to another analyst | Select a flow by its index and call `ExtractFlowPCAPNG`. The export carries interface metadata and can include capture-wide name records and decryption secrets. Check those before sharing. [Capture export](docs/parsing.md#write-captures) |
-| Collect traffic on a host | Use `OpenLive` with a packet filter, read packets, and pass them to a PCAP or PcapNG writer. On Linux and macOS, `Stats` reports kernel capture drops. [Live capture](docs/parsing.md#capture-live-interface-traffic) |
+The sample contains 14 packets seen on a guest network. The client queried
+DNS, exchanged 11 packets with one HTTPS endpoint, and sent a single SYN to another. Download the synthetic
+[guest.pcapng](testdata/deployments/guest.pcapng) into an empty directory.
+In that directory, initialize a Go module and install the release.
 
-## Inspect a capture file
+```sh
+go mod init example.com/inspect
+go get github.com/cawalch/go-pcap@v0.1.0
+```
 
-From a Go module, install the library with `go get github.com/cawalch/go-pcap@v0.1.0`.
-Save this program as `main.go` and run `go run . sample.pcapng`. It also accepts
-classic PCAP. It reads container metadata first, then prints one line per
-bidirectional flow. An open file implements `io.ReaderAt`, so the example can
-inspect a capture larger than the scan's byte budget when the selected reads fit.
+Save the program below as `main.go` and run `go run . guest.pcapng`.
+It prints the endpoints and packet count for each bidirectional flow.
+
+```text
+pcapng packets=14 truncated=false
+proto=17 192.0.2.14:53000 -> 192.0.2.53:53 packets=2
+proto=6 192.0.2.14:50000 -> 198.51.100.80:443 packets=11
+proto=6 192.0.2.14:50001 -> 198.51.100.81:443 packets=1
+```
 
 ```go
 package main
@@ -72,6 +74,18 @@ func main() {
 }
 ```
 
+## Start with a question
+
+| Question | Where to start |
+| --- | --- |
+| Which sensor log entry matches this flow? | Join TCP or UDP flows by `CommunityID`. [Flow summaries](docs/parsing.md#aggregate-5-tuple-flows) |
+| Which names did the client look up? | Inspect questions and answers with `DNS`. [DNS records](docs/parsing.md#parse-dns-messages-and-tunneling-metrics) |
+| Which device requested this address? | Read lease observations with `DHCPv4`. [Address assignments](docs/parsing.md#dhcpv4-address-assignments) |
+| What did the client offer during the handshake? | Inspect server names and fingerprints with `TLS` or `QUIC`. [TLS handshakes](docs/parsing.md#parse-tls-handshakes-and-ja4-fingerprints) |
+| What did the web client request? | Use `Web` for HTTP/1, HTTP/2 and TLS records. [Web traffic and decryption](docs/parsing.md#parse-http-messages-and-carve-payloads) |
+| How do I share one connection? | Call `ExtractFlowPCAPNG`. Check for capture-wide names and decryption secrets before sharing. [Flow export](docs/parsing.md#write-captures) |
+| How do I collect packets on a host? | Open an interface with `OpenLive`. [Live capture](docs/parsing.md#capture-live-interface-traffic) |
+
 ## Choose an input
 
 - **Bytes already in memory.** Call `New(data)` and pass the same bytes to
@@ -85,17 +99,21 @@ func main() {
 - **File metadata only.** `Open(path)` reads the entire file and returns a
   metadata snapshot. Use `NewFromReaderAt` when whole-file loading is costly.
 
-A `Capture` holds container metadata. Packet records identify byte ranges in
-the original input. Frame decoding identifies the network and transport headers. Flow analysis groups packets by protocol and endpoint pair. Protocol methods
-can then reassemble the bytes needed for a message that spans packets. A gap
-in the capture can leave a handshake or message incomplete.
-[Reader limits and anomalies](docs/parsing.md) · [Architecture and roadmap](docs/architecture.md)
+For a worked example of correlating records across a guest network and a TLS
+proxy, see the [deployment walkthrough](docs/parsing.md#trace-a-guest-connection-and-a-tls-proxy).
 
 ## API and references
 
 [Consumer API compatibility](docs/compatibility.md) covers record order, input and payload ownership, limits, and error handling.
 
-- [Exported types and methods](https://pkg.go.dev/github.com/cawalch/go-pcap) · [Runnable Go examples](example_test.go)
+- [Package overview](doc.go) · [Runnable Go examples](example_test.go)
 - [PCAP file format](https://datatracker.ietf.org/doc/draft-ietf-opsawg-pcap/) · [PcapNG blocks and options](https://datatracker.ietf.org/doc/draft-ietf-opsawg-pcapng/)
-- [Community ID v1 specification and test vectors](https://github.com/corelight/community-id-spec) · [Fingerprint reference fixtures and upstream baselines](testdata/foxio/README.md)
-- [Contributing](CONTRIBUTING.md) · [Security policy](SECURITY.md) · [License](LICENSE)
+- [Community ID v1 specification and test vectors](https://github.com/corelight/community-id-spec)
+- [Contributing](CONTRIBUTING.md) · [Security policy](SECURITY.md) · [Architecture and roadmap](docs/architecture.md)
+
+## Licenses and attribution
+
+The project uses the [MIT license](LICENSE). The HPACK tables come
+from the Go project and carry its [copyright notice and license](LICENSE-hpack).
+The [fingerprint fixture notes](testdata/foxio/README.md) identify the FoxIO
+captures, reference outputs and upstream license texts.

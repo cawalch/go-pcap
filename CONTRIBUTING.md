@@ -54,10 +54,12 @@ go test -run 'TestReaderAtFlowParity|TestFlowHandshakeTimestamp|ExampleFlowSumma
 
 The [consumer compatibility suite](testdata/consumer/contract_test.go) is a
 separate Go module. From `testdata/consumer`, run the same tests against
-the published private module and your checkout:
+the published module and your checkout. For a private clone, configure Go
+to access the repository directly with your GitHub credentials
+(`GOPRIVATE=github.com/cawalch/go-pcap`).
 
 ```sh
-GOPRIVATE=github.com/cawalch/go-pcap GOWORK=off go test -mod=readonly -count=1 ./...
+GOWORK=off go test -mod=readonly -count=1 ./...
 workdir=$(mktemp -d)
 (cd "$workdir" && go work init)
 export GOWORK="$workdir/go.work"
