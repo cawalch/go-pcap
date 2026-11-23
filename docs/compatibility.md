@@ -18,7 +18,8 @@ be added compatibly.
   Reassembled bytes within a direction follow TCP sequence order. A gap sets
   `SequenceGap` and concatenates the available ranges.
 - DNS capture records follow packet-index order. DHCPv4 and neighbor records
-  follow observation order. For combined web analysis, each slice returned
+  follow observation order. Neighbor binding changes follow the packet-index
+  order of the current observation. For combined web analysis, each slice returned
   by `Web` or `WebWithWebSockets` follows the corresponding standalone
   method. WebSocket capture records group cleartext before decrypted streams
   and client before server messages within a stream. Within a direction

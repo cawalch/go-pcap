@@ -284,6 +284,33 @@ uses the first applicable Ethernet link-layer option and checks all option
 lengths. Captures taken before transmit checksum offload can omit a valid
 checksum and therefore omit that observation.
 
+### Find changes in observed neighbor bindings
+
+Use `Capture.NeighborBindingChanges` or
+`Capture.NeighborBindingChangesFromReaderAt` to find where successive
+observations associate the same IP address with different hardware addresses.
+ARP requests and replies contribute the sender address pair. An IPv6 Neighbor
+Solicitation contributes its source IP and source link-layer option. A
+Neighbor Advertisement contributes its target IP and target link-layer option,
+including when its packet source differs from its target. The scan requires a
+unicast IP address and a nonzero unicast media access control (MAC) address.
+It skips duplicate address detection probes and packets without the relevant
+link-layer option.
+
+The scanners track Ethernet and Linux cooked v2 packets by capture interface,
+link type, ordered VLAN IDs, and the interface index in the cooked v2 header.
+They skip cooked v2 packets with an unknown interface index. Untagged packets
+and packets with VLAN ID 0 use separate scopes. Each accepted observation
+becomes the baseline, including repeated hardware addresses. A change reports
+both packet indices and timestamps, and results follow file order even when
+timestamps go backward. Use `Previous` and `Current` to inspect the operations
+and the Solicited and Override flags. Use deployment information to assess
+ownership and compare changes with events such as failover or reassignment.
+
+The existing neighbor scan limits apply. The scan retains at most one prior
+observation per scoped address and returns no partial changes if the scan
+exceeds the read budget or the 4096-observation limit.
+
 ## DHCPv4 address assignments
 
 Use `Capture.DHCPv4` or `Capture.DHCPv4FromReaderAt` to read Discover,

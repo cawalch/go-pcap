@@ -157,7 +157,7 @@ func TestNeighborRejectsMalformed(t *testing.T) {
 func TestNeighborScanLimits(t *testing.T) {
 	frames := make([][]byte, maxNeighborRecords+1)
 	for i := range frames {
-		frames[i] = neighborARP(1)
+		frames[i] = neighborARPWithMAC(1, byte(i%2+1))
 	}
 	raw := buildClassicPCAP(binary.LittleEndian, false, LinkTypeEthernet, 65535, frames)
 	c, err := New(raw)
@@ -167,6 +167,10 @@ func TestNeighborScanLimits(t *testing.T) {
 	got, err := c.Neighbors(raw)
 	if got != nil || !errors.Is(err, ErrNeighborLimit) {
 		t.Fatalf("got %d, %v", len(got), err)
+	}
+	changes, err := c.NeighborBindingChanges(raw)
+	if changes != nil || !errors.Is(err, ErrNeighborLimit) {
+		t.Fatalf("got %d binding changes, %v", len(changes), err)
 	}
 	frames = [][]byte{buildEthernetIPv4UDPFrame([4]byte{}, [4]byte{}, 1000, 2000, make([]byte, 32000)), neighborARP(2)}
 	raw = buildClassicPCAP(binary.LittleEndian, false, LinkTypeEthernet, 65535, frames)
