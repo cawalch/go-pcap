@@ -1046,6 +1046,10 @@ func (c *Capture) tlsFromStreams(streams []TCPStream, extraKeyLog []byte) ([]TLS
 		return nil, err
 	}
 
+	return tlsRecordsFromStreams(streams, keyLog)
+}
+
+func tlsRecordsFromStreams(streams []TCPStream, keyLog *TLSKeyLog) ([]TLSRecord, error) {
 	var records []TLSRecord
 	for i := range streams {
 		st, _, _ := proxyStream(streams[i])

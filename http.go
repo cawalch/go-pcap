@@ -615,41 +615,31 @@ func (c *Capture) HTTP(data []byte) ([]HTTPRecord, error) {
 	if err != nil {
 		return nil, err
 	}
+	keys, _ := c.TLSKeyLog(nil)
 	var records []HTTPRecord
-	decodedBudget := httpDecodeBudget{remaining: MaxHTTPDecodedBodyBytesPerScan}
-	for i := range streams {
-		inner, clientOffset, serverOffset := proxyStream(streams[i])
-		if clientOffset != 0 {
-			client, server := streams[i].Client.Data, streams[i].Server.Data
-			if inner.SrcAddr != streams[i].SrcAddr || inner.SrcPort != streams[i].SrcPort {
-				client, server = server, client
-			}
-			if bytes.HasPrefix(client, []byte("CONNECT ")) {
-				// A successful CONNECT ends at the blank line in each direction.
-				// Bound the outer response so its body cannot consume tunnel data.
-				outer := inner
-				outer.Client.Data, outer.Server.Data = client[:clientOffset], server[:serverOffset]
-				if err := appendHTTPFromTCPStream(&outer, false, &records, &decodedBudget, 0, 0); err != nil {
-					return nil, err
-				}
-			}
-		}
-		streams[i] = inner // Reuse this view for key-log decryption below.
-		if err := appendHTTPFromTCPStream(&streams[i], false, &records, &decodedBudget, clientOffset, serverOffset); err != nil {
-			return nil, err
-		}
-	}
-
-	// Inspect DSB-decrypted TLS streams after cleartext streams.
-	if keys, err := c.TLSKeyLog(nil); err == nil && len(keys.Entries) > 0 {
-		decStreams := decryptTLSStreams(streams, keys)
-		for i := range decStreams {
-			if err := appendHTTPFromTCPStream(&decStreams[i], true, &records, &decodedBudget, 0, 0); err != nil {
-				return nil, err
-			}
-		}
+	if err := scanHTTPStreams(streams, keys, &records, nil); err != nil {
+		return nil, err
 	}
 	return records, nil
+}
+
+func appendClearHTTP(wire, inner *TCPStream, clientOffset, serverOffset int, records *[]HTTPRecord, decodedBudget *httpDecodeBudget) error {
+	if clientOffset != 0 {
+		client, server := wire.Client.Data, wire.Server.Data
+		if inner.SrcAddr != wire.SrcAddr || inner.SrcPort != wire.SrcPort {
+			client, server = server, client
+		}
+		if bytes.HasPrefix(client, []byte("CONNECT ")) {
+			// A successful CONNECT ends at the blank line in each direction.
+			// Bound the outer response so its body cannot consume tunnel data.
+			outer := *inner
+			outer.Client.Data, outer.Server.Data = client[:clientOffset], server[:serverOffset]
+			if err := appendHTTPFromTCPStream(&outer, false, records, decodedBudget, 0, 0); err != nil {
+				return err
+			}
+		}
+	}
+	return appendHTTPFromTCPStream(inner, false, records, decodedBudget, clientOffset, serverOffset)
 }
 
 func appendHTTPFromTCPStream(st *TCPStream, isDecrypted bool, records *[]HTTPRecord, decodedBudget *httpDecodeBudget, clientOffset, serverOffset int) error {

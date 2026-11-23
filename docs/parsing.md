@@ -541,6 +541,13 @@ cleartext and decrypted directions. The budget counts bytes produced before a
 decoding failure and charges up to 4 MiB per message. On budget exhaustion,
 the call returns an error wrapping `ErrHTTPLimit` and no records.
 
+When you need TLS, HTTP/1 and HTTP/2 together, call `capture.Web(data)`.
+It reassembles the capture's TCP streams once and shares the decrypted
+application bytes between the HTTP parsers. The returned `TLS`, `HTTP` and
+`HTTP2` slices follow the same ordering and limits as the individual methods,
+including outer CONNECT records and cleartext records before decrypted ones.
+An analysis error returns an empty result.
+
 For HTTP/2 (`h2c` cleartext or decrypted TLS `h2`), call
 `ParseHTTP2Frames(stream)` or `capture.HTTP2(data)` to parse the 24-byte HTTP/2
 client preface, `SETTINGS` parameter pairs and `SettingsFingerprint`
