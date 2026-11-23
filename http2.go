@@ -310,18 +310,23 @@ func appendHTTP2FromTCPStream(st *TCPStream, isDecrypted bool, records *[]HTTP2R
 // fingerprint formats the observed initial client settings, window, priorities,
 // and pseudo-header order after the first request header block completes.
 func (out *HTTP2Summary) fingerprint(priorities []string, block HTTP2HeaderBlock) string {
-	var order []string
+	// Four request pseudo-headers and their separators fit on the stack.
+	var buf [7]byte
+	order := buf[:0]
 	for _, f := range block.Headers {
 		switch f.Name {
 		case ":method", ":scheme", ":authority", ":path":
-			order = append(order, f.Name[1:2])
+			if len(order) != 0 {
+				order = append(order, ',')
+			}
+			order = append(order, f.Name[1])
 		}
 	}
 	priority := "0"
 	if len(priorities) > 0 {
 		priority = strings.Join(priorities, ",")
 	}
-	return out.SettingsFingerprint + "|" + strconv.FormatUint(uint64(out.WindowUpdate), 10) + "|" + priority + "|" + strings.Join(order, ",")
+	return out.SettingsFingerprint + "|" + strconv.FormatUint(uint64(out.WindowUpdate), 10) + "|" + priority + "|" + string(order)
 }
 
 func isHTTP2HeaderFrame(kind uint8) bool {

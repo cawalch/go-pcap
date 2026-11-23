@@ -33,7 +33,11 @@ func hpackHuffman(src []byte) (string, error) {
 	tree := hpackTree()
 	node, tail := 0, 0
 	ones := true
-	out := make([]byte, 0, min(len(src), MaxHTTPHeaderLineBytes))
+	var scratch [64]byte
+	out := scratch[:0]
+	if len(src) > len(scratch) {
+		out = make([]byte, 0, min(len(src), MaxHTTPHeaderLineBytes))
+	}
 	for _, b := range src {
 		for shift := 7; shift >= 0; shift-- {
 			bit := (b >> shift) & 1
@@ -204,6 +208,11 @@ func (t *hpackTable) decode(data []byte, remaining *int) (HTTP2HeaderBlock, erro
 			return block, ErrHTTPLimit
 		}
 		*remaining -= cost
+		if block.Headers == nil {
+			// Most requests start with several indexed pseudo-headers. Each
+			// remaining byte can represent at most one additional field.
+			block.Headers = make([]HTTPHeader, 0, 1+min(len(p), 3))
+		}
 		block.Headers = append(block.Headers, field)
 		switch field.Name {
 		case ":method":

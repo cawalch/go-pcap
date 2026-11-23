@@ -196,13 +196,19 @@ func TestMixedWebCapture(t *testing.T) {
 }
 
 // RFC 7541 appendix C.4, across three request streams in one direction.
+var rfc7541HuffmanRequests = []string{
+	"828684418cf1e3c2e5f23a6ba0ab90f4ff",
+	"828684be5886a8eb10649cbf",
+	"828785bf408825a849e95ba97d7f8925a849e95bb8e8b4bf",
+}
+
 func TestHTTP2HPACKRequests(t *testing.T) {
 	var wire bytes.Buffer
 	wire.Write(HTTP2ClientPreface)
 	wire.Write(buildHTTP2Frame(HTTP2FrameSettings, 0, 0, []byte{0, 1, 0, 1, 0, 0}))
 	wire.Write(buildHTTP2Frame(HTTP2FrameWindowUpdate, 0, 0, []byte{0, 0, 0, 42}))
 	wire.Write(buildHTTP2Frame(HTTP2FramePriority, 0, 3, []byte{128, 0, 0, 0, 200}))
-	for i, encoded := range []string{"828684418cf1e3c2e5f23a6ba0ab90f4ff", "828684be5886a8eb10649cbf", "828785bf408825a849e95ba97d7f8925a849e95bb8e8b4bf"} {
+	for i, encoded := range rfc7541HuffmanRequests {
 		block, err := hex.DecodeString(encoded)
 		if err != nil {
 			t.Fatal(err)

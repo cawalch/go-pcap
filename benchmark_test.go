@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"compress/gzip"
 	"encoding/binary"
+	"encoding/hex"
 	"fmt"
 	"io"
 	"os"
@@ -261,6 +262,34 @@ func BenchmarkReaderAtFlows(b *testing.B) {
 					}
 				}
 			})
+		}
+	}
+}
+
+// RFC 7541 Appendix C.4 uses Huffman literals and dynamic references across
+// three requests on the same connection.
+func BenchmarkCaptureHTTP2Huffman(b *testing.B) {
+	req := bytes.Clone(HTTP2ClientPreface)
+	for i, encoded := range rfc7541HuffmanRequests {
+		block, err := hex.DecodeString(encoded)
+		if err != nil {
+			b.Fatal(err)
+		}
+		req = append(req, buildHTTP2Frame(HTTP2FrameHeaders, 4, uint32(2*i+1), block)...)
+	}
+	var frames [][]byte
+	for i := range 32 {
+		frames = append(frames, buildEthernetIPv4TCPFrame([4]byte{10, 0, 0, 1}, [4]byte{10, 0, 0, 2}, uint16(30000+i), 80, 1, 0, TCPFlagACK, req))
+	}
+	raw := buildPCAPNGFixture(binary.LittleEndian, nil, frames)
+	c, err := New(raw)
+	if err != nil {
+		b.Fatal(err)
+	}
+	b.ReportAllocs()
+	for b.Loop() {
+		if _, err := c.HTTP2(raw); err != nil {
+			b.Fatal(err)
 		}
 	}
 }
