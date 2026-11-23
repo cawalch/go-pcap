@@ -22,8 +22,14 @@ and application resource use; `Open` reads the entire file. Parser limits and
 tests do not guarantee that every input is safe. See the
 [parsing guide](docs/parsing.md) for work and output limits.
 
-## Pull request execution
+## Starting CI
 
-GitHub-hosted runners execute pull requests. Keep private-network runners
-unregistered from this repository, including while evaluating a contribution.
-A contributor can change the workflow as well as the code it runs.
+The repository owner starts CI explicitly on GitHub-hosted runners. To test
+the default branch, run `gh workflow run ci.yml --ref main`. To test a
+reviewed branch in this repository, substitute its branch name. Each job
+checks the owner's numeric account ID and the account requesting the run or
+rerun before GitHub allocates a runner. Pushes, pull requests and schedules
+have no automatic trigger in this workflow.
+
+GitHub also requires approval for workflows from all external fork
+contributors. Keep private-network runners unregistered from this repository.

@@ -1,17 +1,14 @@
 name: Go
 on:
-  push:
-  pull_request:
-  schedule:
-    - cron: "23 6 * * 1"
   workflow_dispatch:
 permissions:
   contents: read
 concurrency:
-  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 jobs:
   test:
+    if: github.actor_id == '795605' && github.triggering_actor == github.repository_owner
     strategy:
       matrix:
         go: ['1.26.x', stable]
@@ -68,6 +65,7 @@ jobs:
           done
 
   platform-test:
+    if: github.actor_id == '795605' && github.triggering_actor == github.repository_owner
     strategy:
       fail-fast: false
       matrix:
@@ -85,6 +83,7 @@ jobs:
       - run: go test ./...
 
   vulnerabilities:
+    if: github.actor_id == '795605' && github.triggering_actor == github.repository_owner
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
@@ -101,6 +100,7 @@ jobs:
         run: govulncheck -test ./...
 
   lint:
+    if: github.actor_id == '795605' && github.triggering_actor == github.repository_owner
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
