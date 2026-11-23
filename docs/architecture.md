@@ -2,27 +2,32 @@
 
 This guide describes the library design, release criteria, and scope of protocol additions.
 
-## Design pillars
+## From a file to a protocol record
 
-1. **Zero third-party dependencies (`CGO_ENABLED=0`).** All container parsing,
-   protocol dissection, live socket capture (`syscall`), cryptographic key
-   derivation (`crypto/hkdf`), cipher decryption (`crypto/aes`, `crypto/cipher`),
-   and certificate parsing (`crypto/x509`) use only the Go standard library.
-2. **Synchronous, caller-owned memory.** `New(data)` parses container headers,
-   interface descriptors, Decryption Secrets Blocks (`DSB`), and block extents
-   without retaining `data` or spawning background goroutines.
-3. **Zero-allocation hot paths and low GC pressure.**
-   - Non-capture inputs fail the 4-byte magic gate in under 5 ns with 0 heap
-     allocations.
-   - `DecodeFrame` uses a fixed-capacity stack array (`[MaxFrameLayers]LayerSpan`)
-     and `netip.Addr` value types so L2–L4 decoding performs 0 heap allocations.
-   - Payload bodies are referenced via `(Offset, Length)` byte ranges into the
-     caller's slice rather than cloned upfront.
-4. **Explicit work limits and anomaly flags.** Every parser enforces strict count
-   and byte limits (`MaxInterfaces`, `MaxPackets`, `MaxFlows`,
-   `MaxDecryptionSecrets`, `MaxFrameLayers`) and reports structural anomalies
-   (such as truncated blocks, snaplen mismatches, IP header length conflicts, or
-   overlapping TCP segments) without panicking.
+1. **Read the container.** PCAP records use a file-wide link type. PcapNG
+   packets refer to an interface in their own section, so the same local
+   interface number can refer to different link types or timestamp resolutions.
+   Opening the capture resolves those descriptions and records any embedded
+   name mappings, process information, and decryption secrets.
+2. **Locate and decode packets.** A packet record gives the frame's byte range,
+   link type, and timestamp. `DecodeFrame` walks a bounded stack of link,
+   tunnel, network, and transport headers. A caller interested only in
+   packet counts or timestamps can stop before decoding frame payloads.
+3. **Group related packets.** Flow aggregation uses the transport protocol and
+   both address/port pairs. It assigns each bidirectional conversation a
+   capture-local index. A flow's source is the first endpoint observed, which
+   can be the server in a capture started mid-connection.
+4. **Recover messages.** A protocol determines what needs reassembly. DNS can
+   occupy a fragmented UDP datagram or span several TCP segments. TLS handshake
+   records travel in TCP streams, while QUIC Initials carry TLS handshake
+   bytes in CRYPTO frames. The selected dissector determines which packet
+   payloads a ReaderAt scan needs to read.
+
+Parsing is synchronous and uses only the Go standard library. The caller owns
+the input. A `Capture` retains metadata and packet counts, and subsequent calls
+read the source again as needed. Byte and count limits apply at different
+stages, including input reads, TCP reassembly, and decoded output.
+[Buffer ownership and limits](parsing.md#parse-capture-containers)
 
 ## Release roadmap
 
@@ -40,9 +45,9 @@ work required before the first experimental tag.
 
 Before tagging, verify the documented [ReaderAt limits](parsing.md#parse-capture-containers)
 and describe the extent of live capture testing for each supported platform.
-Linux, macOS and Windows CI run unit tests. The live tests cover argument
-validation and buffer handling. Successful device reads and kernel filter
-behavior require separate verification on a host with capture permissions.
+The CI workflow defines Linux, macOS, and Windows checks. The Linux PR jobs
+also exercise live loopback counters on amd64 and 386 using a test binary with
+raw-socket permissions. [CI workflow](../.github/workflows/ci.yml)
 
 ### After v0.1.0 — large captures and repeated analysis
 
@@ -50,8 +55,8 @@ ReaderAt packet iteration uses bounded read-ahead on files. Use
 `BenchmarkReaderAtScan` to compare read counts, bytes read and allocations
 for metadata scans, packet collection and flows. `BenchmarkReaderAtProtocols`
 and `BenchmarkReaderAtFileProtocols` compare mixed-traffic scans in memory
-and on a warm file. Measure the benefit of [reusing TCP streams in HTTP and HTTP/2](https://github.com/cawalch/go-pcap/issues/41)
-on captures with and without decryption keys before changing segment storage.
+and on a warm file. For keyed HTTP analysis, compare captures with and without
+decryption keys. [TCP stream reuse in HTTP and HTTP/2](https://github.com/cawalch/go-pcap/issues/41)
 Use `BenchmarkCaptureFingerprints` and `BenchmarkCaptureQUICInitials` to
 measure formatting and decryption costs across complete capture scans.
 Schedule compiler bounds-check work when those measurements justify it.
@@ -67,19 +72,25 @@ The [go-yara adapter](https://github.com/cawalch/go-yara/issues/646) belongs to
 the consuming repository. Its schema and release schedule are owned there.
 The [original design discussion](https://github.com/cawalch/go-pcap/issues/19) records the proposed adapter contract.
 
-## Protocol expansion model
+## Where to make a change
 
-To add a new L2/L3 encapsulation protocol:
+The module exposes one import path. Its public entry points are package
+functions for individual buffers and methods on `Capture` for whole-capture
+analysis. Protocol files can use the same private packet walkers, bounds
+checks, and reassembly code. The external-package examples exercise the API
+as a caller sees it. [Go module layout](https://go.dev/doc/modules/layout) ·
+[Public API examples](../example_test.go)
 
-1. Add the `LinkType`, `EtherType`, or `IPProto` constant in `types.go`.
-2. Extend `DecodeFrame` in `frame.go` to append a `LayerSpan` to `Frame.Layers`
-   and advance the cursor offset with explicit bounds checks.
-3. Add unit tests (`frame_test.go`), bounds tests (`frame_bounds_test.go`), and
-   seed corpora (`fuzz_test.go`).
+| Change | Start here | Check the boundary |
+| --- | --- | --- |
+| Container framing, timestamps, or PcapNG options | [pcap.go](../pcap.go) for slice walks and shared block decoders, [readerat.go](../readerat.go) for file reads | Exercise both open and packet iteration. Include multiple sections for interface changes. |
+| Frame or tunnel decoding | [frame.go](../frame.go) | Exercise truncated headers and nested layers. A new header can also change how many bytes ReaderAt needs to identify a flow. |
+| Flow counters, direction, or handshake fields | [flow.go](../flow.go) for aggregation on both inputs | Check complete summaries with `TestReaderAtFlowParity`. Benchmark `BenchmarkFlows` and the flow cases in `BenchmarkReaderAtScan`. |
+| Reassembly or protocol metadata | Start in the protocol file, such as [dns.go](../dns.go). Shared TCP ordering lives in [reassembly.go](../reassembly.go). [tcp_messages.go](../tcp_messages.go) adds length framing and packet attribution for DNS and Kerberos. | Test the direct parser and the capture method. For DNS, TLS, or QUIC, include the ReaderAt path. Fingerprint changes also have [reference fixtures](../testdata/foxio/README.md). |
+| Capture output or live I/O | [writer.go](../writer.go), [extract.go](../extract.go), or the `live_*.go` file for the target OS | Reopen written bytes and compare packet metadata. Exercise live reads, filters, and counters on the target OS. |
 
-To add a new L7 protocol dissector (`<proto>`):
-
-1. Create `proto_<proto>.go` exposing both a standalone `Parse<Proto>(payload []byte)`
-   function and a capture-level `(c *Capture) <Proto>(data []byte)` method.
-2. Pair it with `proto_<proto>_test.go`, `proto_<proto>_bounds_test.go`,
-   `proto_<proto>_fuzz_test.go`, and `proto_<proto>_benchmark_test.go`.
+Use `types.go` for shared constants, limits, and sentinel errors. Put a
+protocol-specific result type beside the parser that produces it. Most
+changes fit in the owning file and its existing tests. For a new public
+observation, document the zero value, how callers recognize missing data,
+and which input paths produce it. [Contributor verification guide](../CONTRIBUTING.md#validate-a-change)

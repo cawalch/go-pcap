@@ -44,13 +44,22 @@ go vet ./...
 go test -race -cover ./...
 ```
 
-For parser or reader changes, run the applicable fuzz target:
+For a focused edit, start with the [source and test map](docs/architecture.md#where-to-make-a-change).
+For example, after changing a flow field, exercise both reader paths and an
+external caller:
 
 ```sh
-go test -run '^$' -fuzz '^FuzzNew$' -fuzztime=30s -parallel=2
-go test -run '^$' -fuzz '^FuzzSafeReader$' -fuzztime=30s -parallel=2
-go test -run '^$' -fuzz '^FuzzPackets$' -fuzztime=30s -parallel=2
-go test -run '^$' -fuzz '^FuzzDecodeFrame$' -fuzztime=30s -parallel=2
+go test -run 'TestReaderAtFlowParity|TestFlowHandshakeTimestamp|ExampleFlowSummary' .
+```
+
+CI tests the Go 1.26 compatibility floor and the current stable toolchain.
+Use the patched release for each line when reproducing a result. The Linux
+jobs cover race detection and 32-bit arithmetic. The stable job discovers
+fuzz targets with `go test -list '^Fuzz' .` and runs each for a bounded time.
+To exercise the ReaderAt parity target locally:
+
+```sh
+go test -run '^$' -fuzz '^FuzzReaderAt$' -fuzztime=30s -parallel=2 .
 ```
 
 The tests use synthetic PCAP and PcapNG fixtures built in memory and offline
@@ -70,10 +79,21 @@ To collect timing and allocation samples, run the benchmarks:
 go test -run '^$' -bench . -benchmem -count=5
 ```
 
-Record the Go version, CPU, workload, and raw results. Benchmarks cover
-rejecting non-capture input, parsing classic PCAP and PcapNG containers,
-enumerating packets, decoding L2–L4 frames without heap allocations, and
-aggregating 5-tuple flows.
+For a flow-accounting change, run the same fixtures on both revisions:
+
+```sh
+go test -run '^$' -bench '^BenchmarkFlows$|^BenchmarkReaderAtScan$/./^flows$' -benchmem -count=10 .
+```
+
+Record the Go patch version, OS, CPU, and inputs with the samples. The
+ReaderAt benchmarks report calls and bytes read alongside time and heap
+allocations. Compare repeated samples with `benchstat`. Use a CPU or heap
+profile when an end-to-end result changes enough to investigate. Go 1.27
+changed how the compiler allocates small objects, so use the same toolchain
+on both sides of a source comparison.
+[Go 1.27 runtime changes](https://go.dev/doc/go1.27#runtime) ·
+[Go diagnostics](https://go.dev/doc/diagnostics) ·
+[benchstat](https://pkg.go.dev/golang.org/x/perf/cmd/benchstat)
 
 ## Report vulnerabilities
 
