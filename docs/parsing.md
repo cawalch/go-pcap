@@ -32,7 +32,10 @@ known, call `NewWithLength(data, streamLength)`. For large files on disk, call
 `NewFromReaderAt(r, size)` to parse container metadata without reading the
 entire capture into a single byte slice. On a file (including a wrapper exposing `Fd() uintptr`), a scan can
 prefetch up to 64 KiB of adjacent bytes, including frame data. Each scan owns
-its window. Other readers receive exact range requests. The PcapNG scanner parses packet headers,
+its window. Other readers receive exact range requests. Opening a PcapNG capture
+validates its metadata blocks. Later packet walks reuse that validation and skip
+name resolution, interface statistics, and decryption secrets block bodies.
+They still read interface descriptions, process events, packet headers,
 options and block trailers. Each buffered PcapNG metadata read is limited to
 `MaxSnapLen + 4096` bytes. Use `PacketSeqFromReaderAt` to process records
 in order and break when you have enough. `PacketsFromReaderAt` collects a
@@ -271,6 +274,15 @@ extract DNS queries and responses over UDP (ports 53, 5353, 5355) and TCP (port
 jump at most `MaxDNSCompressionJumps` times. Use `capture.HasDNSQuery(data, qname)`
 to test whether a capture queries a domain without allocating `DNSRecord` slices.
 
+A TCP segment can end halfway through a DNS message or contain multiple
+messages. The scanner orders each direction by TCP sequence number and reads
+each message using its two-byte length prefix. If a gap breaks framing, it
+stops decoding that direction. For a split message, `PacketIndex` and
+`TimestampNs` identify the packet supplying the first prefix byte. This lets
+you locate the message in the original capture even when the final bytes
+arrived later. Slice and ReaderAt scans return records in packet-index order.
+[DNS over TCP (RFC 7766)](https://www.rfc-editor.org/rfc/rfc7766)
+
 For SVCB and HTTPS records, inspect `rr.ServiceBinding` for the priority,
 ordered ALPN identifiers, optional port, and presence of a nonempty ECH
 configuration. `rr.Target` is the advertised name (empty for the DNS root).
@@ -286,7 +298,9 @@ To evaluate DNS tunneling or high-entropy subdomain indicators, call
 `DNSLabelEntropy(qname)` on a domain name or `capture.DNSDomainStats(data)` to
 aggregate query counts, unique subdomain fan-out, `NXDOMAIN` counts, maximum
 label length, subdomain Shannon entropy, TXT answer payload volume, and a
-composite `TunnelScore` ($[0.0, 1.0]$) per registrable apex domain.
+composite `TunnelScore` ($[0.0, 1.0]$) per group. Grouping uses the last two
+labels, so both
+`a.example.co.uk` and `b.other.co.uk` contribute to `co.uk`.
 
 ## Parse TLS handshakes and JA4+ fingerprints
 
@@ -306,7 +320,9 @@ and `Certificate` handshake messages:
   IDs. The parser skips the public-key bytes.
 - `ClientHello.HasECH` reports a nonempty encrypted_client_hello extension.
   This observation includes GREASE ECH offers. The extension ID also appears
-  in `Extensions` when its payload is empty.
+  in `Extensions` when its payload is empty. A passive observer can read the
+  outer ClientHello. The inner server name remains encrypted.
+  [Encrypted Client Hello (RFC 9849)](https://www.rfc-editor.org/rfc/rfc9849)
 - `ServerHello.SelectedGroup` gives the group from a structurally valid
   server key share (zero when unavailable). If `IsHelloRetryRequest` is true,
   the group is the one requested for the next ClientHello. For example,
@@ -346,7 +362,12 @@ Call `DecryptQUICInitial(datagrams)` on a slice of UDP payloads or call
 Initial packets using `crypto/hkdf` and `crypto/aes`, remove header protection,
 reassemble `CRYPTO` frames across UDP packets, and parse the inner TLS 1.3
 `ClientHello` (`q13...` JA4 fingerprint). Use `capture.HasQUICJA4(data, ja4)`
-and `capture.HasQUICSNI(data, sni)` for direct matching.
+and `capture.HasQUICSNI(data, sni)` for direct matching. Initial keys can be
+derived from the version-specific salt and the client’s destination connection
+ID. Application traffic uses separate keys. The Initial parser exposes the
+handshake metadata even when application payloads remain opaque.
+[QUIC v1 Initial secrets](https://www.rfc-editor.org/rfc/rfc9001#section-5.2) ·
+[QUIC v2 changes](https://www.rfc-editor.org/rfc/rfc9369#section-3.3)
 
 ## Decrypt TLS 1.2 and TLS 1.3 streams offline
 
@@ -384,6 +405,9 @@ extract SMB2/3 `NEGOTIATE` and `SESSION_SETUP` metadata (dialect revision,
 signing flags, message/session IDs) and embedded NTLMSSP Type 1, Type 2, and
 Type 3 tokens (server challenge, target/domain/user/workstation strings, and
 NetBIOS/DNS computer and domain names from target info attribute-value pairs).
+NTLM extraction examines the declared security buffer. Capture walks can skip
+NetBIOS keep-alives, SMB1 negotiation, and complete oversized data frames to
+reach later SMB2 commands on the same connection.
 
 For a `TREE_CONNECT` request, `Message.ShareName` gives the full UNC path.
 For a `CREATE` request, `Message.FileName` gives the wire name, including a
@@ -403,7 +427,11 @@ header. The ciphertext stays opaque.
 Call `ParseKRB5(buf)` or `capture.Kerberos(data)` to decode ASN.1 DER Kerberos
 v5 `AS-REQ`, `AS-REP`, `TGS-REQ`, `TGS-REP`, and `KRB-ERROR` messages over UDP
 and TCP port 88, including client/service principal names, realm, requested
-encryption types, and weak `RC4-HMAC` (`etype 23`, Kerberoasting) indicators.
+encryption types, and the encryption types on replies. Use `HasRC4HMAC` to
+find messages mentioning encryption type 23 when auditing legacy crypto.
+On TCP, the scanner reassembles each port-88 direction and attributes the
+message to the packet containing the first byte of its four-byte record mark.
+[Kerberos over TCP (RFC 4120)](https://www.rfc-editor.org/rfc/rfc4120#section-7.2.2)
 
 Call `ParseRDPNegotiation(buf)` or `capture.RDP(data)` to decode TPKT / X.224
 Connection Request and Connection Confirm PDUs, `Cookie: mstshash=...` tokens,

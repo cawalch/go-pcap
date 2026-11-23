@@ -42,24 +42,13 @@ jobs:
           done
       - name: Bounded fuzz smoke tests
         if: matrix.go == 'stable'
+        shell: bash
         run: |
-          go test -run '^$' -fuzz '^FuzzSafeReader$' -fuzztime=10s -parallel=2
-          go test -run '^$' -fuzz '^FuzzNew$' -fuzztime=10s -parallel=2
-          go test -run '^$' -fuzz '^FuzzPackets$' -fuzztime=10s -parallel=2
-          go test -run '^$' -fuzz '^FuzzDecodeFrame$' -fuzztime=10s -parallel=2
-          go test -run '^$' -fuzz '^FuzzReassembleTCP$' -fuzztime=10s -parallel=2
-          go test -run '^$' -fuzz '^FuzzParseDNS$' -fuzztime=10s -parallel=2
-          go test -run '^$' -fuzz '^FuzzParseTLSRecords$' -fuzztime=10s -parallel=2
-          go test -run '^$' -fuzz '^FuzzDecryptQUICInitial$' -fuzztime=10s -parallel=2
-          go test -run '^$' -fuzz '^FuzzParseHTTP$' -fuzztime=10s -parallel=2
-          go test -run '^$' -fuzz '^FuzzParseSSHHandshake$' -fuzztime=10s -parallel=2
-          go test -run '^$' -fuzz '^FuzzParseSMB2AndNTLM$' -fuzztime=10s -parallel=2
-          go test -run '^$' -fuzz '^FuzzParseBPFBuffer$' -fuzztime=10s -parallel=2
-          go test -run '^$' -fuzz '^FuzzDefragmentIP$' -fuzztime=10s -parallel=2
-          go test -run '^$' -fuzz '^FuzzParseHTTP2Frames$' -fuzztime=10s -parallel=2
-          go test -run '^$' -fuzz '^FuzzEvalBPF$' -fuzztime=10s -parallel=2
-          go test -run '^$' -fuzz '^FuzzParseKRB5$' -fuzztime=10s -parallel=2
-          go test -run '^$' -fuzz '^FuzzParseRDPNegotiation$' -fuzztime=10s -parallel=2
+          targets=$(go test -list '^Fuzz' . | sed -n '/^Fuzz[[:alnum:]_]*$/p')
+          test -n "$targets"
+          for target in $targets; do
+            go test -run '^$' -fuzz "^${target}$" -fuzztime=10s -parallel=2 .
+          done
 
   platform-test:
     strategy:

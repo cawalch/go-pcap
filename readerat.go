@@ -238,16 +238,7 @@ func (c *Capture) FlowsFromReaderAt(r io.ReaderAt) ([]FlowSummary, error) {
 		defer w.release()
 		r = w
 	}
-	type tcpHandshakeTime struct {
-		synNs      int64
-		synAckNs   int64
-		hasSYN     bool
-		hasSYNACK  bool
-		hasClientL bool
-	}
-	var table flowIndexTable
-	var flows []FlowSummary
-	var hsTimes []tcpHandshakeTime
+	var acc flowAccumulator
 	var header [256]byte
 	var scratch []byte
 	budget := scanReadBudget{r: r, remaining: MaxReaderAtScanBytes}
@@ -280,104 +271,11 @@ func (c *Capture) FlowsFromReaderAt(r io.ReaderAt) ([]FlowSummary, error) {
 		if frame.IPVersion == 0 {
 			continue
 		}
-		l4Len := uint64(frame.PayloadLength)
-
-		key, _ := makeCanonicalFlowKey(frame.IPProtocol, frame.SrcAddr, frame.SrcPort, frame.DstAddr, frame.DstPort)
-		idx, exists, err := table.lookupOrInsert(key)
-		if err != nil {
+		if err := acc.observe(&pkt, &frame, payload); err != nil {
 			return nil, err
 		}
-		if !exists {
-			flows = append(flows, FlowSummary{
-				Protocol:         frame.IPProtocol,
-				SrcAddr:          frame.SrcAddr,
-				DstAddr:          frame.DstAddr,
-				SrcPort:          frame.SrcPort,
-				DstPort:          frame.DstPort,
-				FirstTimestampNs: pkt.TimestampNs,
-				LastTimestampNs:  pkt.TimestampNs,
-				ProcessID:        pkt.ProcessID,
-				UserID:           pkt.UserID,
-				ProcessName:      pkt.ProcessName,
-				ProcessArgs:      pkt.ProcessArgs,
-				ContainerID:      pkt.ContainerID,
-				HasProcessID:     pkt.HasProcessID,
-				HasUserID:        pkt.HasUserID,
-				PortsUnavailable: !frame.hasPorts,
-			})
-			hsTimes = append(hsTimes, tcpHandshakeTime{})
-		}
-
-		flow := &flows[idx]
-		if flow.PortsUnavailable && frame.hasPorts {
-			flow.PortsUnavailable = false
-		}
-		hst := &hsTimes[idx]
-		flow.PacketCount++
-		if pkt.TimestampNs < flow.FirstTimestampNs {
-			flow.FirstTimestampNs = pkt.TimestampNs
-		}
-		if pkt.TimestampNs > flow.LastTimestampNs {
-			flow.LastTimestampNs = pkt.TimestampNs
-		}
-		if !flow.HasProcessID && pkt.HasProcessID {
-			flow.ProcessID = pkt.ProcessID
-			flow.HasProcessID = true
-		}
-		if !flow.HasUserID && pkt.HasUserID {
-			flow.UserID = pkt.UserID
-			flow.HasUserID = true
-		}
-		if flow.ProcessName == "" && pkt.ProcessName != "" {
-			flow.ProcessName = pkt.ProcessName
-		}
-		if flow.ProcessArgs == "" && pkt.ProcessArgs != "" {
-			flow.ProcessArgs = pkt.ProcessArgs
-		}
-		if flow.ContainerID == "" && pkt.ContainerID != "" {
-			flow.ContainerID = pkt.ContainerID
-		}
-		if frame.TCPFlags&TCPFlagSYN != 0 && frame.TCPOptionsLength != 0 {
-			flow.observeTCPTimestamp(&frame, payload)
-		}
-		flow.TCPFlags |= frame.TCPFlags
-		flow.Anomalies = mergeFrameAnomalies(flow.Anomalies, frame.Anomalies)
-
-		if frame.SrcAddr == flow.SrcAddr && frame.SrcPort == flow.SrcPort {
-			flow.ClientPackets++
-			flow.ClientBytes += l4Len
-			if (frame.TCPFlags & (TCPFlagSYN | TCPFlagACK)) == TCPFlagSYN {
-				if flow.ClientJA4T == "" {
-					if fp, ok := frame.JA4T(payload); ok {
-						flow.ClientJA4T = fp
-					}
-				}
-				if !hst.hasSYN {
-					hst.synNs = pkt.TimestampNs
-					hst.hasSYN = true
-				}
-			} else if hst.hasSYNACK && !hst.hasClientL && (frame.TCPFlags&TCPFlagACK) != 0 {
-				flow.ClientJA4L = JA4L(pkt.TimestampNs-hst.synAckNs, frame.TTL)
-				hst.hasClientL = true
-			}
-		} else {
-			flow.ServerPackets++
-			flow.ServerBytes += l4Len
-			if (frame.TCPFlags & (TCPFlagSYN | TCPFlagACK)) == (TCPFlagSYN | TCPFlagACK) {
-				if flow.ServerJA4TS == "" {
-					if fp, ok := frame.JA4T(payload); ok {
-						flow.ServerJA4TS = fp
-					}
-				}
-				if hst.hasSYN && !hst.hasSYNACK {
-					hst.synAckNs = pkt.TimestampNs
-					hst.hasSYNACK = true
-					flow.ServerJA4L = JA4L(pkt.TimestampNs-hst.synNs, frame.TTL)
-				}
-			}
-		}
 	}
-	return flows, nil
+	return acc.flows, nil
 }
 
 // completeFlowPrefix accounts for the missing payload tail when the prefix
