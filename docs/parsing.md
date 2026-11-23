@@ -226,6 +226,33 @@ Atomic IPv6 packets are decoded independently of pending fragment groups.
 The [fingerprint reference fixtures](../testdata/foxio/README.md) identify the
 FoxIO revisions and inputs used for compatibility tests.
 
+## Observe ARP and IPv6 neighbors
+
+Use `Capture.Neighbors` or `Capture.NeighborsFromReaderAt` to read local-link
+messages as observed on the wire, in packet order. A guest VLAN observer can join each observation to
+controller logs by capture interface and timestamp. Repeated observations on
+different interfaces retain their own packet indices.
+
+For Ethernet/IPv4 ARP, inspect `Operation` for a request or reply. A probe
+carries an unspecified sender IP address. The record preserves both protocol
+addresses and both six-byte hardware fields, including all-zero fields.
+For IPv6 Neighbor Discovery, a Solicitation can supply a source link-layer
+address, and an Advertisement can supply a target link-layer address.
+Missing options yield nil hardware addresses. An Advertisement also reports
+the Router, Solicited and Override flags.
+
+Both scanners accept up to four VLAN tags and inspect the outer network
+protocol. They use a 96-byte frame prefix and extend it only for candidate
+IPv6 datagrams with at most 4096 bytes of IPv6 payload. They share the 64 MiB
+read budget and a 4096-record limit. ARP requires Ethernet hardware, IPv4
+protocol and the corresponding address lengths. IPv6 checks include hop
+limit 255, ICMPv6 code zero, a valid captured checksum, a unicast target,
+duplicate-address-detection rules and bounded eight-byte-unit options.
+Packets with a Fragment header or missing bytes are skipped. The scanner
+uses the first applicable Ethernet link-layer option and checks all option
+lengths. Captures taken before transmit checksum offload can omit a valid
+checksum and therefore omit that observation.
+
 ## Aggregate 5-tuple flows
 
 Call `capture.Flows(data)` to aggregate IPv4 and IPv6 packets into deterministic
