@@ -245,7 +245,7 @@ func (c *Capture) HTTP2(data []byte) ([]HTTP2Record, error) {
 	}
 	keys, _ := c.TLSKeyLog(nil)
 	var records []HTTP2Record
-	if err := scanHTTPStreams(streams, keys, nil, &records); err != nil {
+	if err := scanHTTPStreams(streams, keys, nil, &records, nil); err != nil {
 		return nil, err
 	}
 	return records, nil

@@ -13,8 +13,24 @@ type WebRecords struct {
 // supported encrypted streams. Each protocol retains its own scan limits.
 // On error, Web returns an empty result.
 func (c *Capture) Web(data []byte) (WebRecords, error) {
+	return c.scanWeb(data, nil)
+}
+
+// WebWithWebSockets returns the same ordered records as [Capture.Web] and
+// [Capture.WebSockets], sharing TCP reassembly and application-data decryption.
+// An error from either analysis discards both results.
+func (c *Capture) WebWithWebSockets(data []byte) (WebRecords, []WebSocketRecord, error) {
+	ws := webSocketScan{remaining: MaxTotalStreamBytes}
+	web, err := c.scanWeb(data, &ws)
+	if err != nil {
+		return WebRecords{}, nil, err
+	}
+	return web, ws.records, nil
+}
+
+func (c *Capture) scanWeb(data []byte, ws *webSocketScan) (WebRecords, error) {
 	streams, err := c.Streams(data)
-	if err != nil || len(streams) == 0 {
+	if err != nil || (len(streams) == 0 && ws == nil) {
 		return WebRecords{}, err
 	}
 	keys, err := c.TLSKeyLog(nil)
@@ -26,7 +42,7 @@ func (c *Capture) Web(data []byte) (WebRecords, error) {
 	if err != nil {
 		return WebRecords{}, err
 	}
-	if err := scanHTTPStreams(streams, keys, &out.HTTP, &out.HTTP2); err != nil {
+	if err := scanHTTPStreams(streams, keys, &out.HTTP, &out.HTTP2, ws); err != nil {
 		return WebRecords{}, err
 	}
 	return out, nil
@@ -35,7 +51,7 @@ func (c *Capture) Web(data []byte) (WebRecords, error) {
 // scanHTTPStreams consumes the caller's reassembled streams. A nil destination
 // skips that HTTP version. Process cleartext before decryption to preserve
 // record order and charge both passes to the same per-protocol budgets.
-func scanHTTPStreams(streams []TCPStream, keys *TLSKeyLog, http1 *[]HTTPRecord, http2 *[]HTTP2Record) error {
+func scanHTTPStreams(streams []TCPStream, keys *TLSKeyLog, http1 *[]HTTPRecord, http2 *[]HTTP2Record, ws *webSocketScan) error {
 	decoded := httpDecodeBudget{remaining: MaxHTTPDecodedBodyBytesPerScan}
 	remaining := MaxHTTP2DecodedHeaderBytes
 	for i := range streams {
@@ -50,11 +66,21 @@ func scanHTTPStreams(streams []TCPStream, keys *TLSKeyLog, http1 *[]HTTPRecord, 
 				return err
 			}
 		}
+		if ws != nil {
+			if err := ws.appendStream(inner, false); err != nil {
+				return err
+			}
+		}
 		streams[i] = inner
 	}
 	if keys != nil && len(keys.Entries) > 0 {
 		decrypted := decryptTLSStreams(streams, keys)
 		for i := range decrypted {
+			if ws != nil {
+				if err := ws.appendStream(decrypted[i], true); err != nil {
+					return err
+				}
+			}
 			if http1 != nil {
 				if err := appendHTTPFromTCPStream(&decrypted[i], true, http1, &decoded, 0, 0); err != nil {
 					return err

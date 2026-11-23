@@ -122,6 +122,10 @@ func TestWebLimit(t *testing.T) {
 	if !errors.Is(want, ErrHTTPLimit) || !errors.Is(err, ErrHTTPLimit) || !reflect.DeepEqual(got, WebRecords{}) {
 		t.Fatalf("HTTP2 error %v, Web error %v, result %+v", want, err, got)
 	}
+	web, ws, err := c.WebWithWebSockets(raw)
+	if !errors.Is(err, ErrHTTPLimit) || !reflect.DeepEqual(web, WebRecords{}) || ws != nil {
+		t.Fatalf("combined scan returned partial results or unexpected error: %v", err)
+	}
 }
 
 func BenchmarkWebAnalysis(b *testing.B) {
@@ -146,5 +150,45 @@ func BenchmarkWebAnalysis(b *testing.B) {
 				}
 			}
 		})
+	}
+}
+
+func TestWebWithWebSocketsParity(t *testing.T) {
+	raw := wsMixedCapture(t)
+	c, err := New(raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, keyed := range []bool{true, false} {
+		if !keyed {
+			c.Secrets = nil
+		}
+		wantWeb, err := c.Web(raw)
+		if err != nil {
+			t.Fatal(err)
+		}
+		wantWS, err := c.WebSockets(raw)
+		if err != nil {
+			t.Fatal(err)
+		}
+		web, ws, err := c.WebWithWebSockets(raw)
+		if err != nil || !reflect.DeepEqual(web, wantWeb) || !reflect.DeepEqual(ws, wantWS) {
+			t.Fatalf("combined scan differs from separate scans (keyed=%t, err=%v)", keyed, err)
+		}
+	}
+}
+
+func BenchmarkWebWithWebSockets(b *testing.B) {
+	raw := wsMixedCapture(b)
+	c, err := New(raw)
+	if err != nil {
+		b.Fatal(err)
+	}
+	b.ReportAllocs()
+	for b.Loop() {
+		w, ws, err := c.WebWithWebSockets(raw)
+		if err != nil || len(w.TLS) != 49 || len(ws) != 4 {
+			b.Fatal(len(w.TLS), len(ws), err)
+		}
 	}
 }

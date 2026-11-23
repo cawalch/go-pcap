@@ -583,6 +583,11 @@ each stream, client messages precede server messages. Within each direction,
 messages appear when their final frame arrives. A ping can therefore precede
 the fragmented text message it interrupted.
 
+Call `capture.WebWithWebSockets(data)` when you need both the web records
+and WebSocket messages. It shares TCP reassembly and TLS application-data
+decryption, preserves each protocol’s record order and limits, and discards
+both results if a scan fails.
+
 The scanner follows HTTP message boundaries through preceding exchanges
 and informational responses. With a one-sided capture it can use a WebSocket
 upgrade request or a 101 response naming WebSocket. Each direction needs its
