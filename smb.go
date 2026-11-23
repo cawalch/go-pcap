@@ -146,9 +146,14 @@ func parseSMBCommand(buf []byte) (SMB2Message, []byte, error) {
 		msg.TreeID = binary.LittleEndian.Uint32(buf[36:40])
 	}
 	body := buf[64:]
+	var fields []byte
+	var minOffset int
 	switch command {
 	case SMB2CommandNegotiate:
 		if isResp && len(body) >= 64 {
+			if binary.LittleEndian.Uint16(body) == 65 {
+				fields, minOffset = body[56:60], 128
+			}
 			msg.SecurityMode = binary.LittleEndian.Uint16(body[2:4])
 			msg.DialectRevision = binary.LittleEndian.Uint16(body[4:6])
 		} else if !isResp && len(body) >= 36 {
@@ -182,9 +187,6 @@ func parseSMBCommand(buf []byte) (SMB2Message, []byte, error) {
 				return SMB2Message{}, rest, fmt.Errorf("%w: invalid CREATE request", ErrInvalidSMB)
 			}
 			if binary.LittleEndian.Uint16(body[46:48]) != 0 {
-				if binary.LittleEndian.Uint16(body[44:46])%8 != 0 {
-					return SMB2Message{}, rest, fmt.Errorf("%w: unaligned CREATE name", ErrInvalidSMB)
-				}
 				var err error
 				msg.FileName, err = smbRequestName(buf, body[44:48], 120)
 				if err != nil {
@@ -195,16 +197,29 @@ func parseSMBCommand(buf []byte) (SMB2Message, []byte, error) {
 
 	case SMB2CommandSessionSetup:
 		if !isResp && len(body) >= 24 {
+			if binary.LittleEndian.Uint16(body) == 25 {
+				fields, minOffset = body[12:16], 88
+			}
 			msg.SecurityMode = uint16(body[3])
 			msg.SigningEnabled = (msg.SecurityMode & 0x0001) != 0
 			msg.SigningRequired = (msg.SecurityMode & 0x0002) != 0
+		} else if isResp && len(body) >= 8 && binary.LittleEndian.Uint16(body) == 9 && (status == 0 || status == 0xc0000016) {
+			fields, minOffset = body[4:8], 72
 		}
 	}
 
-	if ntlmIdx := bytes.Index(body, ntlmsspSig); ntlmIdx >= 0 {
-		if ntlm, err := ParseNTLMSSP(body[ntlmIdx:]); err == nil {
-			msg.NTLM = ntlm
-			msg.HasNTLM = true
+	if fields != nil && binary.LittleEndian.Uint16(fields[2:]) != 0 {
+		start := int(binary.LittleEndian.Uint16(fields))
+		end := start + int(binary.LittleEndian.Uint16(fields[2:]))
+		if start < minOffset || end > len(buf) {
+			return SMB2Message{}, rest, fmt.Errorf("%w: invalid security buffer", ErrInvalidSMB)
+		}
+		body = buf[start:end]
+		if ntlmIdx := bytes.Index(body, ntlmsspSig); ntlmIdx >= 0 {
+			if ntlm, err := ParseNTLMSSP(body[ntlmIdx:]); err == nil {
+				msg.NTLM = ntlm
+				msg.HasNTLM = true
+			}
 		}
 	}
 
@@ -214,7 +229,7 @@ func parseSMBCommand(buf []byte) (SMB2Message, []byte, error) {
 func smbRequestName(buf, descriptor []byte, minOffset int) (string, error) {
 	offset := int(binary.LittleEndian.Uint16(descriptor))
 	size := int(binary.LittleEndian.Uint16(descriptor[2:]))
-	if offset < minOffset || size == 0 || size%2 != 0 || offset+size > len(buf) {
+	if offset < minOffset || offset%2 != 0 || size == 0 || size%2 != 0 || offset+size > len(buf) {
 		return "", fmt.Errorf("%w: invalid UTF-16 name range", ErrInvalidSMB)
 	}
 	if size > MaxOptionStringBytes {
@@ -373,11 +388,37 @@ func extractSMB2FromStream(
 	records *[]SMB2Record,
 ) error {
 	for len(stream) >= 4 {
-		frame, rest, err := splitSMBFrame(stream)
-		if err != nil || (!bytes.HasPrefix(frame, smb2Magic) && !bytes.HasPrefix(frame, smb3TransformMagic)) {
-			break
+		var frame []byte
+		switch stream[0] {
+		case 0x85:
+			// NetBIOS Session Keep-Alive (4-byte header, zero payload).
+			if stream[1] != 0 || stream[2] != 0 || stream[3] != 0 {
+				return nil
+			}
+			stream = stream[4:]
+			continue
+		case 0x00:
+			n := int(stream[1])<<16 | int(stream[2])<<8 | int(stream[3])
+			if n > len(stream)-4 {
+				return nil
+			}
+			frame = stream[4 : 4+n]
+			stream = stream[4+n:]
+			if n > MaxSMB2PacketBytes {
+				// Skip oversized data frames (e.g. 64 KiB+ READ/WRITE) without aborting the flow.
+				continue
+			}
+			if !bytes.HasPrefix(frame, smb2Magic) && !bytes.HasPrefix(frame, smb3TransformMagic) {
+				// Skip SMB1 Negotiate (\xffSMB), SMB3 compression (\xfcSMB), etc.
+				continue
+			}
+		default:
+			if !bytes.HasPrefix(stream, smb2Magic) && !bytes.HasPrefix(stream, smb3TransformMagic) {
+				return nil
+			}
+			frame = stream
+			stream = nil
 		}
-		stream = rest
 		for len(frame) > 0 {
 			msg, next, err := parseSMBCommand(frame)
 			frame = next
