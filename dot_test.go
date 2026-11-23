@@ -3,6 +3,7 @@ package pcap
 import (
 	"bytes"
 	"encoding/binary"
+	"errors"
 	"fmt"
 	"io"
 	"net/netip"
@@ -45,6 +46,56 @@ func TestDNSOverTLSCaptureParity(t *testing.T) {
 		buildEthernetIPv4TCPFrame(clientIP, serverIP, clientPort, serverPort, 1, 0, TCPFlagACK, client),
 		buildEthernetIPv4TCPFrame(serverIP, clientIP, serverPort, clientPort, 1, 0, TCPFlagACK, server),
 	}
+	// Verify that both readers preserve complete messages before broken DNS
+	// framing, while a known TCP gap makes the whole affected direction unusable.
+	for _, tc := range []struct {
+		name         string
+		tail         []byte
+		gap          uint32
+		wantRequests int
+	}{
+		{"incomplete final message", []byte{0, 20, 1, 2, 3}, 0, 2},
+		{"undersized message before another query", append([]byte{0, 1, 0}, framed(query)...), 0, 2},
+		{"gap in client direction", framed(query), 1, 0},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			app := encryptTLS13AppDataRecord(t, clientKey, TLS_AES_128_GCM_SHA256, 2, TLSRecordApplicationData, tc.tail)
+			tail := buildEthernetIPv4TCPFrame(clientIP, serverIP, clientPort, serverPort, 1+uint32(len(client))+tc.gap, 0, TCPFlagACK, app)
+			raw := buildPCAPNGFixture(binary.LittleEndian, keys, append(frames, tail))
+			rows := dotCaptureParity(t, raw, nil)
+			if len(rows) != tc.wantRequests+1 {
+				t.Fatalf("got %d messages, want %d requests and one response", len(rows), tc.wantRequests)
+			}
+			for i, row := range rows {
+				if row.Message.IsResponse != (i == tc.wantRequests) || row.FlowIndex != 1 {
+					t.Fatalf("unexpected direction or flow at row %d: %+v", i, row)
+				}
+			}
+		})
+	}
+	t.Run("reader failure in last flow", func(t *testing.T) {
+		raw := buildPCAPNGFixture(binary.LittleEndian, keys, frames)
+		source := bytes.NewReader(raw)
+		c, err := NewFromReaderAt(source, source.Size())
+		if err != nil {
+			t.Fatal(err)
+		}
+		off := bytes.LastIndex(raw, server)
+		if off < 0 {
+			t.Fatal("missing TLS server bytes")
+		}
+		failAt := int64(off + len(server) - 1)
+		injected := errors.New("unavailable server ciphertext")
+		rows, err := c.DNSOverTLSFromReaderAt(readAtFunc(func(p []byte, off int64) (int, error) {
+			if off <= failAt && failAt-off < int64(len(p)) {
+				return 0, injected
+			}
+			return source.ReadAt(p, off)
+		}), nil)
+		if rows != nil || !errors.Is(err, injected) {
+			t.Fatalf("got %d records and %v, want nil and injected error", len(rows), err)
+		}
+	})
 	for _, tc := range []struct {
 		name               string
 		embedded, external []byte
@@ -57,17 +108,7 @@ func TestDNSOverTLSCaptureParity(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			raw := buildPCAPNGFixture(binary.LittleEndian, tc.embedded, frames)
-			c, err := New(raw)
-			if err != nil {
-				t.Fatal(err)
-			}
-			index, err := NewFromReaderAt(bytes.NewReader(raw), int64(len(raw)))
-			if err != nil {
-				t.Fatal(err)
-			}
-			rows := checkReaderParity(t, raw,
-				func(data []byte) ([]DNSOverTLSRecord, error) { return c.DNSOverTLS(data, tc.external) },
-				func(r io.ReaderAt) ([]DNSOverTLSRecord, error) { return index.DNSOverTLSFromReaderAt(r, tc.external) })
+			rows := dotCaptureParity(t, raw, tc.external)
 			if len(rows) != tc.want {
 				t.Fatalf("got %d DNS records, want %d", len(rows), tc.want)
 			}
@@ -94,4 +135,20 @@ func TestDNSOverTLSCaptureParity(t *testing.T) {
 			}
 		})
 	}
+}
+
+func dotCaptureParity(t *testing.T, raw, keys []byte) []DNSOverTLSRecord {
+	t.Helper()
+	c, err := New(raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	source := bytes.NewReader(raw)
+	index, err := NewFromReaderAt(source, source.Size())
+	if err != nil {
+		t.Fatal(err)
+	}
+	return checkReaderParity(t, raw,
+		func(data []byte) ([]DNSOverTLSRecord, error) { return c.DNSOverTLS(data, keys) },
+		func(r io.ReaderAt) ([]DNSOverTLSRecord, error) { return index.DNSOverTLSFromReaderAt(r, keys) })
 }
