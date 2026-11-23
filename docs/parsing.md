@@ -319,9 +319,10 @@ interface names and use synchronized capture clocks.
    upstream TCP session, especially when the proxy pools connections.
 3. To associate a pre-NAT IP with a device at the time of the capture, check
    a contemporaneous Dynamic Host Configuration Protocol (DHCP) ACK or lease
-   log. The [IoT fixture](../testdata/deployments/iot.pcapng) shows only a
-   Discover and Offer, so it gives a candidate assignment. Use controller
-   association logs to identify the access point and station on the guest
+   log. In the [IoT fixture](../testdata/deployments/iot.pcapng), `DHCPv4`
+   reports a Discover and an Offer with `YourAddr` set to `203.0.113.42`.
+   The Offer gives a candidate assignment. Use controller association logs
+   to identify the access point and station on the guest
    VLAN. A capture taken after NAT also needs the gateway's translation log
    to associate a translated tuple with the original client.
 

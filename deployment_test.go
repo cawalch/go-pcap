@@ -166,6 +166,30 @@ func TestDeploymentCaptures(t *testing.T) {
 				}
 			}
 
+			dhcp := checkReaderParity(t, raw, capture.DHCPv4, fromReader.DHCPv4FromReaderAt)
+			if tc.name == "iot" {
+				if len(dhcp) != 2 {
+					t.Fatalf("DHCP observations = %+v, want Discover and Offer", dhcp)
+				}
+				for i, record := range dhcp {
+					pkt := packets[i]
+					wantType := []DHCPv4MessageType{DHCPv4Discover, DHCPv4Offer}[i]
+					if record.PacketIndex != pkt.Index || record.TimestampNs != pkt.TimestampNs || record.InterfaceID != pkt.InterfaceID ||
+						record.MessageType != wantType || record.TransactionID != 0x31514159 ||
+						record.ClientHardwareAddr.String() != "02:00:00:00:00:2a" {
+						t.Errorf("DHCP observation %d = %+v", i, record)
+					}
+				}
+				discover, offer := dhcp[0], dhcp[1]
+				if discover.YourAddr.IsValid() || discover.HasLease ||
+					offer.YourAddr.String() != "203.0.113.42" || offer.ServerIdentifier.String() != "203.0.113.1" ||
+					!offer.HasLease || offer.LeaseSeconds != 3600 {
+					t.Errorf("DHCP discover/offer = %+v / %+v", discover, offer)
+				}
+			} else if len(dhcp) != 0 {
+				t.Errorf("unexpected DHCP observations: %+v", dhcp)
+			}
+
 			tls := checkReaderParity(t, raw, capture.TLS, fromReader.TLSFromReaderAt)
 			if len(tls) != len(tc.handshakes) {
 				t.Fatalf("TLS records = %+v, want %d", tls, len(tc.handshakes))
