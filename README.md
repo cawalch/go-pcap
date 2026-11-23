@@ -7,7 +7,7 @@ packets from a local interface and write captures for another tool to inspect.
 
 The library uses the Go standard library, builds without cgo or libpcap, and
 requires Go 1.26 or later. The API is experimental and can change before v1.0.
-[v0.1.0 release and platform verification](https://github.com/cawalch/go-pcap/releases/tag/v0.1.0)
+[v0.1.1 release](https://github.com/cawalch/go-pcap/releases/tag/v0.1.1) · [Platform verification](CHANGELOG.md#platform-verification)
 
 ## Quick start with a guest Wi-Fi capture
 
@@ -18,7 +18,7 @@ In that directory, initialize a Go module and install the release.
 
 ```sh
 go mod init example.com/inspect
-go get github.com/cawalch/go-pcap@v0.1.0
+go get github.com/cawalch/go-pcap@v0.1.1
 ```
 
 Save the program below as `main.go` and run `go run . guest.pcapng`.
