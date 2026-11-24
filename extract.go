@@ -171,7 +171,7 @@ func (s *flowExportSource) writeSelectedBlocks(w io.Writer, used *[MaxInterfaces
 			}
 			remap[id] = nextID
 			nextID++
-		case BlockTypeEnhancedPacket, BlockTypeSimplePacket:
+		case blockTypeLegacyPacket, BlockTypeEnhancedPacket, BlockTypeSimplePacket:
 			i := packet
 			packet++
 			if i/64 >= len(selected) || selected[i/64]&(uint64(1)<<uint(i%64)) == 0 {
@@ -179,8 +179,8 @@ func (s *flowExportSource) writeSelectedBlocks(w io.Writer, used *[MaxInterfaces
 			}
 			// An SPB implicitly uses section interface zero, which is first
 			// among the retained interfaces whenever one of its packets matches.
-			if kind == BlockTypeEnhancedPacket {
-				if end-offset < 32 {
+			if kind != BlockTypeSimplePacket {
+				if end-offset < pcapngPacketBlockMinSize {
 					return ErrInvalidBlock
 				}
 				header, err := s.read(offset, 12)
@@ -188,14 +188,22 @@ func (s *flowExportSource) writeSelectedBlocks(w io.Writer, used *[MaxInterfaces
 					return err
 				}
 				id := order.Uint32(header[8:12])
+				if kind == blockTypeLegacyPacket {
+					id = uint32(order.Uint16(header[8:10]))
+				}
 				if uint64(id) >= uint64(globalID-sectionBase) {
 					return ErrInvalidPacket
 				}
-				if s.budget == nil && remap[sectionBase+int(id)] == id {
+				newID := remap[sectionBase+int(id)]
+				if s.budget == nil && newID == id {
 					break
 				}
 				copy(head[:12], header)
-				order.PutUint32(head[8:], remap[sectionBase+int(id)])
+				if kind == blockTypeLegacyPacket {
+					order.PutUint16(head[8:10], uint16(newID))
+				} else {
+					order.PutUint32(head[8:12], newID)
+				}
 				if err := out.write(head[:12]); err != nil {
 					return err
 				}

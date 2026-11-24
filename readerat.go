@@ -848,7 +848,7 @@ func scanPCAPNGReaderAt(r io.ReaderAt, size int64, cb func(PacketRecord) error, 
 		var rec PacketRecord
 		var packetErr error
 		switch blockType {
-		case BlockTypeEnhancedPacket:
+		case blockTypeLegacyPacket, BlockTypeEnhancedPacket:
 			var header []byte
 			if bodyEnd-offset >= 28 {
 				if err := readExactAt(r, headerBuf[8:28], offset+8, size); err != nil {
@@ -857,7 +857,7 @@ func scanPCAPNGReaderAt(r io.ReaderAt, size int64, cb func(PacketRecord) error, 
 				header = headerBuf[8:28]
 			}
 			var options int64
-			rec, options, packetErr = decodeEPBHeader(header, offset+28, bodyEnd, order, &summary)
+			rec, options, packetErr = decodePacketBlockHeader(blockType, header, offset+28, bodyEnd, order, &summary)
 			if packetErr == nil {
 				tailOffset = options
 			}
@@ -923,9 +923,9 @@ func scanPCAPNGReaderAt(r io.ReaderAt, size int64, cb func(PacketRecord) error, 
 			if err := decodeIDB(&sr, 0, sr.size, order, &summary); err != nil {
 				return scanSummary{}, err
 			}
-		case BlockTypeEnhancedPacket, BlockTypeSimplePacket:
+		case blockTypeLegacyPacket, BlockTypeEnhancedPacket, BlockTypeSimplePacket:
 			if len(body) > 0 {
-				if err := decodeEPBOptions(body, order, &summary, &rec); err != nil {
+				if err := decodePacketBlockOptions(blockType, body, order, &summary, &rec); err != nil {
 					return scanSummary{}, err
 				}
 			}

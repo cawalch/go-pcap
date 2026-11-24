@@ -17,15 +17,15 @@ import (
 )
 
 const (
-	pcapGlobalHeaderSize   = 24
-	pcapPacketHeaderSize   = 16
-	pcapngMinBlockSize     = 12
-	pcapngSHBMinSize       = 28
-	pcapngIDBMinSize       = 20
-	pcapngEPBMinSize       = 32
-	pcapngSPBMinSize       = 16
-	pcapngDSBMinSize       = 20
-	defaultTimestampResolN = 1_000 // default PcapNG 10^-6 s = 1,000 ns per unit
+	pcapGlobalHeaderSize     = 24
+	pcapPacketHeaderSize     = 16
+	pcapngMinBlockSize       = 12
+	pcapngSHBMinSize         = 28
+	pcapngIDBMinSize         = 20
+	pcapngPacketBlockMinSize = 32 // EPB and obsolete Packet Block
+	pcapngSPBMinSize         = 16
+	pcapngDSBMinSize         = 20
+	defaultTimestampResolN   = 1_000 // default PcapNG 10^-6 s = 1,000 ns per unit
 )
 
 // InterfaceDescriptor describes a capture interface from a classic PCAP header
@@ -125,7 +125,7 @@ type PacketRecord struct {
 	PayloadOffset int64
 	PayloadLength int64
 
-	// PcapNG Enhanced Packet Block optional metadata and process attribution.
+	// Optional packet metadata and process attribution from PcapNG packet blocks.
 	ProcessID    uint32
 	ThreadID     uint32
 	UserID       uint32
@@ -692,15 +692,15 @@ func scanPCAPNGBlocksWithCallback(r *SafeReader, collectPackets bool, hintCount 
 			if err := decodeIDB(r, bodyStart, bodyEnd, order, &summary); err != nil {
 				return err
 			}
-		case BlockTypeEnhancedPacket, BlockTypeSimplePacket:
+		case blockTypeLegacyPacket, BlockTypeEnhancedPacket, BlockTypeSimplePacket:
 			body := r.data[bodyStart:bodyEnd]
 			var rec PacketRecord
 			var err error
-			if blockType == BlockTypeEnhancedPacket {
+			if blockType != BlockTypeSimplePacket {
 				var options int64
-				rec, options, err = decodeEPBHeader(body, bodyStart+20, bodyEnd, order, &summary)
+				rec, options, err = decodePacketBlockHeader(blockType, body, bodyStart+20, bodyEnd, order, &summary)
 				if err == nil && options < bodyEnd {
-					err = decodeEPBOptions(r.data[options:bodyEnd], order, &summary, &rec)
+					err = decodePacketBlockOptions(blockType, r.data[options:bodyEnd], order, &summary, &rec)
 				}
 			} else {
 				rec, err = decodeSPBHeader(body, bodyStart+4, bodyEnd, order, &summary)
@@ -1003,13 +1003,20 @@ func scaleRawTimestampNs(rawTicks uint64, iface InterfaceDescriptor) int64 {
 	return int64(lo)
 }
 
-func decodeEPBHeader(header []byte, payloadOffset, bodyEnd int64, order binary.ByteOrder, summary *scanSummary) (PacketRecord, int64, error) {
+func decodePacketBlockHeader(kind uint32, header []byte, payloadOffset, bodyEnd int64, order binary.ByteOrder, summary *scanSummary) (PacketRecord, int64, error) {
 	if len(header) < 20 {
-		return PacketRecord{}, 0, fmt.Errorf("%w: Enhanced Packet Block body too short", ErrInvalidBlock)
+		return PacketRecord{}, 0, fmt.Errorf("%w: PcapNG packet block body too short", ErrInvalidBlock)
 	}
-	ifaceID := order.Uint32(header[0:])
+	ifaceID := order.Uint32(header)
+	var dropCount uint64
+	if kind == blockTypeLegacyPacket {
+		ifaceID = uint32(order.Uint16(header))
+		if drops := order.Uint16(header[2:]); drops != math.MaxUint16 {
+			dropCount = uint64(drops)
+		}
+	}
 	if ifaceID >= uint32(len(summary.interfaces)-summary.sectionInterfaceBase) {
-		return PacketRecord{}, 0, fmt.Errorf("%w: EPB interface ID %d out of range (%d section interfaces)", ErrInvalidPacket, ifaceID, len(summary.interfaces)-summary.sectionInterfaceBase)
+		return PacketRecord{}, 0, fmt.Errorf("%w: PcapNG packet interface ID %d out of range (%d section interfaces)", ErrInvalidPacket, ifaceID, len(summary.interfaces)-summary.sectionInterfaceBase)
 	}
 	iface := summary.interfaces[summary.sectionInterfaceBase+int(ifaceID)]
 
@@ -1019,7 +1026,7 @@ func decodeEPBHeader(header []byte, payloadOffset, bodyEnd int64, order binary.B
 	origLen := order.Uint32(header[16:])
 
 	if capLen > MaxSnapLen {
-		return PacketRecord{}, 0, fmt.Errorf("%w: EPB capture length %d exceeds %d", ErrInvalidPacket, capLen, MaxSnapLen)
+		return PacketRecord{}, 0, fmt.Errorf("%w: PcapNG packet capture length %d exceeds %d", ErrInvalidPacket, capLen, MaxSnapLen)
 	}
 	if capLen > origLen {
 		summary.anomalies.CaptureLenExceedsOriginal = true
@@ -1032,9 +1039,8 @@ func decodeEPBHeader(header []byte, payloadOffset, bodyEnd int64, order binary.B
 	if rem := paddedCapLen % 4; rem != 0 {
 		paddedCapLen += 4 - rem
 	}
-	optOffset := payloadOffset + paddedCapLen
 	if paddedCapLen > bodyEnd-payloadOffset {
-		return PacketRecord{}, 0, fmt.Errorf("%w: EPB capture length %d exceeds block body", ErrInvalidBlock, capLen)
+		return PacketRecord{}, 0, fmt.Errorf("%w: PcapNG packet capture length %d exceeds block body", ErrInvalidBlock, capLen)
 	}
 
 	if summary.packetCount >= MaxPackets {
@@ -1051,7 +1057,8 @@ func decodeEPBHeader(header []byte, payloadOffset, bodyEnd int64, order binary.B
 		OriginalLen:   origLen,
 		PayloadOffset: payloadOffset,
 		PayloadLength: int64(capLen),
-	}, optOffset, nil
+		DropCount:     dropCount,
+	}, payloadOffset + paddedCapLen, nil
 }
 
 // These comments carry metadata for which the Darwin process block has no
@@ -1064,13 +1071,18 @@ const (
 	processCommentContainer = processCommentPrefix + "container-id="
 )
 
-func decodeEPBOptions(options []byte, order binary.ByteOrder, summary *scanSummary, rec *PacketRecord) error {
+func decodePacketBlockOptions(kind uint32, options []byte, order binary.ByteOrder, summary *scanSummary, rec *PacketRecord) error {
 	r := SafeReader{data: options, size: int64(len(options))}
 	processes := summary.processes[summary.sectionProcessBase:]
 	legacyInline := summary.sectionLegacyProcess && len(processes) == 0
 	nativeIndex, legacyIndex := uint32(math.MaxUint32), uint32(math.MaxUint32)
 	var haveNativeIndex bool
 	err := walkPCAPNGOptions(&r, 0, r.size, order, func(code uint16, val []byte) error {
+		// The obsolete block shares the flags code with the EPB. Its drop
+		// count comes from the fixed header and EPB-specific options don't apply.
+		if kind == blockTypeLegacyPacket && code != optEPBFlags {
+			return nil
+		}
 		switch code {
 		case optEPBFlags:
 			if len(val) == 4 {

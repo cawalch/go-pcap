@@ -52,6 +52,7 @@ const (
 const (
 	BlockTypeSectionHeader      uint32 = 0x0a0d0d0a
 	BlockTypeInterfaceDesc      uint32 = 0x00000001
+	blockTypeLegacyPacket       uint32 = 0x00000002
 	BlockTypeSimplePacket       uint32 = 0x00000003
 	BlockTypeNameResolution     uint32 = 0x00000004
 	BlockTypeInterfaceStats     uint32 = 0x00000005

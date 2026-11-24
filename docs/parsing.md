@@ -13,11 +13,11 @@ For a runnable first scan, follow the [packet capture quick start](../README.md#
 
 `New` parses classic Portable Packet Capture (PCAP) headers or PCAP Next
 Generation (PcapNG) section blocks (`SHB`, `IDB`, `DSB`, `NRB`, `ISB`, `DPEB`,
-`EPB`, and `SPB`) and validates block framing across the buffer. It copies
-header values, interface descriptors, Name Resolution Block (`NRB`) records,
-Interface Statistics Block (`ISB`) counters, Darwin Process Event Block (`DPEB`)
-entries, and Decryption Secrets Block (`DSB`) payloads without retaining the
-input buffer. It records `int64(len(data))` as `Capture.FileSize`.
+`EPB`, `SPB`, and obsolete Packet Blocks) and validates block framing across
+the buffer. It copies header values, interface descriptors, Name Resolution
+Block (`NRB`) records, Interface Statistics Block (`ISB`) counters, Darwin
+Process Event Block (`DPEB`) entries, and Decryption Secrets Block (`DSB`)
+payloads without retaining the input buffer. It records `int64(len(data))` as `Capture.FileSize`.
 
 For a `.pcap.gz` or `.pcapng.gz` buffer, call `DecompressCapture(input)`
 before `New`. Pass the returned bytes to `Packets`, `PacketPayload`, and
@@ -202,6 +202,9 @@ If you need a slice of all packet records, call `capture.Packets(data)` (or
 - `ProcessID`, `ThreadID`, `UserID`, `ProcessName`, `ProcessArgs`,
   `ContainerID`, `Flags`, and `DropCount`: Process attribution and packet
   metadata decoded from PcapNG Enhanced Packet Block (EPB) options.
+  Obsolete Packet Blocks supply `Flags` from their flags option and `DropCount`
+  from their fixed header. A drop count of `0xffff` in that header means the
+  count was unavailable and leaves `DropCount` at zero.
 
 Apple PcapNG captures store process IDs and names in Process Information Blocks,
 also called Darwin Process Event Blocks (DPEB). An EPB's Apple primary process
@@ -989,8 +992,8 @@ thread ID, user ID, command line, and container ID in go-pcap packet comments.
 Call `capture.ExtractFlowPCAPNG(data, w, flowIndex)` to write one bidirectional
 flow. Pass the original capture bytes and the zero-based index from `Flows`.
 For PcapNG input, the export retains the source sections, registers only the
-interfaces used by selected packets, and preserves their timestamp encoding
-and packet options. Name records, process definitions and decryption secrets
+interfaces used by selected packets, and preserves their block type, timestamp
+encoding, and packet options. Name records, process definitions and decryption secrets
 are capture-wide and can describe other flows. Classic PCAP input becomes a
 single-interface PcapNG capture. An absent flow returns `ErrOutOfBounds`
 before writing output.

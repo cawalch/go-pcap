@@ -375,12 +375,20 @@ func BenchmarkReaderAtScan(b *testing.B) {
 	for i := range frames {
 		frames[i] = frame
 	}
-	for _, format := range []string{"PCAP", "PcapNG"} {
+	order := binary.LittleEndian
+	for _, format := range []string{"PCAP", "PcapNG", "PcapNG-obsolete"} {
 		var raw []byte
-		if format == "PCAP" {
-			raw = buildClassicPCAP(binary.LittleEndian, false, LinkTypeEthernet, 65535, frames)
-		} else {
-			raw = buildPCAPNGFixture(binary.LittleEndian, nil, frames)
+		switch format {
+		case "PCAP":
+			raw = buildClassicPCAP(order, false, LinkTypeEthernet, 65535, frames)
+		case "PcapNG":
+			raw = buildPCAPNGFixture(order, nil, frames)
+		case "PcapNG-obsolete":
+			buf := bytes.NewBuffer(buildPCAPNGFixture(order, nil, nil))
+			for i, frame := range frames {
+				appendPCAPNGBlock(buf, order, blockTypeLegacyPacket, legacyPacketBody(order, 0, 2, uint64(i), frame))
+			}
+			raw = buf.Bytes()
 		}
 		for _, op := range []string{"open", "packets", "flows", "iterate", "first"} {
 			b.Run(format+"/"+op, func(b *testing.B) {
