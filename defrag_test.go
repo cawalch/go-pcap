@@ -296,3 +296,15 @@ func BenchmarkIPFragments(b *testing.B) {
 		})
 	}
 }
+
+func TestIPv4DifferentStartFirstArrival(t *testing.T) {
+	frags := []IPFragmentInput{
+		{FragmentOffset: 8, Payload: []byte("first123"), MoreFragments: true},
+		{FragmentOffset: 0, Payload: []byte("01234567later123"), MoreFragments: true},
+		{FragmentOffset: 16, Payload: []byte("end")},
+	}
+	data, a, err := DefragmentIP(frags)
+	if err != nil || !a.IPFragmentOverlapConflict || a.TruncatedLayer || string(data) != "01234567first123end" {
+		t.Fatalf("data=%q anomalies=%+v error=%v", data, a, err)
+	}
+}

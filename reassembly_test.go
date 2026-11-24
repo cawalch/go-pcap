@@ -142,3 +142,21 @@ func TestCollectStreamsSkipsFragmentedAndTruncatedTCP(t *testing.T) {
 		t.Fatalf("Streams() = %+v, want only the valid TCP stream", streams)
 	}
 }
+
+func TestNestedOverlapCaptureOrder(t *testing.T) {
+	// The earliest packet supplies the middle, the second supplies the flanks.
+	segments := []TCPSegmentInput{{Seq: 14, Payload: []byte("AA")}, {Seq: 12, Payload: []byte("bbbbbb")}, {Seq: 10, Payload: []byte("cccccccccc")}}
+	var owners []byte
+	res, _, err := reassembleTCPWithBudget(segments, MaxFlowStreamBytes, func(segment, end int, _ bool) {
+		for len(owners) < end {
+			owners = append(owners, byte('0'+segment))
+		}
+	})
+	if err != nil || !res.Anomalies.OverlapConflict || res.OverlapBytes != 8 || string(res.Data) != "ccbbAAbbcc" || string(owners) != "2211001122" {
+		t.Fatalf("result=%+v owners=%s err=%v", res, owners, err)
+	}
+	res, _, err = reassembleTCPWithBudget(segments, 5, nil)
+	if err != nil || !res.Anomalies.Truncated || string(res.Data) != "ccbbA" {
+		t.Fatalf("bounded result=%+v err=%v", res, err)
+	}
+}
