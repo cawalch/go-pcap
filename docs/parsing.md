@@ -1015,8 +1015,22 @@ to evaluate a classic BPF program in memory.
 
 On Linux, `Promiscuous` requests membership for the capture socket until it
 closes. `OriginalLen` retains the wire length when the socket filter or
-`SnapLen` shortens a packet. On Windows, a positive `Timeout` applies to
-each `ReadPacket` call, including time spent waiting for a filter match.
+`SnapLen` shortens a packet. `TimestampNs` uses the kernel software receive
+timestamp. Linux requests 64-bit seconds and tries the legacy timestamp option
+on older kernels. The kernel can supply a read-time timestamp if the packet
+arrived before software timestamping took effect. When the socket has no usable
+kernel timestamp for the packet, `TimestampNs` uses the userspace wall clock at
+read time.
+
+On macOS, `TimestampNs` comes from the kernel BPF packet header and has
+microsecond resolution. `OpenLive` translates the interface's native BPF
+datalink type to the corresponding capture-file `LinkType`, including native
+`DLT_RAW` (12) to `LinkTypeRaw` (101). It returns an error if the kernel cannot
+report a datalink type or the library has no mapping for it.
+
+On Windows, `TimestampNs` uses the userspace wall clock when `ReadPacket`
+accepts the packet. A positive `Timeout` applies to each `ReadPacket` call,
+including time spent waiting for a filter match.
 
 Call `live.Stats()` before closing the handle to check kernel packet loss:
 

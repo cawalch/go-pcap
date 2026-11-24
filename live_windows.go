@@ -129,6 +129,7 @@ func (lc *LiveCapture) SnapLen() uint32 {
 
 // ReadPacket reads the next live IPv4 packet from the Windows raw socket,
 // evaluating any configured BPF filter in userspace via [EvalBPF].
+// It timestamps accepted packets with the wall clock at read time.
 func (lc *LiveCapture) ReadPacket() (PacketRecord, []byte, error) {
 	if lc == nil || lc.conn == nil {
 		return PacketRecord{}, nil, ErrInvalidHeader
