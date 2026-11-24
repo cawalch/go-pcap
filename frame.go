@@ -725,6 +725,8 @@ func isIKEPort(port uint16) bool {
 	return port == 500 || port == 4500
 }
 
+const ikev2HeaderLen = 28
+
 func decodeIKEv2(r *SafeReader, offset, bound int64, f *Frame) {
 	if f.SrcPort == 4500 || f.DstPort == 4500 {
 		if bound-offset < 4 || binary.BigEndian.Uint32(r.data[offset:offset+4]) != 0 {
@@ -732,17 +734,16 @@ func decodeIKEv2(r *SafeReader, offset, bound int64, f *Frame) {
 		}
 		offset += 4
 	}
-	const headerLen = 28
-	if bound-offset < headerLen {
+	if bound-offset < ikev2HeaderLen {
 		return
 	}
-	header := r.data[offset : offset+headerLen]
+	header := r.data[offset : offset+ikev2HeaderLen]
 	if header[17]>>4 != 2 || int64(binary.BigEndian.Uint32(header[24:28])) != bound-offset {
 		return
 	}
-	f.pushLayer(LayerIKEv2, offset, headerLen)
-	f.PayloadOffset = uint32(offset + headerLen)
-	f.PayloadLength = uint32(bound - offset - headerLen)
+	f.pushLayer(LayerIKEv2, offset, ikev2HeaderLen)
+	f.PayloadOffset = uint32(offset + ikev2HeaderLen)
+	f.PayloadLength = uint32(bound - offset - ikev2HeaderLen)
 }
 
 func decodeGRE(r *SafeReader, offset, ipBound int64, f *Frame) {

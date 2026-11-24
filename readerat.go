@@ -268,7 +268,7 @@ func (c *Capture) FlowsFromReaderAt(r io.ReaderAt) ([]FlowSummary, error) {
 		if err != nil {
 			return nil
 		}
-		if n < pkt.PayloadLength && !completeFlowPrefix(&frame, payload, pkt.PayloadLength) {
+		if n < pkt.PayloadLength {
 			payload, err = extendFramePrefix(&budget, c.fileSize, pkt, &frame, payload, &scratch)
 			if err != nil {
 				return err
@@ -301,18 +301,19 @@ func (c *Capture) flowsFromRadiotapReader(r io.ReaderAt) ([]FlowSummary, error) 
 
 // completeFlowPrefix accounts for the missing payload tail when the prefix
 // contains a complete, unencapsulated TCP or UDP header. An outer tunnel can
-// have an independent length anomaly, so decode those frames in full.
-func completeFlowPrefix(f *Frame, prefix []byte, captured int64) bool {
+// have an independent length anomaly, so decode those frames in full. If the
+// next header has a known end, required gives the exact prefix length to read.
+func completeFlowPrefix(f *Frame, prefix []byte, captured int64) (complete bool, required int64) {
 	if f.IPVersion == 0 && !f.Anomalies.TruncatedLayer {
-		return true
+		return true, 0
 	}
 	layers := f.LayerSlices()
 	if len(layers) < 2 {
-		return false
+		return false, 0
 	}
 	transport := layers[len(layers)-1].Proto
 	if transport != LayerTCP && (transport != LayerUDP || f.DstPort == 4789 || f.DstPort == 6081) {
-		return false
+		return false, 0
 	}
 	var end int64
 	for _, layer := range layers {
@@ -320,18 +321,18 @@ func completeFlowPrefix(f *Frame, prefix []byte, captured int64) bool {
 		switch layer.Proto {
 		case LayerIPv4:
 			if end != 0 {
-				return false
+				return false, 0
 			}
 			end = offset + int64(binary.BigEndian.Uint16(prefix[offset+2:]))
 		case LayerIPv6:
 			if end != 0 {
-				return false
+				return false, 0
 			}
 			end = offset + 40 + int64(binary.BigEndian.Uint16(prefix[offset+4:]))
 		}
 	}
 	if end < int64(f.PayloadOffset) || f.PayloadOffset == 0 {
-		return false
+		return false, 0
 	}
 	f.Anomalies.IPTotalLengthExceedsFrame = end > captured
 	ipBound := min(end, captured)
@@ -354,8 +355,12 @@ func completeFlowPrefix(f *Frame, prefix []byte, captured int64) bool {
 					// IKE classification needs only its header and optional
 					// Non-ESP Marker. Validate against the full UDP bound.
 					start := udpOff + 8
-					if min(payloadBound, start+32) > int64(len(prefix)) {
-						return false
+					headerEnd := start + ikev2HeaderLen
+					if f.SrcPort == 4500 || f.DstPort == 4500 {
+						headerEnd += 4
+					}
+					if needed := min(payloadBound, headerEnd); needed > int64(len(prefix)) {
+						return false, needed
 					}
 					r := NewSafeReader(prefix)
 					decodeIKEv2(r, start, payloadBound, f)
@@ -364,7 +369,7 @@ func completeFlowPrefix(f *Frame, prefix []byte, captured int64) bool {
 		}
 	}
 	f.PayloadLength = uint32(payloadBound - int64(f.PayloadOffset))
-	return true
+	return true, 0
 }
 
 // DNSFromReaderAt extracts DNS records using bounded metadata, frame header,
@@ -419,6 +424,10 @@ func (b *scanReadBudget) ReadAt(p []byte, off int64) (int, error) {
 // extendFramePrefix resolves incomplete headers and nested tunnel lengths.
 func extendFramePrefix(budget *scanReadBudget, size int64, pkt PacketRecord, f *Frame, data []byte, scratch *[]byte) ([]byte, error) {
 	for {
+		complete, required := completeFlowPrefix(f, data, pkt.PayloadLength)
+		if complete {
+			return data, nil
+		}
 		n := int64(len(data))
 		next := pkt.PayloadLength
 		// Bytes after the outer IP datagram cannot affect any nested header.
@@ -438,7 +447,9 @@ func extendFramePrefix(budget *scanReadBudget, size int64, pkt PacketRecord, f *
 			return data, nil
 		}
 		limit := next
-		if f.Anomalies.TruncatedLayer {
+		if required != 0 {
+			next = min(next, required)
+		} else if f.Anomalies.TruncatedLayer {
 			next = min(next, 2*n)
 		}
 		if err := budget.check(next - n); err != nil {
@@ -456,7 +467,7 @@ func extendFramePrefix(budget *scanReadBudget, size int64, pkt PacketRecord, f *
 		// DecodeFrame has already accepted this link header. Extending its
 		// backing data cannot shorten the header or change its link type.
 		*f, _ = DecodeFrame(data, pkt.LinkType)
-		if next == limit || completeFlowPrefix(f, data, pkt.PayloadLength) {
+		if next == limit {
 			return data, nil
 		}
 	}
@@ -520,7 +531,7 @@ func (c *Capture) walkFlowPrefixes(budget *scanReadBudget, visit func(PacketReco
 			}
 			n = int64(len(data))
 		}
-		if n < pkt.PayloadLength && !completeFlowPrefix(&f, data, pkt.PayloadLength) {
+		if n < pkt.PayloadLength {
 			data, err = extendFramePrefix(budget, c.fileSize, pkt, &f, data, &scratch)
 			if err != nil {
 				return err

@@ -386,7 +386,9 @@ increment `ServerPackets` and `ServerBytes`. For TCP flows, `Flows` records:
   (`<half_synack_ack_rtt_us>_<client_ttl>`) from the 3-way handshake timestamps
   and IP `TTL` / `HopLimit`.
 - First-seen process attribution (`ProcessID`, `UserID`, `ProcessName`,
-  `ProcessArgs`, and `ContainerID`).
+  `ProcessArgs`, and `ContainerID`). The first packet with attribution supplies
+  these fields. Later packets can fill missing fields when they carry the same
+  known PID. A name-only observation keeps its PID unknown.
 
 Call `flow.CommunityID(seed)` on a summary from `Flows` or `FlowsFromReaderAt`
 to correlate IPv4 or IPv6 TCP and UDP traffic with other tools. Both directions

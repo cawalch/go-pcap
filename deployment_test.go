@@ -317,3 +317,44 @@ func TestDarwinPKTAPProcessAttribution(t *testing.T) {
 		}
 	}
 }
+
+func TestFlowPreservesFirstProcessAttribution(t *testing.T) {
+	frame := buildEthernetIPv4UDPFrame([4]byte{192, 0, 2, 1}, [4]byte{192, 0, 2, 2}, 50000, 53, nil)
+	named := PacketRecord{ProcessName: "first"}
+	full := PacketRecord{HasProcessID: true, ProcessID: 42, ProcessName: "other", HasUserID: true, UserID: 7, ContainerID: "other", ProcessArgs: "other"}
+	for _, tc := range []struct {
+		name    string
+		packets []PacketRecord
+		want    PacketRecord
+	}{
+		{"name then different process", []PacketRecord{{}, named, full}, named},
+		{"PID then different process", []PacketRecord{{HasProcessID: true, ProcessID: 12}, full}, PacketRecord{HasProcessID: true, ProcessID: 12}},
+		{"same PID supplies missing fields", []PacketRecord{{HasProcessID: true, ProcessID: 42}, full}, full},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var out bytes.Buffer
+			w, err := NewPCAPNGWriter(&out, PCAPNGWriterOptions{})
+			if err != nil {
+				t.Fatal(err)
+			}
+			for _, pkt := range tc.packets {
+				if err := w.WritePacket(pkt, frame); err != nil {
+					t.Fatal(err)
+				}
+			}
+			raw := out.Bytes()
+			c, err := New(raw)
+			if err != nil {
+				t.Fatal(err)
+			}
+			rows := checkReaderParity(t, raw, c.Flows, c.FlowsFromReaderAt)
+			if len(rows) != 1 {
+				t.Fatalf("flows: %+v", rows)
+			}
+			f := rows[0]
+			if f.HasProcessID != tc.want.HasProcessID || f.ProcessID != tc.want.ProcessID || f.ProcessName != tc.want.ProcessName || f.ProcessArgs != tc.want.ProcessArgs || f.HasUserID != tc.want.HasUserID || f.UserID != tc.want.UserID || f.ContainerID != tc.want.ContainerID {
+				t.Fatalf("flow attribution %+v, want %+v", f, tc.want)
+			}
+		})
+	}
+}
