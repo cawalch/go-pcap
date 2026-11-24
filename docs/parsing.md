@@ -758,6 +758,45 @@ budget shared across a capture scan. Exceeding these limits returns
 PRIORITY frames and pseudo-header order. Use cleartext or decrypted bytes for
 the observed proxy leg. [HPACK format and examples](https://www.rfc-editor.org/rfc/rfc7541)
 
+### Locate individual HTTP requests in a capture
+
+Use `capture.HTTPRequests(data)` or `capture.HTTPRequestsFromReaderAt(r)` to
+build a request timeline from a cleartext capture, including the plaintext leg
+of a TLS-terminating proxy. Each observation contains the request method,
+authority, path, source and destination, flow index, zero-based packet index,
+and that packet’s timestamp in nanoseconds. For Wireshark, add one to the
+packet index.
+
+For HTTP/1, the packet supplies the first byte of the request line. For HTTP/2
+with a client preface, it supplies the first byte of the initial HEADERS frame,
+even when a later CONTINUATION frame completes the header block. Multiple
+requests in one packet share its index and time. Retransmitted bytes produce
+one observation. Results follow packet-index order even when timestamps go
+backward. HTTP/2 requests carry a stream ID; HTTP/1 uses zero.
+
+```go
+requests, err := capture.HTTPRequestsFromReaderAt(file)
+if err != nil {
+    return err
+}
+for _, r := range requests {
+    fmt.Printf("frame=%d time_ns=%d flow=%d stream=%d %s %s\n",
+        r.PacketIndex+1, r.TimestampNs, r.FlowIndex, r.StreamID, r.Method, r.Authority)
+}
+```
+
+The scan stops parsing each direction at its first known TCP gap. A capture
+beginning midstream needs a recognizable request at the start of the observed
+prefix. It reports an HTTP/1 CONNECT request and stops at the tunnel boundary.
+Use `Web` for keyed TLS inspection. This timeline has no mapping from decrypted
+bytes back to packets in an encrypted capture. Zero timestamp values can occur
+on packets recorded without a timestamp.
+
+The scan accepts up to `MaxTotalStreamBytes` of candidate TCP payload (including
+retransmissions), applies the existing stream and HTTP decoding limits, and
+returns at most `MaxHTTPMessagesPerScan` observations. Errors discard the result.
+ReaderAt also limits capture reads to `MaxReaderAtScanBytes`.
+
 ### Extract WebSocket messages
 
 Call `capture.WebSockets(data)` for HTTP/1.1 upgrades in cleartext or in

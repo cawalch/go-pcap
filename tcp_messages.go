@@ -54,30 +54,7 @@ func (c *tcpMessageCollector) add(pkt PacketRecord, frame Frame, flow int, paylo
 // Attribute each message to the packet supplying the first byte of its
 // length prefix. Stop at a gap because framing beyond it is unknown.
 func (c *tcpMessageCollector) walk(prefix, minSize, maxSize int, visit func(*tcpMessageDirection, messagePacket, []byte) error) error {
-	remaining := int64(MaxTotalStreamBytes)
-	type span struct{ end, segment int }
-	var spans []span
-	for i := range c.directions {
-		if remaining == 0 {
-			break
-		}
-		dir := &c.directions[i]
-		spans = spans[:0]
-		gapSeen := false
-		buf, used, err := reassembleTCPWithBudget(dir.segments, remaining, func(segment, end int, gap bool) {
-			gapSeen = gapSeen || gap
-			if !gapSeen {
-				spans = append(spans, span{end, segment})
-			}
-		})
-		if err != nil {
-			return err
-		}
-		remaining -= used
-		if len(spans) == 0 {
-			continue
-		}
-		data := buf.Data[:spans[len(spans)-1].end]
+	return c.walkContiguous(func(dir *tcpMessageDirection, data []byte, spans []packetSpan) error {
 		spanIndex := 0
 		for off := 0; len(data)-off >= prefix; {
 			var length uint32
@@ -97,6 +74,40 @@ func (c *tcpMessageCollector) walk(prefix, minSize, maxSize int, visit func(*tcp
 				return err
 			}
 			off = start + int(length)
+		}
+		return nil
+	})
+}
+
+type packetSpan struct{ end, segment int }
+
+// Supply the contiguous prefix and the contributing segment for each byte range.
+func (c *tcpMessageCollector) walkContiguous(visit func(*tcpMessageDirection, []byte, []packetSpan) error) error {
+	remaining := int64(MaxTotalStreamBytes)
+	var spans []packetSpan
+	for i := range c.directions {
+		if remaining == 0 {
+			break
+		}
+		dir := &c.directions[i]
+		spans = spans[:0]
+		gapSeen := false
+		buf, used, err := reassembleTCPWithBudget(dir.segments, remaining, func(segment, end int, gap bool) {
+			gapSeen = gapSeen || gap
+			if !gapSeen {
+				spans = append(spans, packetSpan{end, segment})
+			}
+		})
+		if err != nil {
+			return err
+		}
+		remaining -= used
+		if len(spans) == 0 {
+			continue
+		}
+		data := buf.Data[:spans[len(spans)-1].end]
+		if err := visit(dir, data, spans); err != nil {
+			return err
 		}
 	}
 	return nil
