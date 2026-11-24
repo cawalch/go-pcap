@@ -6,6 +6,7 @@ import (
 	"bytes"
 	"errors"
 	"net"
+	"os"
 	"testing"
 	"time"
 )
@@ -114,5 +115,25 @@ func TestLiveCaptureWindowsCloseBeforeReceive(t *testing.T) {
 		}
 	case <-time.After(2 * time.Second):
 		t.Fatal("read blocked after close")
+	}
+}
+
+func TestLiveCaptureWindowsTimeoutAndNextRead(t *testing.T) {
+	conn := openLoopbackUDP(t)
+	lc := &LiveCapture{conn: conn, buf: make([]byte, 64), snapLen: 64, timeout: 50 * time.Millisecond}
+	defer func() { _ = lc.Close() }()
+	// The fallback deadline also bounds a regression that ignores the requested timeout.
+	if err := conn.SetReadDeadline(time.Now().Add(5 * time.Second)); err != nil {
+		t.Fatal(err)
+	}
+	start := time.Now()
+	if _, _, err := lc.ReadPacket(); !errors.Is(err, os.ErrDeadlineExceeded) || time.Since(start) >= 4*time.Second {
+		t.Fatalf("read after %v: %v", time.Since(start), err)
+	}
+	if _, err := conn.WriteToUDP([]byte("next"), conn.LocalAddr().(*net.UDPAddr)); err != nil {
+		t.Fatal(err)
+	}
+	if _, p, err := lc.ReadPacket(); err != nil || string(p) != "next" {
+		t.Fatalf("next read: %q, %v", p, err)
 	}
 }

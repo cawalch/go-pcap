@@ -24,6 +24,7 @@ type LiveCapture struct {
 	ifaceName string
 	linkType  LinkType
 	snapLen   uint32
+	timeout   time.Duration
 	filter    []BPFInstruction
 	buf       []byte
 	pktIndex  int
@@ -96,6 +97,7 @@ func OpenLive(ifaceName string, opts LiveOptions) (*LiveCapture, error) {
 		ifaceName: ifaceName,
 		linkType:  LinkTypeIPv4,
 		snapLen:   normOpts.SnapLen,
+		timeout:   normOpts.Timeout,
 		filter:    normOpts.BPFFilter,
 		buf:       make([]byte, normOpts.SnapLen),
 	}, nil
@@ -130,6 +132,11 @@ func (lc *LiveCapture) SnapLen() uint32 {
 func (lc *LiveCapture) ReadPacket() (PacketRecord, []byte, error) {
 	if lc == nil || lc.conn == nil {
 		return PacketRecord{}, nil, ErrInvalidHeader
+	}
+	if lc.timeout > 0 {
+		if err := lc.conn.SetReadDeadline(time.Now().Add(lc.timeout)); err != nil {
+			return PacketRecord{}, nil, err
+		}
 	}
 	for {
 		// IPConn.Read preserves the IPv4 header and coordinates with Close.
