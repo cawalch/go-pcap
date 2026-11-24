@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"iter"
+	"runtime"
 	"slices"
 	"sync"
 )
@@ -246,7 +247,9 @@ func (c *Capture) FlowsFromReaderAt(r io.ReaderAt) ([]FlowSummary, error) {
 		defer w.release()
 		r = w
 	}
-	if c.Format == FormatPCAP || c.LinkType == LinkTypeIEEE80211RadioTap || slices.ContainsFunc(c.Interfaces, func(iface InterfaceDescriptor) bool {
+	// With Go 1.27 the shared walker is faster for classic PCAP on amd64.
+	// Radiotap needs its extended-header handling on every architecture.
+	if (runtime.GOARCH == "amd64" && c.Format == FormatPCAP) || c.LinkType == LinkTypeIEEE80211RadioTap || slices.ContainsFunc(c.Interfaces, func(iface InterfaceDescriptor) bool {
 		return iface.LinkType == LinkTypeIEEE80211RadioTap
 	}) {
 		return c.flowsFromPrefixReader(r)
