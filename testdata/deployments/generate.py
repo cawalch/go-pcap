@@ -271,6 +271,32 @@ def http1_transactions():
     write_pcapng("http1-transactions", ["unrelated", "http-client"], packets)
 
 
+def http2_frames():
+    conn = TCP("192.0.2.14", "198.51.100.80", 50000, 1000, 2000)
+    conn.ports = (50000, 80)
+    data = PSH | ACK
+
+    def h2(kind, flags, stream, payload=b""):
+        return len(payload).to_bytes(3, "big") + pack("!BBI", kind, flags, stream) + payload
+
+    preface = b"PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n"
+    # The first request inserts :authority. The second indexes it across streams.
+    post = b"\x83\x86\x84\x41\x0dtrace.example"
+    frames = [
+        conn.send(False, SYN),
+        conn.send(True, SYN | ACK),
+        conn.send(False, ACK),
+        conn.send(False, data, preface + h2(4, 0, 0)),
+        conn.send(True, data, h2(4, 0, 0) + h2(4, 1, 0)),
+        conn.send(False, data, h2(4, 1, 0) + h2(1, 4, 1, post)),
+        conn.send(False, data, h2(1, 1, 3, b"\x82\x86")),
+        conn.send(False, data, h2(9, 4, 3, b"\x84\xbe") + h2(0, 9, 1, b"\x02pcap\0\0")),
+        conn.send(True, data, h2(1, 5, 3, b"\x89") + h2(1, 4, 1, b"\x88")),
+        conn.send(True, data, h2(0, 1, 1, b"ok")),
+    ]
+    write_pcapng("http2-frames", ["http-client"], [(0, packet, None, b"") for packet in frames])
+
+
 def darwin_pktap():
     # Apple uses link type 149 for PKTAP in classic PCAP. Convert this
     # synthetic input with native tcpdump to obtain its PcapNG extensions.
@@ -301,4 +327,5 @@ if __name__ == "__main__":
     iot()
     dns_transactions()
     http1_transactions()
+    http2_frames()
     darwin_pktap()

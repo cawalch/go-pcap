@@ -89,11 +89,44 @@ func ParseHTTP2Frames(stream []byte) (HTTP2Summary, error) {
 }
 
 func parseHTTP2Frames(stream []byte, remaining *int, sequenceGap bool) (HTTP2Summary, error) {
-	return readHTTP2Frames(stream, remaining, sequenceGap, nil)
+	return readHTTP2Frames(stream, remaining, sequenceGap, nil, nil)
 }
 
-func readHTTP2Frames(stream []byte, remaining *int, sequenceGap bool, request func(offset int, streamID uint32, block HTTP2HeaderBlock) error) (HTTP2Summary, error) {
+// http2Range identifies a half-open interval in the input direction.
+type http2Range struct {
+	start, end int
+}
+
+type http2FrameEvent struct {
+	frame       http2Range
+	data        http2Range // Unpadded payload interval, including an empty interval for empty DATA.
+	streamID    uint32     // Stream ID in the physical frame header.
+	kind, flags uint8
+	endStream   bool // Confirmed on valid DATA or after decoding HEADERS that carried END_STREAM.
+	header      http2HeaderEvent
+}
+
+// A header event is populated on the last frame of a decoded block. The opening
+// frame may precede it, and a push targets the promised stream.
+type http2HeaderEvent struct {
+	block    HTTP2HeaderBlock
+	start    int
+	streamID uint32 // Zero when the frame did not complete a block.
+	kind     uint8  // HEADERS or PUSH_PROMISE, even if the last frame was CONTINUATION.
+}
+
+// A frame visitor receives physical frames up to a truncation, frame limit,
+// invalid stream event, or loss of HPACK state. Compare the last frame end
+// (or the end of the preface if no frames were reported) with len(stream) to
+// detect an unvisited suffix. Pass a contiguous prefix with sequenceGap false
+// to observe frames before a known gap. Visitors take the place of summary
+// body and header collection.
+func readHTTP2Frames(stream []byte, remaining *int, sequenceGap bool, request func(offset int, streamID uint32, block HTTP2HeaderBlock) error, visit func(http2FrameEvent) error) (HTTP2Summary, error) {
 	out := HTTP2Summary{HeadersIncomplete: sequenceGap}
+	collectSummary := request == nil && visit == nil
+	if sequenceGap {
+		visit = nil
+	}
 	offset := 0
 	if bytes.HasPrefix(stream, HTTP2ClientPreface) {
 		out.HasClientPreface = true
@@ -152,6 +185,7 @@ func readHTTP2Frames(stream []byte, remaining *int, sequenceGap bool, request fu
 
 		if headers.continuation != 0 && (fType != HTTP2FrameContinuation || streamID != headers.continuation) {
 			out.HeadersIncomplete = true
+			visit = nil
 		}
 		switch fType {
 		case HTTP2FramePriority:
@@ -172,25 +206,35 @@ func readHTTP2Frames(stream []byte, remaining *int, sequenceGap bool, request fu
 			}
 			if err != nil {
 				out.HeadersIncomplete = true
+				visit = nil
 				continue
 			}
 			if !complete {
-				continue
+				break
 			}
-			if request != nil {
-				if headerKind == HTTP2FrameHeaders && block.Method != "" {
-					if err := request(headerStart, headers.target, block); err != nil {
-						return HTTP2Summary{}, err
-					}
+			if collectSummary {
+				st := getStream(headers.target)
+				st.HeaderBlocks = append(st.HeaderBlocks, block)
+				if out.HasClientPreface && out.AkamaiFingerprint == "" && block.Method != "" {
+					out.AkamaiFingerprint = out.fingerprint(priorities, block)
 				}
 				continue
 			}
-			st := getStream(headers.target)
-			st.HeaderBlocks = append(st.HeaderBlocks, block)
-			if out.HasClientPreface && out.AkamaiFingerprint == "" && block.Method != "" {
-				out.AkamaiFingerprint = out.fingerprint(priorities, block)
-
+			if request != nil && headerKind == HTTP2FrameHeaders && block.Method != "" {
+				if err := request(headerStart, headers.target, block); err != nil {
+					return HTTP2Summary{}, err
+				}
 			}
+			if visit != nil {
+				if err := visit(http2FrameEvent{
+					frame: http2Range{offset - fLen - 9, offset}, streamID: streamID, kind: fType, flags: fFlags,
+					header:    http2HeaderEvent{block: block, start: headerStart, streamID: headers.target, kind: headerKind},
+					endStream: headerKind == HTTP2FrameHeaders && stream[headerStart+4]&0x01 != 0,
+				}); err != nil {
+					return HTTP2Summary{}, err
+				}
+			}
+			continue
 		case HTTP2FrameSettings:
 			// Ignore SETTINGS ACK frames (flag 0x01 with empty payload) and non-connection streams.
 			if streamID == 0 && (fFlags&0x01) == 0 && !settingsSeen && len(payload)%6 == 0 {
@@ -219,26 +263,49 @@ func readHTTP2Frames(stream []byte, remaining *int, sequenceGap bool, request fu
 			}
 
 		case HTTP2FrameData:
-			if request != nil || streamID == 0 {
-				break
+			if !collectSummary && visit == nil {
+				continue
 			}
-			dataPayload := payload
+			if streamID == 0 {
+				visit = nil
+				continue
+			}
+			dataStart, dataEnd := offset-fLen, offset
 			if (fFlags & 0x08) != 0 {
 				// PADDED flag: 1-byte Pad Length prefix.
-				if len(dataPayload) < 1 {
-					break
+				if len(payload) == 0 || int(payload[0]) >= len(payload) {
+					visit = nil
+					continue
 				}
-				padLen := int(dataPayload[0])
-				if 1+padLen > len(dataPayload) {
-					break
-				}
-				dataPayload = dataPayload[1 : len(dataPayload)-padLen]
+				dataStart++
+				dataEnd -= int(payload[0])
 			}
-			if len(dataPayload) > 0 && totalDataBytes < MaxHTTPBodyBytes {
-				take := min(len(dataPayload), MaxHTTPBodyBytes-totalDataBytes)
-				st := getStream(streamID)
-				st.Data = append(st.Data, dataPayload[:take]...)
-				totalDataBytes += take
+			if collectSummary {
+				if dataEnd > dataStart && totalDataBytes < MaxHTTPBodyBytes {
+					take := min(dataEnd-dataStart, MaxHTTPBodyBytes-totalDataBytes)
+					st := getStream(streamID)
+					st.Data = append(st.Data, stream[dataStart:dataStart+take]...)
+					totalDataBytes += take
+				}
+				continue
+			}
+			if err := visit(http2FrameEvent{
+				frame: http2Range{offset - fLen - 9, offset}, streamID: streamID, kind: fType, flags: fFlags,
+				data: http2Range{dataStart, dataEnd}, endStream: fFlags&0x01 != 0,
+			}); err != nil {
+				return HTTP2Summary{}, err
+			}
+			continue
+		case HTTP2FrameRSTStream:
+			if len(payload) != 4 || streamID == 0 {
+				visit = nil
+			}
+		}
+		if visit != nil {
+			if err := visit(http2FrameEvent{
+				frame: http2Range{offset - fLen - 9, offset}, streamID: streamID, kind: fType, flags: fFlags,
+			}); err != nil {
+				return HTTP2Summary{}, err
 			}
 		}
 	}
