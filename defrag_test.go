@@ -314,6 +314,10 @@ func TestIPv6FragmentPolicy(t *testing.T) {
 			wire[54] = IPProtoAH
 			return wire
 		}
+		differentNext := extFragment(32, false, withExtensions[32:])
+		differentNext[54] = IPProtoTCP
+		badAH := bytes.Clone(withExtensions[:32])
+		badAH[1] = 1
 		for _, tc := range []struct {
 			name   string
 			frames [][]byte
@@ -321,6 +325,9 @@ func TestIPv6FragmentPolicy(t *testing.T) {
 		}{
 			{"reordered", [][]byte{last, first}, 1},
 			{"post-fragment headers", [][]byte{extFragment(32, false, withExtensions[32:]), extFragment(0, true, withExtensions[:32])}, 1},
+			{"different nonzero next header", [][]byte{extFragment(0, true, withExtensions[:32]), differentNext}, 1},
+			{"different nonzero next header reordered", [][]byte{differentNext, extFragment(0, true, withExtensions[:32])}, 1},
+			{"unaligned IPv6 AH", [][]byte{extFragment(0, true, badAH), extFragment(32, false, withExtensions[32:])}, 0},
 			{"UDP header in later fragment", [][]byte{extFragment(0, true, withExtensions[:24]), extFragment(24, false, withExtensions[24:])}, 0},
 			{"identical overlap", [][]byte{first, first, last}, 0},
 			{"conflicting overlap", [][]byte{first, frame(8, true, make([]byte, 8)), last}, 0},

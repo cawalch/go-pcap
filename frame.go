@@ -574,6 +574,10 @@ func ipv6ExtLength(proto, length byte) int {
 	case IPProtoIPv6Frag:
 		return 8
 	case IPProtoAH:
+		// AH has three fixed words and must be eight-octet aligned in IPv6.
+		if length < 2 || length%2 != 0 {
+			return 0
+		}
 		return (int(length) + 2) * 4
 	default:
 		return (int(length) + 1) * 8

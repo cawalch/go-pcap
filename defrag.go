@@ -184,7 +184,7 @@ func postFragmentExtension(proto uint8) bool {
 
 func (f *Frame) mayContainUDPFragment() bool {
 	return f.Anomalies.IPFragment && (f.IPProtocol == IPProtoUDP ||
-		f.IPVersion == 6 && postFragmentExtension(f.IPProtocol))
+		f.IPVersion == 6 && (f.IPFragOffset != 0 || postFragmentExtension(f.IPProtocol)))
 }
 
 func ipv6FragmentTransport(proto uint8, data []byte, seen int, anomalies *FrameAnomalies) (uint8, []byte) {
@@ -198,7 +198,7 @@ func ipv6FragmentTransport(proto uint8, data []byte, seen int, anomalies *FrameA
 			return proto, nil
 		}
 		size := ipv6ExtLength(proto, data[1])
-		if size > len(data) {
+		if size == 0 || size > len(data) {
 			anomalies.TruncatedLayer = true
 			return proto, nil
 		}
@@ -233,13 +233,14 @@ type ipFragKey struct {
 }
 
 type ipFragGroup struct {
-	key         ipFragKey
-	frags       []IPFragmentInput
-	hasZero     bool
-	hasTerminal bool
-	done        bool
-	prev        *ipFragGroup
-	next        *ipFragGroup
+	key          ipFragKey
+	frags        []IPFragmentInput
+	zeroProtocol uint8
+	hasZero      bool
+	hasTerminal  bool
+	done         bool
+	prev         *ipFragGroup
+	next         *ipFragGroup
 }
 
 type ipFragAccumulator struct {
@@ -289,6 +290,11 @@ func (a *ipFragAccumulator) addUDPFragment(frame *Frame, fragBytes []byte) (udpP
 		version:  frame.IPVersion,
 		protocol: frame.IPProtocol,
 	}
+	// IPv6 uses the next header from fragment zero. Later fragments can
+	// carry a different value and still belong to the same datagram.
+	if frame.IPVersion == 6 {
+		key.protocol = 0
+	}
 	g, exists := a.groups[key]
 	if !exists {
 		if len(a.groups) >= MaxFragmentGroups && a.head != nil {
@@ -318,6 +324,7 @@ func (a *ipFragAccumulator) addUDPFragment(frame *Frame, fragBytes []byte) (udpP
 	})
 	if frame.IPFragOffset == 0 {
 		g.hasZero = true
+		g.zeroProtocol = frame.IPProtocol
 	}
 	if !frame.IPMoreFragments {
 		g.hasTerminal = true
@@ -335,9 +342,9 @@ func (a *ipFragAccumulator) addUDPFragment(frame *Frame, fragBytes []byte) (udpP
 		return nil, 0, 0, false
 	}
 	a.removeGroup(g)
-	if frame.IPVersion == 6 && postFragmentExtension(frame.IPProtocol) {
+	if frame.IPVersion == 6 && postFragmentExtension(g.zeroProtocol) {
 		var proto uint8
-		proto, reassembled = ipv6FragmentTransport(frame.IPProtocol, reassembled, 1, &anomalies)
+		proto, reassembled = ipv6FragmentTransport(g.zeroProtocol, reassembled, 1, &anomalies)
 		if proto != IPProtoUDP || len(reassembled) < 8 {
 			return nil, 0, 0, false
 		}

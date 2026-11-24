@@ -275,8 +275,9 @@ header longer than the default ReaderAt prefix. See the
 IPv6 reassembly discards a datagram if fragments overlap, including identical
 bytes. A first fragment must contain the complete UDP or TCP header, including
 any preceding Authentication or Destination Options headers. DNS and QUIC
-resolve those headers after reassembly. The flow index continues to refer to
-the fragment flow as observed on the wire.
+resolve those headers using fragment zero's Next Header field. The completion
+packet supplies the flow index even when another fragment has a different
+Next Header value.
 Atomic IPv6 packets are decoded independently of pending fragment groups.
 
 The [fingerprint reference fixtures](../testdata/foxio/README.md) identify the
