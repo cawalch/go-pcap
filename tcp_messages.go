@@ -37,15 +37,20 @@ type messagePacket struct {
 }
 
 func (c *tcpMessageCollector) add(pkt PacketRecord, frame Frame, flow int, payload []byte) error {
-	_, err := c.addWithPeer(pkt, frame, flow, payload, TCPFlagSYN)
+	if !keepTCPMessageSegment(&frame, len(payload), TCPFlagSYN) {
+		return nil
+	}
+	_, err := c.addSegment(pkt, frame, flow, payload)
 	return err
 }
 
+func keepTCPMessageSegment(frame *Frame, payloadLen int, keepFlags uint8) bool {
+	return frame.hasPorts && !frame.Anomalies.IPFragment && !frame.Anomalies.TruncatedLayer && !frame.Anomalies.InvalidTCPDataOffset &&
+		(payloadLen != 0 || frame.TCPFlags&keepFlags != 0)
+}
+
 // Return the one-based indices of this direction and its peer in the same opening.
-func (c *tcpMessageCollector) addWithPeer(pkt PacketRecord, frame Frame, flow int, payload []byte, keepFlags uint8) ([2]int, error) {
-	if !frame.hasPorts || frame.Anomalies.IPFragment || frame.Anomalies.TruncatedLayer || frame.Anomalies.InvalidTCPDataOffset || len(payload) == 0 && frame.TCPFlags&keepFlags == 0 {
-		return [2]int{}, nil
-	}
+func (c *tcpMessageCollector) addSegment(pkt PacketRecord, frame Frame, flow int, payload []byte) ([2]int, error) {
 	key, canonical := makeCanonicalFlowKey(IPProtoTCP, frame.SrcAddr, frame.SrcPort, frame.DstAddr, frame.DstPort)
 	if c.flows == nil {
 		c.flows = make(map[flowKey]tcpMessageFlow)

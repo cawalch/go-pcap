@@ -107,8 +107,11 @@ func scanHTTP1Transactions(source ipFrameSource, export *http1TransactionExportS
 	collector := tcpMessageCollector{separateInterfaces: source.capture != nil && source.capture.SeparateTCPInterfaces}
 	var dirs []http1Direction
 	err := walkHTTPPackets(source, func(pkt PacketRecord, frame Frame, flow int, payload []byte) error {
-		pair, err := collector.addWithPeer(pkt, frame, flow, payload, TCPFlagSYN|TCPFlagFIN|TCPFlagRST)
-		if err != nil || pair[0] == 0 {
+		if !keepTCPMessageSegment(&frame, len(payload), TCPFlagSYN|TCPFlagFIN|TCPFlagRST) {
+			return nil
+		}
+		pair, err := collector.addSegment(pkt, frame, flow, payload)
+		if err != nil {
 			return err
 		}
 		if export != nil && export.interfaces != nil && pkt.InterfaceID != 0 {

@@ -861,15 +861,15 @@ body. Decoded entity offsets cannot address the source capture. A
 close-delimited response needs an observed TCP FIN at the end of its body to
 establish completeness.
 
-Before sharing an export, check both disclosure fields:
+Check these fields before sharing an export.
 
 - `SharedPackets` means a contributing packet carries TCP payload outside the
   selected message ranges. Export preserves the entire original frame.
 - `ExportIncludesPriorMessages` means the selection includes earlier HTTP
   data to preserve request boundaries or reproduce the response pairing.
   For example, reconstructing the second pipelined exchange can require the
-  first exchange. `PacketIndices` lists the selected message evidence, not
-  every context packet in the exported file.
+  first exchange. `PacketIndices` lists the packets supporting the selected
+  exchange. The exported file also carries any required context.
 
 The exported PcapNG retains original endpoints and payloads and omits
 capture-wide names and decryption secrets. If the response is ambiguous,

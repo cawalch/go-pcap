@@ -21,7 +21,8 @@ func (t HTTP1Transaction) ID() HTTP1TransactionID {
 // ExtractHTTP1TransactionPCAPNG writes the original packets of transaction id
 // from the unchanged source data to w. For a confirmed response the export
 // also includes earlier packets needed to reconstruct the HTTP exchange. For
-// an unconfirmed response it includes the request evidence packets.
+// an unconfirmed response it retains the request side, including earlier
+// request packets when a shared frame needs them to recover the boundary.
 //
 // The export retains capture order, packet bytes, lengths, timestamps, and
 // interface and frame check sequence information. It omits other capture and
