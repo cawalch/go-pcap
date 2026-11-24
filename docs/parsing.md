@@ -442,6 +442,41 @@ you locate the message in the original capture even when the final bytes
 arrived later. Slice and ReaderAt scans return records in packet-index order.
 [DNS over TCP (RFC 7766)](https://www.rfc-editor.org/rfc/rfc7766)
 
+### Diagnose DNS transactions
+
+Run the [DNS transaction example](../examples/dns-transactions/main.go) from
+the repository root. It scans a seekable capture using `DNSFromReaderAt`.
+Frame numbers start at one so you can jump to them in Wireshark.
+
+```sh
+go run ./examples/dns-transactions testdata/deployments/dns-transactions.pcap
+```
+
+| Frames in the synthetic capture | Observation |
+| --- | --- |
+| 1 → 2 | A successful lookup took 8 ms at the capture point. |
+| 3 → 4 | The resolver replied NXDOMAIN (header RCODE 3) after 5 ms. |
+| 5 → 8 and 6 → 7 | Two TCP queries were outstanding. The first took 1.2 s, the second 6 ms. The replies arrived in reverse order. |
+| 9, 10 and 11 | Two identical UDP questions preceded one reply. Both queries and the reply are marked ambiguous, without elapsed time. |
+| 12 | A SERVFAIL reply (header RCODE 2) was observed without its query. |
+| 13 | The capture ended with an outstanding query. Packet loss, a one-sided capture, and ending the capture too early can all leave a query unanswered in the report. |
+
+The example pairs single-question, standard DNS queries on port 53 by flow,
+directional endpoints, transaction ID, and decoded question name, type and
+class. Names compare case-insensitively for ASCII letters. After identical
+outstanding questions collide, that key stays ambiguous for the remainder of
+the capture. Unsupported question shapes and structural anomalies produce an
+`unsupported` observation when the DNS parser returns a record.
+
+Use a capture from one observation point. A flow index groups a five-tuple
+and can span reused connections. For TCP, frame numbers identify the packet
+containing the first length-prefix byte. Elapsed time includes everything
+between the two observations, including network transit. Missing, zero or
+backward timestamps leave it unknown. Inspect the original packets for the
+TC flag, EDNS extended response codes, and any evidence outside this pairing.
+
+### Read DNS over TLS
+
 For DNS-over-TLS on TCP/853, use `capture.DNSOverTLS(data, extraKeyLog)` or
 `capture.DNSOverTLSFromReaderAt(r, extraKeyLog)`. Both use the existing TLS
 1.2 and TLS 1.3 decryptors with embedded or caller-supplied NSS key logs.
