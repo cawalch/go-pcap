@@ -135,6 +135,9 @@ func (lc *LiveCapture) ReadPacket() (PacketRecord, []byte, error) {
 	}
 	if lc.timeout > 0 {
 		if err := lc.conn.SetReadDeadline(time.Now().Add(lc.timeout)); err != nil {
+			if errors.Is(err, net.ErrClosed) {
+				return PacketRecord{}, nil, ErrInvalidHeader
+			}
 			return PacketRecord{}, nil, err
 		}
 	}

@@ -136,4 +136,10 @@ func TestLiveCaptureWindowsTimeoutAndNextRead(t *testing.T) {
 	if _, p, err := lc.ReadPacket(); err != nil || string(p) != "next" {
 		t.Fatalf("next read: %q, %v", p, err)
 	}
+	if err := lc.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := lc.ReadPacket(); !errors.Is(err, ErrInvalidHeader) {
+		t.Fatalf("timed read after close: got %v, want ErrInvalidHeader", err)
+	}
 }
