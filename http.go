@@ -803,7 +803,7 @@ func formatJA4HLanguage(acceptLang string) [4]byte {
 // the budget, including bytes produced before a decoding error.
 func (c *Capture) HTTP(data []byte) ([]HTTPRecord, error) {
 	var meta []streamMetadata
-	streams, err := collectStreams(ipFrameSource{capture: c, data: data}, 0, &meta, true)
+	streams, err := collectStreams(ipFrameSource{capture: c, data: data}, 0, &meta, tcpWireUnanchored)
 	if err != nil {
 		return nil, err
 	}

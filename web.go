@@ -30,7 +30,7 @@ func (c *Capture) WebWithWebSockets(data []byte) (WebRecords, []WebSocketRecord,
 
 func (c *Capture) scanWeb(data []byte, ws *webSocketScan) (WebRecords, error) {
 	var meta []streamMetadata
-	streams, err := collectStreams(ipFrameSource{capture: c, data: data}, 0, &meta, true)
+	streams, err := collectStreams(ipFrameSource{capture: c, data: data}, 0, &meta, tcpWireUnanchored)
 	if err != nil || (len(streams) == 0 && ws == nil) {
 		return WebRecords{}, err
 	}

@@ -393,22 +393,56 @@ type tcpWireSpan struct {
 }
 
 type tcpWireDirection struct {
-	seq   uint32 // Sequence number of byte zero in the contiguous prefix.
-	spans []tcpWireSpan
+	seq                     uint32 // Sequence number of byte zero in the contiguous prefix.
+	spans                   []tcpWireSpan
+	truncated, gapBeforeFIN bool
 }
+
+type tcpWireMode uint8
+
+const (
+	tcpWireNone tcpWireMode = iota
+	tcpWireUnanchored
+	tcpWireAll
+)
 
 type tcpWireCapture struct {
 	synDirections uint8
 	packets       [2][]tcpPacketEvidence // Indexed by direction and segment.
+	tails         [2]tcpWireTail
 }
 
-func (wire *tcpWireCapture) observe(dir, segment int, index int, frame *Frame, hasPayload bool) {
+type tcpWireTail struct {
+	fin, declaredEnd    uint32
+	hasFIN, isTruncated bool
+	unknownTruncation   bool
+}
+
+func (wire *tcpWireCapture) observe(dir, segment int, index int, frame *Frame, hasPayload bool, mode tcpWireMode, missing int64) {
+	if mode == tcpWireAll {
+		tail := &wire.tails[dir]
+		end := frame.TCPSeq + frame.PayloadLength
+		if frame.TCPFlags&TCPFlagSYN != 0 {
+			end++
+		}
+		switch {
+		case missing < 0:
+			tail.unknownTruncation = true
+		case missing > 0:
+			end += uint32(missing)
+			if !tail.isTruncated || int32(end-tail.declaredEnd) > 0 {
+				tail.declaredEnd, tail.isTruncated = end, true
+			}
+		case frame.TCPFlags&TCPFlagFIN != 0 && !tail.hasFIN:
+			tail.fin, tail.hasFIN = end, true
+		}
+	}
 	if frame.TCPFlags&TCPFlagSYN != 0 {
 		wire.synDirections |= 1 << dir
 	}
 	// Both observed SYNs anchor the prefixes. No packet evidence is needed
 	// when both directions opened before the first captured payload.
-	if !hasPayload || wire.synDirections == 3 && wire.packets[0] == nil && wire.packets[1] == nil {
+	if !hasPayload || mode == tcpWireUnanchored && wire.synDirections == 3 && wire.packets[0] == nil && wire.packets[1] == nil {
 		return
 	}
 	packets := wire.packets[dir]
@@ -436,11 +470,11 @@ func (wire *tcpWireDirection) add(end int, seq uint32, packet tcpPacketEvidence)
 // number starts a new connection on the same [FlowSummary].
 // Set [Capture.SeparateTCPInterfaces] to track openings per PcapNG interface.
 func (c *Capture) Streams(data []byte) ([]TCPStream, error) {
-	return collectStreams(ipFrameSource{capture: c, data: data}, 0, nil, false)
+	return collectStreams(ipFrameSource{capture: c, data: data}, 0, nil, tcpWireNone)
 }
 
 // A nonzero port restricts reassembly after global flow indices are assigned.
-func collectStreams(source ipFrameSource, port uint16, meta *[]streamMetadata, trackWire bool) ([]TCPStream, error) {
+func collectStreams(source ipFrameSource, port uint16, meta *[]streamMetadata, trackWire tcpWireMode) ([]TCPStream, error) {
 	var table flowIndexTable
 	var inline [8]tcpFlowUsage
 	usage := inline[:0]
@@ -489,7 +523,7 @@ func collectStreams(source ipFrameSource, port uint16, meta *[]streamMetadata, t
 				srcPort: frame.SrcPort, dstPort: frame.DstPort,
 				canonical: canonical,
 			})
-			if trackWire {
+			if trackWire != tcpWireNone {
 				wire = append(wire, tcpWireCapture{})
 			}
 		}
@@ -502,8 +536,15 @@ func collectStreams(source ipFrameSource, port uint16, meta *[]streamMetadata, t
 			dir, segments = 1, &entry.server
 		}
 		*segments = append(*segments, TCPSegmentInput{Seq: frame.TCPSeq, Flags: frame.TCPFlags, Payload: l4})
-		if trackWire {
-			wire[active.slot-1].observe(dir, len(*segments)-1, pkt.Index, &frame, len(l4) != 0)
+		if trackWire != tcpWireNone {
+			var missing int64
+			if trackWire == tcpWireAll && frame.Anomalies.IPTotalLengthExceedsFrame {
+				missing, err = truncatedTCPPayload(source, pkt, &frame)
+				if err != nil {
+					return err
+				}
+			}
+			wire[active.slot-1].observe(dir, len(*segments)-1, pkt.Index, &frame, len(l4) != 0, trackWire, missing)
 		}
 		return nil
 	})
@@ -533,7 +574,7 @@ func collectStreams(source ipFrameSource, port uint16, meta *[]streamMetadata, t
 			var written tcpWriteObserver
 			if meta != nil {
 				var packets []tcpPacketEvidence
-				if trackWire {
+				if trackWire != tcpWireNone {
 					packets = wire[i].packets[dir]
 				}
 				gapped := false
@@ -550,6 +591,13 @@ func collectStreams(source ipFrameSource, port uint16, meta *[]streamMetadata, t
 			buf, err := state.budget.reassemble(side, segments, &remaining, written)
 			if err != nil {
 				return nil, err
+			}
+			if trackWire == tcpWireAll && prefix > 0 {
+				d := &info.wire[dir]
+				tail := &wire[i].tails[dir]
+				end := d.seq + uint32(prefix)
+				d.truncated = tail.unknownTruncation || tail.isTruncated && int32(tail.declaredEnd-end) > 0
+				d.gapBeforeFIN = tail.hasFIN && int32(tail.fin-end) > 0
 			}
 			if dir == 0 {
 				st.Client, info.clientPrefix = buf, prefix

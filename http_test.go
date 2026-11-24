@@ -401,7 +401,7 @@ func TestHTTPFramingCaptureParity(t *testing.T) {
 		t.Fatal(err)
 	}
 	var meta []streamMetadata
-	streams, err := collectStreams(ipFrameSource{capture: index, reader: reader, needsPayload: func(f Frame, _ []byte) bool { return f.IPProtocol == IPProtoTCP }}, 0, &meta, true)
+	streams, err := collectStreams(ipFrameSource{capture: index, reader: reader, needsPayload: func(f Frame, _ []byte) bool { return f.IPProtocol == IPProtoTCP }}, 0, &meta, tcpWireUnanchored)
 	if err != nil {
 		t.Fatal(err)
 	}

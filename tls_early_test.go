@@ -70,7 +70,7 @@ func TestTLS13EarlyDataEpochs(t *testing.T) {
 		encryptTLS13AppDataRecord(t, app, TLS_AES_128_GCM_SHA256, 0, TLSRecordApplicationData, []byte("later")),
 		sealEarly(2, "out of epoch"),
 	}, nil)
-	_, got, err := decryptTLS13Records(wire, TLS_AES_128_GCM_SHA256, nil, app, early)
+	_, got, err := decryptTLS13Records(wire, TLS_AES_128_GCM_SHA256, nil, app, early, nil)
 	if err != nil || string(got) != "first second later" {
 		t.Fatalf("got %q, err %v", got, err)
 	}

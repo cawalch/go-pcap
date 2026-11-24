@@ -13,6 +13,15 @@
    TLS uses TCP streams. QUIC Initials carry handshake bytes in CRYPTO frames.
    ReaderAt scans read payloads according to the protocol and its work budget.
 
+The internal TLS provenance scan retains the original packets that cover each
+authenticated application record in a TCP opening. Packet coverage includes the
+header and ciphertext. The plaintext interval is relative to the recovered
+application bytes for its direction. The scan reports where coverage stops and
+can identify an earlier opaque TLS 1.3 epoch before a recovered application
+epoch. It charges up to 65,536 inspected records and 262,144 packet-span
+intersections across the capture, within the existing TCP reassembly byte
+limits. [TShark reference fixture](../testdata/tls-provenance.md)
+
 ## Release roadmap
 
 ### v0.1.0 — capture correctness and compatibility
