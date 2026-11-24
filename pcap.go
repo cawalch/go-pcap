@@ -518,6 +518,28 @@ func (s *scanSummary) countBlock() error {
 	return nil
 }
 
+// Classic records contain four consecutive 32-bit fields in the capture's byte order.
+func classicPacketFields(header []byte, order binary.ByteOrder) (seconds, fraction, captured, original uint32) {
+	if order == binary.BigEndian {
+		return binary.BigEndian.Uint32(header[:4]),
+			binary.BigEndian.Uint32(header[4:8]),
+			binary.BigEndian.Uint32(header[8:12]),
+			binary.BigEndian.Uint32(header[12:16])
+	}
+	return binary.LittleEndian.Uint32(header[:4]),
+		binary.LittleEndian.Uint32(header[4:8]),
+		binary.LittleEndian.Uint32(header[8:12]),
+		binary.LittleEndian.Uint32(header[12:16])
+}
+
+func classicTimestamp(seconds, fraction uint32, nano bool) int64 {
+	sub := int64(fraction)
+	if !nano {
+		sub *= 1_000
+	}
+	return int64(seconds)*1_000_000_000 + sub
+}
+
 func scanClassicPCAPPackets(
 	r *SafeReader,
 	snapLen uint32,
@@ -546,8 +568,7 @@ func scanClassicPCAPPackets(
 			break
 		}
 		header := r.data[offset : offset+pcapPacketHeaderSize]
-		capLen := order.Uint32(header[8:12])
-		origLen := order.Uint32(header[12:16])
+		tsSec, tsSub, capLen, origLen := classicPacketFields(header, order)
 
 		if capLen > MaxSnapLen {
 			return scanSummary{}, nil, fmt.Errorf("%w: packet capture length %d exceeds %d", ErrInvalidPacket, capLen, MaxSnapLen)
@@ -574,18 +595,11 @@ func scanClassicPCAPPackets(
 		summary.packetCount++
 
 		if collect || cb != nil {
-			tsSec := order.Uint32(header[0:4])
-			tsSub := order.Uint32(header[4:8])
-			subNs := int64(tsSub) * 1_000
-			if nano {
-				subNs = int64(tsSub)
-			}
-			tsNs := int64(tsSec)*1_000_000_000 + subNs
 			rec := PacketRecord{
 				Index:         summary.packetCount - 1,
 				InterfaceID:   0,
 				LinkType:      linkType,
-				TimestampNs:   tsNs,
+				TimestampNs:   classicTimestamp(tsSec, tsSub, nano),
 				CaptureLen:    capLen,
 				OriginalLen:   origLen,
 				PayloadOffset: payloadOffset,

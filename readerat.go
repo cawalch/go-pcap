@@ -246,10 +246,10 @@ func (c *Capture) FlowsFromReaderAt(r io.ReaderAt) ([]FlowSummary, error) {
 		defer w.release()
 		r = w
 	}
-	if c.LinkType == LinkTypeIEEE80211RadioTap || slices.ContainsFunc(c.Interfaces, func(iface InterfaceDescriptor) bool {
+	if c.Format == FormatPCAP || c.LinkType == LinkTypeIEEE80211RadioTap || slices.ContainsFunc(c.Interfaces, func(iface InterfaceDescriptor) bool {
 		return iface.LinkType == LinkTypeIEEE80211RadioTap
 	}) {
-		return c.flowsFromRadiotapReader(r)
+		return c.flowsFromPrefixReader(r)
 	}
 	acc := flowAccumulator{separateInterfaces: c.SeparateTCPInterfaces && len(c.Interfaces) > 1}
 	var header [256]byte
@@ -285,9 +285,9 @@ func (c *Capture) FlowsFromReaderAt(r io.ReaderAt) ([]FlowSummary, error) {
 	return acc.flows, nil
 }
 
-// flowsFromRadiotapReader uses the shared prefix walker to retry large Radiotap
-// headers. Other captures use the direct loop without that recovery path.
-func (c *Capture) flowsFromRadiotapReader(r io.ReaderAt) ([]FlowSummary, error) {
+// flowsFromPrefixReader shares the classic record walk with protocol scans
+// and extends long Radiotap headers. The common PcapNG path aggregates directly.
+func (c *Capture) flowsFromPrefixReader(r io.ReaderAt) ([]FlowSummary, error) {
 	budget := scanReadBudget{r: r, remaining: MaxReaderAtScanBytes}
 	acc := flowAccumulator{separateInterfaces: c.SeparateTCPInterfaces && len(c.Interfaces) > 1}
 	err := c.walkFlowPrefixes(&budget, func(pkt PacketRecord, f Frame, prefix []byte) error {
@@ -663,10 +663,7 @@ func scanClassicPCAPReaderAt(
 		if err := readExactAt(r, hdr[:], offset, size); err != nil {
 			return scanSummary{}, err
 		}
-		tsSec := order.Uint32(hdr[0:4])
-		tsSub := order.Uint32(hdr[4:8])
-		capLen := order.Uint32(hdr[8:12])
-		origLen := order.Uint32(hdr[12:16])
+		tsSec, tsSub, capLen, origLen := classicPacketFields(hdr[:], order)
 
 		if capLen > MaxSnapLen {
 			return scanSummary{}, fmt.Errorf("%w: packet capture length %d exceeds %d", ErrInvalidPacket, capLen, MaxSnapLen)
@@ -691,15 +688,11 @@ func scanClassicPCAPReaderAt(
 		summary.packetCount++
 
 		if cb != nil {
-			subNs := int64(tsSub) * 1_000
-			if nano {
-				subNs = int64(tsSub)
-			}
 			if err := cb(PacketRecord{
 				Index:         summary.packetCount - 1,
 				InterfaceID:   0,
 				LinkType:      linkType,
-				TimestampNs:   int64(tsSec)*1_000_000_000 + subNs,
+				TimestampNs:   classicTimestamp(tsSec, tsSub, nano),
 				CaptureLen:    capLen,
 				OriginalLen:   origLen,
 				PayloadOffset: payloadOffset,

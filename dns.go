@@ -403,55 +403,40 @@ func decodeDNSNameBounded(payload []byte, start int, limit int, allowCompression
 		return "", limit, nil
 	}
 
-	var buf [MaxDNSNameBytes]byte
+	// Store a separator after every label, including the last.
+	var buf [MaxDNSNameBytes + 1]byte
 	outLen := 0
 	cur := start
 	bound := limit
 	nextOffset := -1
 	jumps := 0
 
-	for {
-		if cur >= bound {
-			anomalies.TruncatedSection = true
-			if nextOffset < 0 {
-				nextOffset = bound
-			}
-			return string(buf[:outLen]), nextOffset, nil
-		}
+labels:
+	for cur < bound {
 		b := payload[cur]
 		if b == 0 {
 			cur++
 			if nextOffset < 0 {
 				nextOffset = cur
 			}
-			return string(buf[:outLen]), nextOffset, nil
+			return string(buf[:max(0, outLen-1)]), nextOffset, nil
 		}
 
 		switch b & 0xc0 {
 		case 0x00:
 			labelLen := int(b & 0x3f)
 			cur++
-			if cur+labelLen > bound {
-				anomalies.TruncatedSection = true
-				if nextOffset < 0 {
-					nextOffset = bound
-				}
-				return string(buf[:outLen]), nextOffset, nil
+			if labelLen > bound-cur {
+				break labels
 			}
-			sep := 0
-			if outLen > 0 {
-				sep = 1
-			}
-			if outLen+sep+labelLen > MaxDNSNameBytes {
+			if outLen+labelLen >= len(buf) {
 				anomalies.OversizeName = true
 				return "", 0, fmt.Errorf("%w: DNS name exceeds %d bytes", ErrDNSLimit, MaxDNSNameBytes)
 			}
-			if sep == 1 {
-				buf[outLen] = '.'
-				outLen++
-			}
 			copy(buf[outLen:], payload[cur:cur+labelLen])
 			outLen += labelLen
+			buf[outLen] = '.'
+			outLen++
 			cur += labelLen
 
 		case 0xc0:
@@ -459,12 +444,8 @@ func decodeDNSNameBounded(payload []byte, start int, limit int, allowCompression
 				anomalies.InvalidCompressionPtr = true
 				return "", 0, fmt.Errorf("%w: compressed SVCB target", ErrInvalidDNS)
 			}
-			if cur+1 >= bound {
-				anomalies.TruncatedSection = true
-				if nextOffset < 0 {
-					nextOffset = bound
-				}
-				return string(buf[:outLen]), nextOffset, nil
+			if bound-cur < 2 {
+				break labels
 			}
 			ptr := int(binary.BigEndian.Uint16(payload[cur:cur+2]) & 0x3fff)
 			if nextOffset < 0 {
@@ -487,6 +468,12 @@ func decodeDNSNameBounded(payload []byte, start int, limit int, allowCompression
 			return "", 0, fmt.Errorf("%w: unsupported DNS label prefix %#x", ErrInvalidDNS, b&0xc0)
 		}
 	}
+
+	anomalies.TruncatedSection = true
+	if nextOffset < 0 {
+		nextOffset = bound
+	}
+	return string(buf[:max(0, outLen-1)]), nextOffset, nil
 }
 
 func isDNSPort(port uint16) bool {
