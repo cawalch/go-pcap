@@ -344,6 +344,44 @@ func TestTLSRecordProvenanceBudget(t *testing.T) {
 	}
 }
 
+func TestTLSRecordProvenancePhysicalReadBudget(t *testing.T) {
+	const (
+		recordBytes   = (64 << 10) - 3
+		records       = MaxReaderAtScanBytes / (64 << 10)
+		tcpHeaderSize = 14 + 20 + 20
+	)
+	order := binary.LittleEndian
+	tcp := buildEthernetIPv4TCPFrame([4]byte{1}, [4]byte{2}, 1234, 443, 1, 0, TCPFlagACK, make([]byte, recordBytes-pcapPacketHeaderSize-tcpHeaderSize))
+	binary.BigEndian.PutUint16(tcp[16:18], 65535)
+	raw := buildClassicPCAP(order, false, LinkTypeEthernet, 65535, [][]byte{tcp})
+	recordHeader := raw[pcapGlobalHeaderSize : pcapGlobalHeaderSize+pcapPacketHeaderSize+tcpHeaderSize]
+
+	// The scan skips the UDP tails and reads every shortened TCP record,
+	// including a second read of the two-byte IP length.
+	udp := buildEthernetIPv4UDPFrame([4]byte{3}, [4]byte{4}, 1234, 4321, make([]byte, 442))
+	prefix := buildClassicPCAP(order, false, LinkTypeEthernet, 65535, [][]byte{udp, udp, udp})
+	file := tempCaptureFile(t, prefix)
+	for i := range records {
+		if _, err := file.WriteAt(recordHeader, int64(len(prefix)+i*recordBytes)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	size := int64(len(prefix) + records*recordBytes)
+	if err := file.Truncate(size); err != nil {
+		t.Fatal(err)
+	}
+	reader := &measuredFile{File: file}
+	c, err := NewFromReaderAt(reader, size)
+	if err != nil {
+		t.Fatal(err)
+	}
+	reader.bytesRead = 0
+	rows, err := scanTLSProvenance(ipFrameSource{capture: c, reader: reader, needsPayload: func(f Frame, _ []byte) bool { return f.IPProtocol == IPProtoTCP }}, nil)
+	if err != nil || len(rows) != 0 || reader.bytesRead > MaxReaderAtScanBytes {
+		t.Fatalf("got %d TLS rows, err %v, read %d bytes with a limit of %d", len(rows), err, reader.bytesRead, MaxReaderAtScanBytes)
+	}
+}
+
 func TestTLSRecordProvenanceEarlyData(t *testing.T) {
 	raw, err := os.ReadFile("testdata/rfc8448-0rtt.pcapng")
 	if err != nil {

@@ -183,12 +183,9 @@ func scanTLSProvenance(source ipFrameSource, extraKeyLog []byte) ([]tlsProvenanc
 		return nil, err
 	}
 	if source.needsPayload != nil && source.reader != nil {
-		if window := fileWindow(source.reader, source.capture.fileSize, source.capture.scanReadAhead()); window != nil {
-			defer window.release()
-			source.reader = window
-		}
-		// Count both the stream walk and the opt-in length reads against a
-		// single ReaderAt allowance.
+		// Count the stream walk and the opt-in length reads against the same
+		// physical read budget. The wrapper hides the underlying file
+		// descriptor so the stream walk won't prefetch extra bytes.
 		source.reader = &scanReadBudget{r: source.reader, remaining: MaxReaderAtScanBytes}
 	}
 	var meta []streamMetadata
