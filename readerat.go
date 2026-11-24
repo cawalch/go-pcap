@@ -7,7 +7,6 @@ import (
 	"fmt"
 	"io"
 	"iter"
-	"runtime"
 	"slices"
 	"sync"
 )
@@ -247,12 +246,10 @@ func (c *Capture) FlowsFromReaderAt(r io.ReaderAt) ([]FlowSummary, error) {
 		defer w.release()
 		r = w
 	}
-	// With Go 1.27 the shared walker is faster for classic PCAP on amd64.
-	// Radiotap needs its extended-header handling on every architecture.
-	if (runtime.GOARCH == "amd64" && c.Format == FormatPCAP) || c.LinkType == LinkTypeIEEE80211RadioTap || slices.ContainsFunc(c.Interfaces, func(iface InterfaceDescriptor) bool {
+	if c.LinkType == LinkTypeIEEE80211RadioTap || slices.ContainsFunc(c.Interfaces, func(iface InterfaceDescriptor) bool {
 		return iface.LinkType == LinkTypeIEEE80211RadioTap
 	}) {
-		return c.flowsFromPrefixReader(r)
+		return c.flowsFromRadiotapReader(r)
 	}
 	acc := flowAccumulator{separateInterfaces: c.SeparateTCPInterfaces && len(c.Interfaces) > 1}
 	var header [256]byte
@@ -288,9 +285,9 @@ func (c *Capture) FlowsFromReaderAt(r io.ReaderAt) ([]FlowSummary, error) {
 	return acc.flows, nil
 }
 
-// flowsFromPrefixReader shares the classic record walk with protocol scans
-// and extends long Radiotap headers. The common PcapNG path aggregates directly.
-func (c *Capture) flowsFromPrefixReader(r io.ReaderAt) ([]FlowSummary, error) {
+// flowsFromRadiotapReader uses the shared prefix walker to retry large Radiotap
+// headers. Other captures use the direct loop without that recovery path.
+func (c *Capture) flowsFromRadiotapReader(r io.ReaderAt) ([]FlowSummary, error) {
 	budget := scanReadBudget{r: r, remaining: MaxReaderAtScanBytes}
 	acc := flowAccumulator{separateInterfaces: c.SeparateTCPInterfaces && len(c.Interfaces) > 1}
 	err := c.walkFlowPrefixes(&budget, func(pkt PacketRecord, f Frame, prefix []byte) error {
@@ -666,7 +663,10 @@ func scanClassicPCAPReaderAt(
 		if err := readExactAt(r, hdr[:], offset, size); err != nil {
 			return scanSummary{}, err
 		}
-		tsSec, tsSub, capLen, origLen := classicPacketFields(hdr[:], order)
+		tsSec := order.Uint32(hdr[0:4])
+		tsSub := order.Uint32(hdr[4:8])
+		capLen := order.Uint32(hdr[8:12])
+		origLen := order.Uint32(hdr[12:16])
 
 		if capLen > MaxSnapLen {
 			return scanSummary{}, fmt.Errorf("%w: packet capture length %d exceeds %d", ErrInvalidPacket, capLen, MaxSnapLen)
@@ -691,11 +691,15 @@ func scanClassicPCAPReaderAt(
 		summary.packetCount++
 
 		if cb != nil {
+			subNs := int64(tsSub) * 1_000
+			if nano {
+				subNs = int64(tsSub)
+			}
 			if err := cb(PacketRecord{
 				Index:         summary.packetCount - 1,
 				InterfaceID:   0,
 				LinkType:      linkType,
-				TimestampNs:   classicTimestamp(tsSec, tsSub, nano),
+				TimestampNs:   int64(tsSec)*1_000_000_000 + subNs,
 				CaptureLen:    capLen,
 				OriginalLen:   origLen,
 				PayloadOffset: payloadOffset,
@@ -714,7 +718,32 @@ func parsePCAPNGFromReaderAt(r io.ReaderAt, size int64) (*Capture, error) {
 	if err != nil {
 		return nil, err
 	}
-	return meta.pcapngCapture(size), nil
+	var snapLen uint32
+	var linkType LinkType
+	if len(meta.interfaces) > 0 {
+		snapLen = meta.interfaces[0].SnapLen
+		linkType = meta.interfaces[0].LinkType
+	}
+	return &Capture{
+		Format:         FormatPCAPNG,
+		BigEndian:      meta.bigEndian,
+		VersionMajor:   meta.vMajor,
+		VersionMinor:   meta.vMinor,
+		SnapLen:        snapLen,
+		LinkType:       linkType,
+		Hardware:       meta.hardware,
+		OS:             meta.os,
+		UserAppl:       meta.userAppl,
+		Interfaces:     meta.interfaces,
+		Secrets:        meta.secrets,
+		NameRecords:    meta.nameRecords,
+		InterfaceStats: meta.interfaceStats,
+		Processes:      meta.processes,
+		PacketCount:    meta.packetCount,
+		fileSize:       size,
+		declaredExtent: meta.declaredExtent,
+		anomalies:      meta.anomalies,
+	}, nil
 }
 
 func scanPCAPNGReaderAt(r io.ReaderAt, size int64, cb func(PacketRecord) error, rawBlock func(uint32, binary.ByteOrder, int64, int64) error) (scanSummary, error) {
@@ -828,7 +857,7 @@ func scanPCAPNGReaderAt(r io.ReaderAt, size int64, cb func(PacketRecord) error, 
 				header = headerBuf[8:28]
 			}
 			var options int64
-			options, packetErr = rec.decodePacketBlockHeader(blockType, header, offset+28, bodyEnd, order, &summary)
+			rec, options, packetErr = decodePacketBlockHeader(blockType, header, offset+28, bodyEnd, order, &summary)
 			if packetErr == nil {
 				tailOffset = options
 			}
@@ -837,7 +866,7 @@ func scanPCAPNGReaderAt(r io.ReaderAt, size int64, cb func(PacketRecord) error, 
 			if err := readExactAt(r, header, offset+8, size); err != nil {
 				return scanSummary{}, err
 			}
-			packetErr = rec.decodeSPBHeader(header, offset+12, bodyEnd, order, &summary)
+			rec, packetErr = decodeSPBHeader(header, offset+12, bodyEnd, order, &summary)
 		case BlockTypeSectionHeader, BlockTypeInterfaceDesc, BlockTypeDarwinProcessEvent:
 			tailOffset = offset + 8
 		default:
@@ -884,13 +913,14 @@ func scanPCAPNGReaderAt(r io.ReaderAt, size int64, cb func(PacketRecord) error, 
 			offset = int64(blockEnd)
 			continue
 		}
+		sr := SafeReader{data: body, size: int64(len(body))}
 		switch blockType {
 		case BlockTypeSectionHeader:
-			if err := summary.decodeSHB(body, order, &haveSection); err != nil {
+			if err := decodeSHB(&sr, 0, sr.size, order, &summary, &haveSection); err != nil {
 				return scanSummary{}, err
 			}
 		case BlockTypeInterfaceDesc:
-			if err := summary.decodeIDB(body, order); err != nil {
+			if err := decodeIDB(&sr, 0, sr.size, order, &summary); err != nil {
 				return scanSummary{}, err
 			}
 		case blockTypeLegacyPacket, BlockTypeEnhancedPacket, BlockTypeSimplePacket:
@@ -904,8 +934,24 @@ func scanPCAPNGReaderAt(r io.ReaderAt, size int64, cb func(PacketRecord) error, 
 					return scanSummary{}, err
 				}
 			}
-		case BlockTypeDecryptionSecrets, BlockTypeNameResolution, BlockTypeInterfaceStats, BlockTypeDarwinProcessEvent:
-			if err := summary.decodeMetadata(body, blockType, order, tailOffset, &totalSecretBytes); err != nil {
+		case BlockTypeDecryptionSecrets:
+			prevLen := len(summary.secrets)
+			if err := decodeDSB(&sr, 0, sr.size, order, &totalSecretBytes, &summary); err != nil {
+				return scanSummary{}, err
+			}
+			if len(summary.secrets) > prevLen {
+				summary.secrets[len(summary.secrets)-1].PayloadOffset += tailOffset
+			}
+		case BlockTypeNameResolution:
+			if err := decodeNRB(&sr, 0, sr.size, order, &summary); err != nil {
+				return scanSummary{}, err
+			}
+		case BlockTypeInterfaceStats:
+			if err := decodeISB(&sr, 0, sr.size, order, &summary); err != nil {
+				return scanSummary{}, err
+			}
+		case BlockTypeDarwinProcessEvent:
+			if err := decodeDPEB(&sr, 0, sr.size, order, &summary); err != nil {
 				return scanSummary{}, err
 			}
 		}

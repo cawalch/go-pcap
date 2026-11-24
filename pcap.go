@@ -221,7 +221,7 @@ func DecompressCapture(data []byte) ([]byte, error) {
 // The returned [Capture] owns its metadata, interface strings, and DSB secret
 // copies and retains no reference to data.
 func New(data []byte) (*Capture, error) {
-	return parseCapture(data, int64(len(data)))
+	return NewWithLength(data, int64(len(data)))
 }
 
 var (
@@ -249,10 +249,6 @@ func NewWithLength(data []byte, fileSize int64) (*Capture, error) {
 	if fileSize < int64(len(data)) {
 		return nil, fmt.Errorf("%w: input length %d is smaller than buffer length %d", ErrInvalidHeader, fileSize, len(data))
 	}
-	return parseCapture(data, fileSize)
-}
-
-func parseCapture(data []byte, fileSize int64) (*Capture, error) {
 	if len(data) < 4 {
 		return nil, errNotPCAPOutOfBounds
 	}
@@ -331,14 +327,20 @@ func (c *Capture) PacketPayload(data []byte, pkt PacketRecord) ([]byte, error) {
 // without allocating a slice of [PacketRecord] values.
 func (c *Capture) PacketSeq(data []byte) iter.Seq2[PacketRecord, error] {
 	return func(yield func(PacketRecord, error) bool) {
+		if err := c.validateContainer(); err != nil {
+			yield(PacketRecord{}, err)
+			return
+		}
 		r := SafeReader{data: data, size: int64(len(data))}
+		stopped := false
 		err := c.walkPackets(&r, func(pkt PacketRecord) error {
 			if !yield(pkt, nil) {
+				stopped = true
 				return errStopWalk
 			}
 			return nil
 		})
-		if err != nil {
+		if err != nil && !stopped {
 			yield(PacketRecord{}, err)
 		}
 	}
@@ -350,20 +352,26 @@ func (c *Capture) walkPackets(r *SafeReader, fn func(PacketRecord) error) error 
 	if err := c.validateContainer(); err != nil {
 		return err
 	}
-	var err error
-	if c.Format == FormatPCAP {
+	switch c.Format {
+	case FormatPCAP:
 		order := binary.ByteOrder(binary.LittleEndian)
 		if c.BigEndian {
 			order = binary.BigEndian
 		}
-		_, _, err = scanClassicPCAPPackets(r, c.SnapLen, c.LinkType, order, c.NanoTimestamp, false, 0, fn)
-	} else {
-		_, _, err = scanPCAPNGBlocks(r, false, 0, fn)
+		_, _, err := scanClassicPCAPPacketsWithCallback(r, c.SnapLen, c.LinkType, order, c.NanoTimestamp, false, 0, fn)
+		if errors.Is(err, errStopWalk) {
+			return nil
+		}
+		return err
+	case FormatPCAPNG:
+		_, _, err := scanPCAPNGBlocksWithCallback(r, false, 0, fn)
+		if errors.Is(err, errStopWalk) {
+			return nil
+		}
+		return err
+	default:
+		return ErrInvalidHeader
 	}
-	if errors.Is(err, errStopWalk) {
-		return nil
-	}
-	return err
 }
 
 // ipFrameSource visits all decoded IP frames to preserve first-seen flow
@@ -408,16 +416,20 @@ func (c *Capture) Packets(data []byte) ([]PacketRecord, error) {
 		return nil, err
 	}
 	r := SafeReader{data: data, size: int64(len(data))}
-	if c.Format == FormatPCAP {
+	switch c.Format {
+	case FormatPCAP:
 		order := binary.ByteOrder(binary.LittleEndian)
 		if c.BigEndian {
 			order = binary.BigEndian
 		}
-		_, packets, err := scanClassicPCAPPackets(&r, c.SnapLen, c.LinkType, order, c.NanoTimestamp, true, c.PacketCount, nil)
+		_, packets, err := scanClassicPCAPPackets(r, c.SnapLen, c.LinkType, order, c.NanoTimestamp, true, c.PacketCount)
 		return packets, err
+	case FormatPCAPNG:
+		_, packets, err := scanPCAPNGBlocks(r, true, c.PacketCount)
+		return packets, err
+	default:
+		return nil, ErrInvalidHeader
 	}
-	_, packets, err := scanPCAPNGBlocks(&r, true, c.PacketCount, nil)
-	return packets, err
 }
 
 func (c *Capture) validateContainer() error {
@@ -453,7 +465,7 @@ func parseClassicPCAP(r *SafeReader, fileSize int64, order binary.ByteOrder, nan
 	rawLinkType, _ := r.ReadUint32Order(20, order)
 	linkType := LinkType(rawLinkType & 0xffff)
 
-	meta, _, err := scanClassicPCAPPackets(r, snapLen, linkType, order, nano, false, 0, nil)
+	meta, _, err := scanClassicPCAPPackets(*r, snapLen, linkType, order, nano, false, 0)
 	if err != nil {
 		return nil, err
 	}
@@ -518,29 +530,19 @@ func (s *scanSummary) countBlock() error {
 	return nil
 }
 
-// Classic records contain four consecutive 32-bit fields in the capture's byte order.
-func classicPacketFields(header []byte, order binary.ByteOrder) (seconds, fraction, captured, original uint32) {
-	if order == binary.BigEndian {
-		return binary.BigEndian.Uint32(header[:4]),
-			binary.BigEndian.Uint32(header[4:8]),
-			binary.BigEndian.Uint32(header[8:12]),
-			binary.BigEndian.Uint32(header[12:16])
-	}
-	return binary.LittleEndian.Uint32(header[:4]),
-		binary.LittleEndian.Uint32(header[4:8]),
-		binary.LittleEndian.Uint32(header[8:12]),
-		binary.LittleEndian.Uint32(header[12:16])
-}
-
-func classicTimestamp(seconds, fraction uint32, nano bool) int64 {
-	sub := int64(fraction)
-	if !nano {
-		sub *= 1_000
-	}
-	return int64(seconds)*1_000_000_000 + sub
-}
-
 func scanClassicPCAPPackets(
+	r SafeReader,
+	snapLen uint32,
+	linkType LinkType,
+	order binary.ByteOrder,
+	nano bool,
+	collect bool,
+	hintCount int,
+) (scanSummary, []PacketRecord, error) {
+	return scanClassicPCAPPacketsWithCallback(&r, snapLen, linkType, order, nano, collect, hintCount, nil)
+}
+
+func scanClassicPCAPPacketsWithCallback(
 	r *SafeReader,
 	snapLen uint32,
 	linkType LinkType,
@@ -568,7 +570,8 @@ func scanClassicPCAPPackets(
 			break
 		}
 		header := r.data[offset : offset+pcapPacketHeaderSize]
-		tsSec, tsSub, capLen, origLen := classicPacketFields(header, order)
+		capLen := order.Uint32(header[8:12])
+		origLen := order.Uint32(header[12:16])
 
 		if capLen > MaxSnapLen {
 			return scanSummary{}, nil, fmt.Errorf("%w: packet capture length %d exceeds %d", ErrInvalidPacket, capLen, MaxSnapLen)
@@ -595,11 +598,18 @@ func scanClassicPCAPPackets(
 		summary.packetCount++
 
 		if collect || cb != nil {
+			tsSec := order.Uint32(header[0:4])
+			tsSub := order.Uint32(header[4:8])
+			subNs := int64(tsSub) * 1_000
+			if nano {
+				subNs = int64(tsSub)
+			}
+			tsNs := int64(tsSec)*1_000_000_000 + subNs
 			rec := PacketRecord{
 				Index:         summary.packetCount - 1,
 				InterfaceID:   0,
 				LinkType:      linkType,
-				TimestampNs:   classicTimestamp(tsSec, tsSub, nano),
+				TimestampNs:   tsNs,
 				CaptureLen:    capLen,
 				OriginalLen:   origLen,
 				PayloadOffset: payloadOffset,
@@ -622,14 +632,10 @@ func scanClassicPCAPPackets(
 }
 
 func parsePCAPNG(r *SafeReader, fileSize int64) (*Capture, error) {
-	meta, _, err := scanPCAPNGBlocks(r, false, 0, nil)
+	meta, _, err := scanPCAPNGBlocks(*r, false, 0)
 	if err != nil {
 		return nil, err
 	}
-	return meta.pcapngCapture(fileSize), nil
-}
-
-func (meta *scanSummary) pcapngCapture(fileSize int64) *Capture {
 	var snapLen uint32
 	var linkType LinkType
 	if len(meta.interfaces) > 0 {
@@ -655,7 +661,11 @@ func (meta *scanSummary) pcapngCapture(fileSize int64) *Capture {
 		fileSize:       fileSize,
 		declaredExtent: meta.declaredExtent,
 		anomalies:      meta.anomalies,
-	}
+	}, nil
+}
+
+func scanPCAPNGBlocks(r SafeReader, collectPackets bool, hintCount int) (scanSummary, []PacketRecord, error) {
+	return scanPCAPNGBlocksWithCallback(&r, collectPackets, hintCount, nil)
 }
 
 // These blocks are validated and retained on open. Unlike interface and
@@ -664,7 +674,7 @@ func isCaptureOnlyBlock(kind uint32) bool {
 	return kind == BlockTypeDecryptionSecrets || kind == BlockTypeNameResolution || kind == BlockTypeInterfaceStats
 }
 
-func scanPCAPNGBlocks(r *SafeReader, collectPackets bool, hintCount int, cb func(PacketRecord) error) (scanSummary, []PacketRecord, error) {
+func scanPCAPNGBlocksWithCallback(r *SafeReader, collectPackets bool, hintCount int, cb func(PacketRecord) error) (scanSummary, []PacketRecord, error) {
 	var summary scanSummary
 	var packets []PacketRecord
 	if collectPackets && hintCount > 0 {
@@ -672,29 +682,34 @@ func scanPCAPNGBlocks(r *SafeReader, collectPackets bool, hintCount int, cb func
 	}
 	var totalSecretBytes int64
 	var haveSection bool
-	err := walkPCAPNGBlockBytes(r, &summary, func(kind uint32, order binary.ByteOrder, offset int64, block []byte) error {
-		if (collectPackets || cb != nil) && isCaptureOnlyBlock(kind) {
+	err := walkPCAPNGBlockBytes(r, &summary, func(blockType uint32, order binary.ByteOrder, offset int64, block []byte) error {
+		if (collectPackets || cb != nil) && isCaptureOnlyBlock(blockType) {
 			return nil
 		}
 		bodyStart := offset + 8
 		bodyEnd := offset + int64(len(block)) - 4
-		body := block[8 : len(block)-4]
-		switch kind {
+
+		switch blockType {
 		case BlockTypeSectionHeader:
-			return summary.decodeSHB(body, order, &haveSection)
+			if err := decodeSHB(r, bodyStart, bodyEnd, order, &summary, &haveSection); err != nil {
+				return err
+			}
 		case BlockTypeInterfaceDesc:
-			return summary.decodeIDB(body, order)
+			if err := decodeIDB(r, bodyStart, bodyEnd, order, &summary); err != nil {
+				return err
+			}
 		case blockTypeLegacyPacket, BlockTypeEnhancedPacket, BlockTypeSimplePacket:
+			body := r.data[bodyStart:bodyEnd]
 			var rec PacketRecord
 			var err error
-			if kind != BlockTypeSimplePacket {
+			if blockType != BlockTypeSimplePacket {
 				var options int64
-				options, err = rec.decodePacketBlockHeader(kind, body, bodyStart+20, bodyEnd, order, &summary)
+				rec, options, err = decodePacketBlockHeader(blockType, body, bodyStart+20, bodyEnd, order, &summary)
 				if err == nil && options < bodyEnd {
-					err = decodePacketBlockOptions(kind, body[options-bodyStart:], order, &summary, &rec)
+					err = decodePacketBlockOptions(blockType, r.data[options:bodyEnd], order, &summary, &rec)
 				}
 			} else {
-				err = rec.decodeSPBHeader(body, bodyStart+4, bodyEnd, order, &summary)
+				rec, err = decodeSPBHeader(body, bodyStart+4, bodyEnd, order, &summary)
 			}
 			if err != nil {
 				return err
@@ -703,10 +718,28 @@ func scanPCAPNGBlocks(r *SafeReader, collectPackets bool, hintCount int, cb func
 				packets = append(packets, rec)
 			}
 			if cb != nil {
-				return cb(rec)
+				if err := cb(rec); err != nil {
+					return err
+				}
 			}
-		case BlockTypeDecryptionSecrets, BlockTypeNameResolution, BlockTypeInterfaceStats, BlockTypeDarwinProcessEvent:
-			return summary.decodeMetadata(body, kind, order, bodyStart, &totalSecretBytes)
+		case BlockTypeDecryptionSecrets:
+			if err := decodeDSB(r, bodyStart, bodyEnd, order, &totalSecretBytes, &summary); err != nil {
+				return err
+			}
+		case BlockTypeNameResolution:
+			if err := decodeNRB(r, bodyStart, bodyEnd, order, &summary); err != nil {
+				return err
+			}
+		case BlockTypeInterfaceStats:
+			if err := decodeISB(r, bodyStart, bodyEnd, order, &summary); err != nil {
+				return err
+			}
+		case BlockTypeDarwinProcessEvent:
+			if err := decodeDPEB(r, bodyStart, bodyEnd, order, &summary); err != nil {
+				return err
+			}
+		default:
+			// Other blocks (vendor custom blocks) are skipped after framing validation.
 		}
 		return nil
 	})
@@ -714,22 +747,6 @@ func scanPCAPNGBlocks(r *SafeReader, collectPackets bool, hintCount int, cb func
 		return scanSummary{}, nil, err
 	}
 	return summary, packets, nil
-}
-
-func (s *scanSummary) decodeMetadata(body []byte, kind uint32, order binary.ByteOrder, bodyOffset int64, totalSecretBytes *int64) error {
-	switch kind {
-	case BlockTypeDecryptionSecrets:
-		return s.decodeDSB(body, bodyOffset, order, totalSecretBytes)
-	case BlockTypeNameResolution:
-		return s.decodeNRB(body, order)
-	case BlockTypeInterfaceStats:
-		return s.decodeISB(body, order)
-	case BlockTypeDarwinProcessEvent:
-		return s.decodeDPEB(body, order)
-	default:
-		// Other blocks (vendor custom blocks) are skipped after framing validation.
-		return nil
-	}
 }
 
 // walkPCAPNGBlockBytes visits complete, framing-validated blocks in section byte order.
@@ -807,13 +824,12 @@ func walkPCAPNGBlockBytes(r *SafeReader, summary *scanSummary, visit func(uint32
 			break
 		}
 
-		block := r.data[offset:blockEnd]
-		trailingLen := order.Uint32(block[len(block)-4:])
+		trailingLen, _ := r.ReadUint32Order(int64(blockEnd)-4, order)
 		if trailingLen != blockLen {
 			return fmt.Errorf("%w: trailing block length %d does not match leading length %d", ErrInvalidBlock, trailingLen, blockLen)
 		}
 
-		if err := visit(blockType, order, offset, block); err != nil {
+		if err := visit(blockType, order, offset, r.data[offset:blockEnd]); err != nil {
 			return err
 		}
 		haveSection = true
@@ -822,71 +838,83 @@ func walkPCAPNGBlockBytes(r *SafeReader, summary *scanSummary, visit func(uint32
 	return nil
 }
 
-func (s *scanSummary) decodeSHB(body []byte, order binary.ByteOrder, haveSection *bool) error {
-	if len(body) < 16 {
+func decodeSHB(
+	r *SafeReader,
+	bodyStart, bodyEnd int64,
+	order binary.ByteOrder,
+	summary *scanSummary,
+	haveSection *bool,
+) error {
+	if bodyEnd-bodyStart < 16 {
 		return fmt.Errorf("%w: Section Header Block body too short", ErrInvalidBlock)
 	}
-	vMajor := order.Uint16(body[4:6])
-	vMinor := order.Uint16(body[6:8])
+	vMajor, _ := r.ReadUint16Order(bodyStart+4, order)
+	vMinor, _ := r.ReadUint16Order(bodyStart+6, order)
 	if vMajor != 1 {
 		return fmt.Errorf("%w: unsupported PcapNG version %d.%d", ErrInvalidHeader, vMajor, vMinor)
 	}
 
-	s.sectionInterfaceBase = len(s.interfaces)
-	s.sectionProcessBase = len(s.processes)
-	s.sectionLegacyProcess = false
+	summary.sectionInterfaceBase = len(summary.interfaces)
+	summary.sectionProcessBase = len(summary.processes)
+	summary.sectionLegacyProcess = false
 	if !*haveSection {
-		s.bigEndian = order == binary.BigEndian
-		s.vMajor = vMajor
-		s.vMinor = vMinor
+		summary.bigEndian = order == binary.BigEndian
+		summary.vMajor = vMajor
+		summary.vMinor = vMinor
 		*haveSection = true
 	}
 
-	return walkPCAPNGOptions(body[16:], order, func(code uint16, val []byte) error {
+	optOffset := bodyStart + 16
+	return walkPCAPNGOptions(r, optOffset, bodyEnd, order, func(code uint16, val []byte) error {
 		switch code {
 		case optSHBHardware:
-			if s.hardware == "" {
-				s.hardware = string(val)
+			if summary.hardware == "" {
+				summary.hardware = string(val)
 			}
 		case optSHBOS:
-			if s.os == "" {
-				s.os = string(val)
+			if summary.os == "" {
+				summary.os = string(val)
 			}
 		case optSHBUserAppl:
-			s.sectionLegacyProcess = bytes.Equal(val, []byte("go-pcap"))
-			if s.userAppl == "" {
-				s.userAppl = string(val)
+			summary.sectionLegacyProcess = bytes.Equal(val, []byte("go-pcap"))
+			if summary.userAppl == "" {
+				summary.userAppl = string(val)
 			}
 		}
 		return nil
 	})
 }
 
-func (s *scanSummary) decodeIDB(body []byte, order binary.ByteOrder) error {
-	if len(body) < 8 {
+func decodeIDB(
+	r *SafeReader,
+	bodyStart, bodyEnd int64,
+	order binary.ByteOrder,
+	summary *scanSummary,
+) error {
+	if bodyEnd-bodyStart < 8 {
 		return fmt.Errorf("%w: Interface Description Block body too short", ErrInvalidBlock)
 	}
-	if len(s.interfaces) >= MaxInterfaces {
+	if len(summary.interfaces) >= MaxInterfaces {
 		return fmt.Errorf("%w: exceeds %d", ErrInterfaceLimit, MaxInterfaces)
 	}
-	rawLink := order.Uint16(body[:2])
-	snapLen := order.Uint32(body[4:8])
+	rawLink, _ := r.ReadUint16Order(bodyStart, order)
+	snapLen, _ := r.ReadUint32Order(bodyStart+4, order)
 	if snapLen > MaxSnapLen {
 		return fmt.Errorf("%w: IDB snaplen %d exceeds %d", ErrInvalidHeader, snapLen, MaxSnapLen)
 	}
 
 	iface := InterfaceDescriptor{
-		ID:                uint32(len(s.interfaces)),
+		ID:                uint32(len(summary.interfaces)),
 		LinkType:          LinkType(rawLink),
 		SnapLen:           snapLen,
 		TimestampScaleNs:  defaultTimestampResolN,
 		TimestampExponent: 6,
 	}
 	if !isKnownLinkType(iface.LinkType) {
-		s.anomalies.UnknownLinkType = true
+		summary.anomalies.UnknownLinkType = true
 	}
 
-	err := walkPCAPNGOptions(body[8:], order, func(code uint16, val []byte) error {
+	err := walkPCAPNGOptions(r, bodyStart+8, bodyEnd, order, func(code uint16, val []byte) error {
 		switch code {
 		case optIDBName:
 			iface.Name = string(val)
@@ -898,7 +926,7 @@ func (s *scanSummary) decodeIDB(body []byte, order binary.ByteOrder) error {
 			if len(val) == 1 {
 				applyTimestampResolution(val[0], &iface)
 			} else {
-				s.anomalies.InvalidTimestampResolution = true
+				summary.anomalies.InvalidTimestampResolution = true
 			}
 		case optIDBTsOffset:
 			if len(val) == 8 {
@@ -911,7 +939,7 @@ func (s *scanSummary) decodeIDB(body []byte, order binary.ByteOrder) error {
 		return err
 	}
 
-	s.interfaces = append(s.interfaces, iface)
+	summary.interfaces = append(summary.interfaces, iface)
 	return nil
 }
 
@@ -981,9 +1009,9 @@ func scaleRawTimestampNs(rawTicks uint64, iface InterfaceDescriptor) int64 {
 	return int64(lo)
 }
 
-func (rec *PacketRecord) decodePacketBlockHeader(kind uint32, header []byte, payloadOffset, bodyEnd int64, order binary.ByteOrder, summary *scanSummary) (int64, error) {
+func decodePacketBlockHeader(kind uint32, header []byte, payloadOffset, bodyEnd int64, order binary.ByteOrder, summary *scanSummary) (PacketRecord, int64, error) {
 	if len(header) < 20 {
-		return 0, fmt.Errorf("%w: PcapNG packet block body too short", ErrInvalidBlock)
+		return PacketRecord{}, 0, fmt.Errorf("%w: PcapNG packet block body too short", ErrInvalidBlock)
 	}
 	ifaceID := order.Uint32(header)
 	var dropCount uint64
@@ -994,7 +1022,7 @@ func (rec *PacketRecord) decodePacketBlockHeader(kind uint32, header []byte, pay
 		}
 	}
 	if ifaceID >= uint32(len(summary.interfaces)-summary.sectionInterfaceBase) {
-		return 0, fmt.Errorf("%w: PcapNG packet interface ID %d out of range (%d section interfaces)", ErrInvalidPacket, ifaceID, len(summary.interfaces)-summary.sectionInterfaceBase)
+		return PacketRecord{}, 0, fmt.Errorf("%w: PcapNG packet interface ID %d out of range (%d section interfaces)", ErrInvalidPacket, ifaceID, len(summary.interfaces)-summary.sectionInterfaceBase)
 	}
 	iface := summary.interfaces[summary.sectionInterfaceBase+int(ifaceID)]
 
@@ -1004,7 +1032,7 @@ func (rec *PacketRecord) decodePacketBlockHeader(kind uint32, header []byte, pay
 	origLen := order.Uint32(header[16:])
 
 	if capLen > MaxSnapLen {
-		return 0, fmt.Errorf("%w: PcapNG packet capture length %d exceeds %d", ErrInvalidPacket, capLen, MaxSnapLen)
+		return PacketRecord{}, 0, fmt.Errorf("%w: PcapNG packet capture length %d exceeds %d", ErrInvalidPacket, capLen, MaxSnapLen)
 	}
 	if capLen > origLen {
 		summary.anomalies.CaptureLenExceedsOriginal = true
@@ -1018,15 +1046,15 @@ func (rec *PacketRecord) decodePacketBlockHeader(kind uint32, header []byte, pay
 		paddedCapLen += 4 - rem
 	}
 	if paddedCapLen > bodyEnd-payloadOffset {
-		return 0, fmt.Errorf("%w: PcapNG packet capture length %d exceeds block body", ErrInvalidBlock, capLen)
+		return PacketRecord{}, 0, fmt.Errorf("%w: PcapNG packet capture length %d exceeds block body", ErrInvalidBlock, capLen)
 	}
 
 	if summary.packetCount >= MaxPackets {
-		return 0, fmt.Errorf("%w: exceeds %d", ErrPacketLimit, MaxPackets)
+		return PacketRecord{}, 0, fmt.Errorf("%w: exceeds %d", ErrPacketLimit, MaxPackets)
 	}
 	summary.packetCount++
 
-	*rec = PacketRecord{
+	return PacketRecord{
 		Index:         summary.packetCount - 1,
 		InterfaceID:   iface.ID,
 		LinkType:      iface.LinkType,
@@ -1036,8 +1064,7 @@ func (rec *PacketRecord) decodePacketBlockHeader(kind uint32, header []byte, pay
 		PayloadOffset: payloadOffset,
 		PayloadLength: int64(capLen),
 		DropCount:     dropCount,
-	}
-	return payloadOffset + paddedCapLen, nil
+	}, payloadOffset + paddedCapLen, nil
 }
 
 // These comments carry metadata for which the Darwin process block has no
@@ -1051,11 +1078,12 @@ const (
 )
 
 func decodePacketBlockOptions(kind uint32, options []byte, order binary.ByteOrder, summary *scanSummary, rec *PacketRecord) error {
+	r := SafeReader{data: options, size: int64(len(options))}
 	processes := summary.processes[summary.sectionProcessBase:]
 	legacyInline := summary.sectionLegacyProcess && len(processes) == 0
 	nativeIndex, legacyIndex := uint32(math.MaxUint32), uint32(math.MaxUint32)
 	var haveNativeIndex bool
-	err := walkPCAPNGOptions(options, order, func(code uint16, val []byte) error {
+	err := walkPCAPNGOptions(&r, 0, r.size, order, func(code uint16, val []byte) error {
 		// The obsolete block shares the flags code with the EPB. Its drop
 		// count comes from the fixed header and EPB-specific options don't apply.
 		if kind == blockTypeLegacyPacket && code != optEPBFlags {
@@ -1154,12 +1182,12 @@ func decodeProcessComment(raw []byte, rec *PacketRecord) error {
 	return nil
 }
 
-func (rec *PacketRecord) decodeSPBHeader(header []byte, payloadOffset, bodyEnd int64, order binary.ByteOrder, summary *scanSummary) error {
+func decodeSPBHeader(header []byte, payloadOffset, bodyEnd int64, order binary.ByteOrder, summary *scanSummary) (PacketRecord, error) {
 	if len(header) < 4 {
-		return fmt.Errorf("%w: Simple Packet Block body too short", ErrInvalidBlock)
+		return PacketRecord{}, fmt.Errorf("%w: Simple Packet Block body too short", ErrInvalidBlock)
 	}
 	if len(summary.interfaces) == summary.sectionInterfaceBase {
-		return fmt.Errorf("%w: Simple Packet Block requires interface 0", ErrInvalidPacket)
+		return PacketRecord{}, fmt.Errorf("%w: Simple Packet Block requires interface 0", ErrInvalidPacket)
 	}
 	iface := summary.interfaces[summary.sectionInterfaceBase]
 	origLen := order.Uint32(header)
@@ -1170,17 +1198,17 @@ func (rec *PacketRecord) decodeSPBHeader(header []byte, payloadOffset, bodyEnd i
 		capLen = iface.SnapLen
 	}
 	if int64(capLen) > avail {
-		return fmt.Errorf("%w: Simple Packet Block payload exceeds block body", ErrInvalidBlock)
+		return PacketRecord{}, fmt.Errorf("%w: Simple Packet Block payload exceeds block body", ErrInvalidBlock)
 	}
 	if capLen > MaxSnapLen {
-		return fmt.Errorf("%w: SPB capture length %d exceeds %d", ErrInvalidPacket, capLen, MaxSnapLen)
+		return PacketRecord{}, fmt.Errorf("%w: SPB capture length %d exceeds %d", ErrInvalidPacket, capLen, MaxSnapLen)
 	}
 	if summary.packetCount >= MaxPackets {
-		return fmt.Errorf("%w: exceeds %d", ErrPacketLimit, MaxPackets)
+		return PacketRecord{}, fmt.Errorf("%w: exceeds %d", ErrPacketLimit, MaxPackets)
 	}
 	summary.packetCount++
 
-	*rec = PacketRecord{
+	return PacketRecord{
 		Index:         summary.packetCount - 1,
 		InterfaceID:   iface.ID,
 		LinkType:      iface.LinkType,
@@ -1188,22 +1216,27 @@ func (rec *PacketRecord) decodeSPBHeader(header []byte, payloadOffset, bodyEnd i
 		OriginalLen:   origLen,
 		PayloadOffset: payloadOffset,
 		PayloadLength: int64(capLen),
-	}
-	return nil
+	}, nil
 }
 
-func (s *scanSummary) decodeDSB(body []byte, bodyOffset int64, order binary.ByteOrder, totalSecretBytes *int64) error {
-	if len(body) < 8 {
+func decodeDSB(
+	r *SafeReader,
+	bodyStart, bodyEnd int64,
+	order binary.ByteOrder,
+	totalSecretBytes *int64,
+	summary *scanSummary,
+) error {
+	if bodyEnd-bodyStart < 8 {
 		return fmt.Errorf("%w: Decryption Secrets Block body too short", ErrInvalidBlock)
 	}
-	if len(s.secrets) >= MaxDecryptionSecrets {
+	if len(summary.secrets) >= MaxDecryptionSecrets {
 		return fmt.Errorf("%w: exceeds %d", ErrSecretLimit, MaxDecryptionSecrets)
 	}
-	secretsType := order.Uint32(body[:4])
-	secretsLen := order.Uint32(body[4:8])
-	const payloadOffset = 8
+	secretsType, _ := r.ReadUint32Order(bodyStart, order)
+	secretsLen, _ := r.ReadUint32Order(bodyStart+4, order)
+	payloadOffset := bodyStart + 8
 
-	if int64(secretsLen) > int64(len(body)-payloadOffset) {
+	if int64(secretsLen) > bodyEnd-payloadOffset {
 		return fmt.Errorf("%w: DSB payload length %d exceeds block body", ErrInvalidBlock, secretsLen)
 	}
 	if *totalSecretBytes+int64(secretsLen) > MaxDecryptionSecretBytes {
@@ -1211,44 +1244,67 @@ func (s *scanSummary) decodeDSB(body []byte, bodyOffset int64, order binary.Byte
 	}
 	*totalSecretBytes += int64(secretsLen)
 
-	raw := body[payloadOffset : payloadOffset+int(secretsLen)]
-	optOffset := payloadOffset + ((int(secretsLen) + 3) &^ 3)
-	if optOffset < len(body) {
-		if err := walkPCAPNGOptions(body[optOffset:], order, func(uint16, []byte) error { return nil }); err != nil {
+	raw, err := r.Slice(payloadOffset, int64(secretsLen))
+	if err != nil {
+		return err
+	}
+
+	paddedLen := int64(secretsLen)
+	if rem := paddedLen % 4; rem != 0 {
+		paddedLen += 4 - rem
+	}
+	optOffset := payloadOffset + paddedLen
+	if optOffset < bodyEnd {
+		if err := walkPCAPNGOptions(r, optOffset, bodyEnd, order, func(uint16, []byte) error { return nil }); err != nil {
 			return err
 		}
 	}
 
-	s.secrets = append(s.secrets, DecryptionSecret{
+	summary.secrets = append(summary.secrets, DecryptionSecret{
 		SecretsType:   secretsType,
-		PayloadOffset: bodyOffset + payloadOffset,
+		PayloadOffset: payloadOffset,
 		PayloadLength: int64(secretsLen),
 		Data:          bytes.Clone(raw),
 	})
 	return nil
 }
 
-func (s *scanSummary) decodeNRB(body []byte, order binary.ByteOrder) error {
-	for len(body) > 0 {
-		if len(body) < 4 {
+func decodeNRB(
+	r *SafeReader,
+	bodyStart, bodyEnd int64,
+	order binary.ByteOrder,
+	summary *scanSummary,
+) error {
+	offset := bodyStart
+	for offset < bodyEnd {
+		if bodyEnd-offset < 4 {
 			return fmt.Errorf("%w: truncated Name Resolution Block record header", ErrInvalidBlock)
 		}
-		recType, recLen := order.Uint16(body[:2]), int(order.Uint16(body[2:4]))
-		body = body[4:]
+		recType, _ := r.ReadUint16Order(offset, order)
+		recLen, _ := r.ReadUint16Order(offset+2, order)
+		offset += 4
 		if recType == nrbRecordEnd {
-			return walkPCAPNGOptions(body, order, func(uint16, []byte) error { return nil })
+			break
 		}
-		if recLen > MaxOptionStringBytes || recLen > len(body) {
+		if int64(recLen) > MaxOptionStringBytes || int64(recLen) > bodyEnd-offset {
 			return fmt.Errorf("%w: NRB record length %d exceeds bounds", ErrInvalidBlock, recLen)
 		}
-		if err := s.addNRBRecord(recType, body[:recLen]); err != nil {
+		val, err := r.Slice(offset, int64(recLen))
+		if err != nil {
 			return err
 		}
-		padded := (recLen + 3) &^ 3
-		if padded >= len(body) {
-			return nil
+		padded := int64(recLen)
+		if rem := padded % 4; rem != 0 {
+			padded += 4 - rem
 		}
-		body = body[padded:]
+		offset += padded
+
+		if err := summary.addNRBRecord(recType, val); err != nil {
+			return err
+		}
+	}
+	if offset < bodyEnd {
+		return walkPCAPNGOptions(r, offset, bodyEnd, order, func(uint16, []byte) error { return nil })
 	}
 	return nil
 }
@@ -1290,29 +1346,34 @@ func (s *scanSummary) addNRBRecord(kind uint16, val []byte) error {
 	return nil
 }
 
-func (s *scanSummary) decodeISB(body []byte, order binary.ByteOrder) error {
-	if len(body) < 12 {
+func decodeISB(
+	r *SafeReader,
+	bodyStart, bodyEnd int64,
+	order binary.ByteOrder,
+	summary *scanSummary,
+) error {
+	if bodyEnd-bodyStart < 12 {
 		return fmt.Errorf("%w: Interface Statistics Block body too short", ErrInvalidBlock)
 	}
-	if len(s.interfaceStats) >= MaxInterfaceStats {
+	if len(summary.interfaceStats) >= MaxInterfaceStats {
 		return fmt.Errorf("%w: ISB count exceeds %d", ErrOptionLimit, MaxInterfaceStats)
 	}
-	ifaceID := order.Uint32(body[:4])
-	if ifaceID >= uint32(len(s.interfaces)-s.sectionInterfaceBase) {
+	ifaceID, _ := r.ReadUint32Order(bodyStart, order)
+	if ifaceID >= uint32(len(summary.interfaces)-summary.sectionInterfaceBase) {
 		return fmt.Errorf("%w: ISB interface ID %d out of range", ErrInvalidPacket, ifaceID)
 	}
-	iface := s.interfaces[s.sectionInterfaceBase+int(ifaceID)]
-	tsHigh := order.Uint32(body[4:8])
-	tsLow := order.Uint32(body[8:12])
+	iface := summary.interfaces[summary.sectionInterfaceBase+int(ifaceID)]
+	tsHigh, _ := r.ReadUint32Order(bodyStart+4, order)
+	tsLow, _ := r.ReadUint32Order(bodyStart+8, order)
 
 	stat := InterfaceStatistics{
 		InterfaceID: iface.ID,
 		TimestampNs: scaleRawTimestampNs((uint64(tsHigh)<<32)|uint64(tsLow), iface),
 	}
 
-	const optOffset = 12
-	if optOffset < len(body) {
-		err := walkPCAPNGOptions(body[optOffset:], order, func(code uint16, val []byte) error {
+	optOffset := bodyStart + 12
+	if optOffset < bodyEnd {
+		err := walkPCAPNGOptions(r, optOffset, bodyEnd, order, func(code uint16, val []byte) error {
 			switch code {
 			case optISBStartTime:
 				if len(val) == 8 {
@@ -1346,23 +1407,28 @@ func (s *scanSummary) decodeISB(body []byte, order binary.ByteOrder) error {
 		}
 	}
 
-	s.interfaceStats = append(s.interfaceStats, stat)
+	summary.interfaceStats = append(summary.interfaceStats, stat)
 	return nil
 }
 
-func (s *scanSummary) decodeDPEB(body []byte, order binary.ByteOrder) error {
-	if len(body) < 4 {
+func decodeDPEB(
+	r *SafeReader,
+	bodyStart, bodyEnd int64,
+	order binary.ByteOrder,
+	summary *scanSummary,
+) error {
+	if bodyEnd-bodyStart < 4 {
 		return fmt.Errorf("%w: Darwin Process Event Block body too short", ErrInvalidBlock)
 	}
-	if len(s.processes) >= MaxProcessEvents {
+	if len(summary.processes) >= MaxProcessEvents {
 		return fmt.Errorf("%w: DPEB count exceeds %d", ErrOptionLimit, MaxProcessEvents)
 	}
-	pid := order.Uint32(body[:4])
+	pid, _ := r.ReadUint32Order(bodyStart, order)
 	pe := ProcessEvent{ProcessID: pid}
 
-	const optOffset = 4
-	if optOffset < len(body) {
-		err := walkPCAPNGOptions(body[optOffset:], order, func(code uint16, val []byte) error {
+	optOffset := bodyStart + 4
+	if optOffset < bodyEnd {
+		err := walkPCAPNGOptions(r, optOffset, bodyEnd, order, func(code uint16, val []byte) error {
 			if code == optDPEBProcessName {
 				pe.ProcessName = strings.TrimRight(string(val), "\x00")
 			}
@@ -1373,39 +1439,51 @@ func (s *scanSummary) decodeDPEB(body []byte, order binary.ByteOrder) error {
 		}
 	}
 
-	s.processes = append(s.processes, pe)
+	summary.processes = append(summary.processes, pe)
 	return nil
 }
 
-func walkPCAPNGOptions(options []byte, order binary.ByteOrder, fn func(code uint16, val []byte) error) error {
-	for count := 0; len(options) > 0; count++ {
-		if len(options) < 4 {
+func walkPCAPNGOptions(
+	r *SafeReader,
+	start, end int64,
+	order binary.ByteOrder,
+	fn func(code uint16, val []byte) error,
+) error {
+	offset := start
+	count := 0
+	for offset < end {
+		if end-offset < 4 {
 			return fmt.Errorf("%w: truncated option header", ErrInvalidBlock)
 		}
 		if count >= MaxOptionsPerBlock {
 			return fmt.Errorf("%w: exceeds %d options", ErrOptionLimit, MaxOptionsPerBlock)
 		}
-		code := order.Uint16(options[:2])
+		count++
+
+		code, _ := r.ReadUint16Order(offset, order)
+		length, _ := r.ReadUint16Order(offset+2, order)
+		offset += 4
 		if code == optEndOfOpt {
 			return nil
 		}
-		length := int(order.Uint16(options[2:4]))
-		options = options[4:]
-		if length > MaxOptionStringBytes {
+		if int64(length) > MaxOptionStringBytes {
 			return fmt.Errorf("%w: option length %d exceeds %d", ErrOptionLimit, length, MaxOptionStringBytes)
 		}
-		if length > len(options) {
+		if int64(length) > end-offset {
 			return fmt.Errorf("%w: option value length %d exceeds block boundary", ErrInvalidBlock, length)
 		}
-		if err := fn(code, options[:length]); err != nil {
+		val, err := r.Slice(offset, int64(length))
+		if err != nil {
 			return err
 		}
-		padded := (length + 3) &^ 3
-		// A final value may end before its alignment padding.
-		if padded >= len(options) {
-			return nil
+		if err := fn(code, val); err != nil {
+			return err
 		}
-		options = options[padded:]
+		padded := int64(length)
+		if rem := padded % 4; rem != 0 {
+			padded += 4 - rem
+		}
+		offset += padded
 	}
 	return nil
 }
