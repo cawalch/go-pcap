@@ -268,7 +268,7 @@ func (c *Capture) FlowsFromReaderAt(r io.ReaderAt) ([]FlowSummary, error) {
 		if err != nil {
 			return nil
 		}
-		if n < pkt.PayloadLength && !completeProtocolPrefix(&frame, payload, pkt.PayloadLength) {
+		if n < pkt.PayloadLength && !completeFlowPrefix(&frame, payload, pkt.PayloadLength) {
 			payload, err = extendFramePrefix(&budget, c.fileSize, pkt, &frame, payload, &scratch)
 			if err != nil {
 				return err
@@ -350,6 +350,16 @@ func completeFlowPrefix(f *Frame, prefix []byte, captured int64) bool {
 				}
 			} else {
 				payloadBound = udpOff + udpLen
+				if isIKEPort(f.SrcPort) || isIKEPort(f.DstPort) {
+					// IKE classification needs only its header and optional
+					// Non-ESP Marker. Validate against the full UDP bound.
+					start := udpOff + 8
+					if min(payloadBound, start+32) > int64(len(prefix)) {
+						return false
+					}
+					r := NewSafeReader(prefix)
+					decodeIKEv2(r, start, payloadBound, f)
+				}
 			}
 		}
 	}
@@ -446,7 +456,7 @@ func extendFramePrefix(budget *scanReadBudget, size int64, pkt PacketRecord, f *
 		// DecodeFrame has already accepted this link header. Extending its
 		// backing data cannot shorten the header or change its link type.
 		*f, _ = DecodeFrame(data, pkt.LinkType)
-		if next == limit || completeProtocolPrefix(f, data, pkt.PayloadLength) {
+		if next == limit || completeFlowPrefix(f, data, pkt.PayloadLength) {
 			return data, nil
 		}
 	}
@@ -510,7 +520,7 @@ func (c *Capture) walkFlowPrefixes(budget *scanReadBudget, visit func(PacketReco
 			}
 			n = int64(len(data))
 		}
-		if n < pkt.PayloadLength && !completeProtocolPrefix(&f, data, pkt.PayloadLength) {
+		if n < pkt.PayloadLength && !completeFlowPrefix(&f, data, pkt.PayloadLength) {
 			data, err = extendFramePrefix(budget, c.fileSize, pkt, &f, data, &scratch)
 			if err != nil {
 				return err
@@ -521,15 +531,6 @@ func (c *Capture) walkFlowPrefixes(budget *scanReadBudget, visit func(PacketReco
 		}
 		return visit(pkt, f, data)
 	})
-}
-
-func completeProtocolPrefix(f *Frame, data []byte, captured int64) bool {
-	// IKEv2 classification requires the full UDP datagram. All consumers
-	// need the adjusted payload span, including flow byte accounting.
-	if f.IPProtocol == IPProtoUDP && (isIKEPort(f.SrcPort) || isIKEPort(f.DstPort)) {
-		return false
-	}
-	return completeFlowPrefix(f, data, captured)
 }
 
 // extendRadiotapPrefix retries decoding when a Radiotap header extends past

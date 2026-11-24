@@ -222,8 +222,12 @@ func TestLongIKEFlowBytes(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
+		r := &measuredReaderAt{Reader: bytes.NewReader(data)}
+		flows, err := c.FlowsFromReaderAt(r)
+		if r.bytesRead > 16+256 {
+			t.Fatalf("read %d bytes for IKE flow headers", r.bytesRead)
+		}
 		checkReaderParity(t, data, c.Flows, c.FlowsFromReaderAt)
-		flows, err := c.Flows(data)
 		if err != nil || len(flows) != 1 || flows[0].ClientBytes != 272 {
 			t.Fatalf("port %d: flows=%+v err=%v", port, flows, err)
 		}
