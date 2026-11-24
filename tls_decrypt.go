@@ -12,6 +12,7 @@ import (
 	"encoding/hex"
 	"fmt"
 	"hash"
+	"slices"
 	"strings"
 )
 
@@ -217,10 +218,19 @@ func DecryptTLS13Records(
 	handshakeSecret []byte,
 	appSecret []byte,
 ) (handshakePlain []byte, appPlain []byte, err error) {
-	return decryptTLS13Records(stream, cipherSuite, handshakeSecret, appSecret, nil)
+	return decryptTLS13Records(stream, cipherSuite, handshakeSecret, appSecret, nil, nil)
 }
 
-func decryptTLS13Records(stream []byte, cipherSuite uint16, handshakeSecret, appSecret, earlySecret []byte) (handshakePlain, appPlain []byte, err error) {
+func decryptTLS13Records(stream []byte, cipherSuite uint16, handshakeSecret, appSecret, earlySecret []byte, provenance *tlsRecordMapper) (handshakePlain, appPlain []byte, err error) {
+	offset := 0
+	if provenance != nil {
+		defer func() {
+			if err != nil {
+				provenance.stopAt(offset, tlsStopUnsupported)
+			}
+			provenance.finish(offset, len(stream))
+		}()
+	}
 	var earlyAEAD cipher.AEAD
 	var earlyIV [12]byte
 	var earlySeq uint64
@@ -256,15 +266,25 @@ func decryptTLS13Records(stream []byte, cipherSuite uint16, handshakeSecret, app
 	var updates int
 	var hsSeq, appSeq uint64
 	inAppPhase := hsAEAD == nil
+	seenAppEpoch := false
 	var hsBuf, appBuf bytes.Buffer
 	var hsFull, appFull bool
-	offset := 0
 
 	for len(stream)-offset >= 5 {
+		start := offset
+		if provenance != nil && !provenance.inspect(start) {
+			break
+		}
 		contentType := stream[offset]
 		recVer := binary.BigEndian.Uint16(stream[offset+1 : offset+3])
 		recLen := int(binary.BigEndian.Uint16(stream[offset+3 : offset+5]))
-		if recVer < TLSVersionSSL30 || recVer > TLSVersion13 || recLen > MaxTLSRecordBytes || recLen > len(stream)-offset-5 {
+		if recVer < TLSVersionSSL30 || recVer > TLSVersion13 || recLen > MaxTLSRecordBytes {
+			if provenance != nil {
+				provenance.stopAt(start, tlsStopInvalidRecord)
+			}
+			break
+		}
+		if recLen > len(stream)-offset-5 {
 			break
 		}
 		header := stream[offset : offset+5]
@@ -272,6 +292,11 @@ func decryptTLS13Records(stream []byte, cipherSuite uint16, handshakeSecret, app
 		offset += 5 + recLen
 
 		if contentType != TLSRecordApplicationData {
+			if provenance != nil && (seenAppEpoch ||
+				contentType != TLSRecordHandshake && contentType != TLSRecordChangeCipherSpec && contentType != TLSRecordAlert) {
+				provenance.stopAt(start, tlsStopInvalidRecord)
+				break
+			}
 			continue
 		}
 
@@ -299,10 +324,34 @@ func decryptTLS13Records(stream []byte, cipherSuite uint16, handshakeSecret, app
 			plain, decErr = appAEAD.Open(nil, nonce[:], ciphertext, header)
 			if decErr == nil {
 				inAppPhase = true
+				seenAppEpoch = true
 				appSeq++
 			}
 		}
+		if plain == nil {
+			if provenance != nil {
+				reason := tlsStopAuthentication
+				if !seenAppEpoch && (hsAEAD == nil || appAEAD == nil || provenance.earlyOffered && len(earlySecret) == 0) {
+					reason = tlsStopMissingKey
+				}
+				// The regular application epoch starts at its own sequence zero.
+				// Before producing any application records, allow recovery there.
+				if !seenAppEpoch && appAEAD != nil && len(provenance.records) == 0 {
+					if provenance.before.reason == tlsStopEnd {
+						provenance.before = tlsProvenanceBoundary{provenance.prefix + start, reason}
+					}
+				} else {
+					provenance.stopAt(start, reason)
+					break
+				}
+			}
+			continue
+		}
 		if decErr != nil || len(plain) == 0 {
+			if provenance != nil {
+				provenance.stopAt(start, tlsStopInvalidRecord)
+				break
+			}
 			continue
 		}
 
@@ -312,6 +361,10 @@ func decryptTLS13Records(stream []byte, cipherSuite uint16, handshakeSecret, app
 			idx--
 		}
 		if idx < 0 {
+			if provenance != nil {
+				provenance.stopAt(start, tlsStopInvalidRecord)
+				break
+			}
 			continue
 		}
 		innerType := plain[idx]
@@ -338,6 +391,9 @@ func decryptTLS13Records(stream []byte, cipherSuite uint16, handshakeSecret, app
 			}
 			if inAppPhase && postHandshake.endsWithKeyUpdate(innerContent) {
 				if updates == MaxTLSKeyUpdatesPerStream {
+					if provenance != nil {
+						provenance.stopAt(start, tlsStopLimit)
+					}
 					return hsBuf.Bytes(), appBuf.Bytes(), nil
 				}
 				hashFn, _ := tls13SuiteParams(cipherSuite)
@@ -353,6 +409,15 @@ func decryptTLS13Records(stream []byte, cipherSuite uint16, handshakeSecret, app
 				updates++
 			}
 		case TLSRecordApplicationData:
+			if provenance != nil {
+				if earlyAEAD == nil && !seenAppEpoch {
+					provenance.stopAt(start, tlsStopInvalidRecord)
+					return hsBuf.Bytes(), appBuf.Bytes(), nil
+				}
+				if !provenance.application(start, offset, appBuf.Len(), len(innerContent), earlyAEAD != nil) {
+					return hsBuf.Bytes(), appBuf.Bytes(), nil
+				}
+			}
 			if !appFull {
 				rem := MaxFlowStreamBytes - appBuf.Len()
 				if len(innerContent) <= rem {
@@ -361,6 +426,12 @@ func decryptTLS13Records(stream []byte, cipherSuite uint16, handshakeSecret, app
 					appBuf.Write(innerContent[:rem])
 					appFull = true
 				}
+			}
+		case TLSRecordAlert:
+		default:
+			if provenance != nil {
+				provenance.stopAt(start, tlsStopInvalidRecord)
+				return hsBuf.Bytes(), appBuf.Bytes(), nil
 			}
 		}
 	}
@@ -416,23 +487,13 @@ func tls12PRF(hashFn func() hash.Hash, secret []byte, label string, seed []byte,
 	return out
 }
 
-// DecryptTLS12Records decrypts a directional TLS 1.2 byte stream using the
-// 48-byte masterSecret (from a CLIENT_RANDOM keylog line) and the 32-byte
-// client and server random values.
-func DecryptTLS12Records(
-	stream []byte,
-	cipherSuite uint16,
-	masterSecret []byte,
-	clientRandom [32]byte,
-	serverRandom [32]byte,
-	isClient bool,
-) ([]byte, error) {
+func tls12TrafficAEAD(cipherSuite uint16, masterSecret []byte, clientRandom, serverRandom [32]byte, isClient bool) (cipher.AEAD, [4]byte, error) {
 	keyLen, hashFn, ok := tls12CipherSuiteParams(cipherSuite)
 	if !ok {
-		return nil, fmt.Errorf("%w: unsupported TLS 1.2 cipher suite %#04x for decryption", ErrInvalidTLS, cipherSuite)
+		return nil, [4]byte{}, fmt.Errorf("%w: unsupported TLS 1.2 cipher suite %#04x for decryption", ErrInvalidTLS, cipherSuite)
 	}
 	if len(masterSecret) == 0 {
-		return nil, fmt.Errorf("%w: empty TLS 1.2 master secret", ErrInvalidTLS)
+		return nil, [4]byte{}, fmt.Errorf("%w: empty TLS 1.2 master secret", ErrInvalidTLS)
 	}
 
 	var seed [64]byte
@@ -453,35 +514,103 @@ func DecryptTLS12Records(
 
 	block, err := aes.NewCipher(writeKey)
 	if err != nil {
-		return nil, err
+		return nil, [4]byte{}, err
 	}
 	aead, err := cipher.NewGCM(block)
-	if err != nil {
-		return nil, err
+	return aead, salt, err
+}
+
+// DecryptTLS12Records decrypts a directional TLS 1.2 byte stream using the
+// 48-byte masterSecret (from a CLIENT_RANDOM keylog line) and the 32-byte
+// client and server random values.
+func DecryptTLS12Records(
+	stream []byte,
+	cipherSuite uint16,
+	masterSecret []byte,
+	clientRandom [32]byte,
+	serverRandom [32]byte,
+	isClient bool,
+) ([]byte, error) {
+	return decryptTLS12Records(stream, cipherSuite, masterSecret, clientRandom, serverRandom, isClient, nil)
+}
+
+func decryptTLS12Records(stream []byte, cipherSuite uint16, masterSecret []byte, clientRandom, serverRandom [32]byte, isClient bool, provenance *tlsRecordMapper) (_ []byte, err error) {
+	offset := 0
+	if provenance != nil {
+		defer func() {
+			if err != nil {
+				provenance.stopAt(offset, tlsStopUnsupported)
+			}
+			provenance.finish(offset, len(stream))
+		}()
+	}
+	var aead cipher.AEAD
+	var salt [4]byte
+	if provenance == nil || len(masterSecret) != 0 {
+		aead, salt, err = tls12TrafficAEAD(cipherSuite, masterSecret, clientRandom, serverRandom, isClient)
+		if err != nil {
+			return nil, err
+		}
 	}
 
 	var seqNum uint64
+	var inCipherPhase bool
 	var appBuf bytes.Buffer
-	offset := 0
 	for offset+5 <= len(stream) {
+		start := offset
+		if provenance != nil && !provenance.inspect(start) {
+			break
+		}
 		contentType := stream[offset]
 		recVer := binary.BigEndian.Uint16(stream[offset+1 : offset+3])
 		recLen := int(binary.BigEndian.Uint16(stream[offset+3 : offset+5]))
-		if recVer < TLSVersionSSL30 || recVer > TLSVersion13 || recLen > MaxTLSRecordBytes || offset+5+recLen > len(stream) {
+		if recVer < TLSVersionSSL30 || recVer > TLSVersion13 || recLen > MaxTLSRecordBytes {
+			if provenance != nil {
+				provenance.stopAt(start, tlsStopInvalidRecord)
+			}
+			break
+		}
+		if recLen > len(stream)-offset-5 {
 			break
 		}
 		recordBody := stream[offset+5 : offset+5+recLen]
 		offset += 5 + recLen
 
 		if contentType == TLSRecordChangeCipherSpec {
+			if provenance != nil {
+				if inCipherPhase {
+					provenance.stopAt(start, tlsStopUnsupported)
+					break
+				}
+				if len(recordBody) != 1 || recordBody[0] != 1 {
+					provenance.stopAt(start, tlsStopInvalidRecord)
+					break
+				}
+			}
+			inCipherPhase = true
 			seqNum = 0
 			continue
 		}
 		if contentType != TLSRecordApplicationData && contentType != TLSRecordHandshake && contentType != TLSRecordAlert {
+			if provenance != nil {
+				provenance.stopAt(start, tlsStopInvalidRecord)
+				break
+			}
+			continue
+		}
+		if aead == nil {
+			if inCipherPhase || contentType == TLSRecordApplicationData {
+				provenance.stopAt(start, tlsStopMissingKey)
+				break
+			}
 			continue
 		}
 		// TLS 1.2 AES-GCM record payload: 8-byte explicit nonce + ciphertext + 16-byte tag.
 		if len(recordBody) < 8+aead.Overhead() {
+			if provenance != nil && (inCipherPhase || contentType == TLSRecordApplicationData) {
+				provenance.stopAt(start, tlsStopInvalidRecord)
+				break
+			}
 			continue
 		}
 		var nonce [12]byte
@@ -498,10 +627,18 @@ func DecryptTLS12Records(
 
 		plain, decErr := aead.Open(nil, nonce[:], ciphertext, aad[:])
 		if decErr != nil {
+			if provenance != nil && (inCipherPhase || contentType == TLSRecordApplicationData) {
+				provenance.stopAt(start, tlsStopAuthentication)
+				break
+			}
 			continue
 		}
+		inCipherPhase = true
 		seqNum++
 		if contentType == TLSRecordApplicationData {
+			if provenance != nil && !provenance.application(start, offset, appBuf.Len(), len(plain), false) {
+				break
+			}
 			rem := MaxFlowStreamBytes - appBuf.Len()
 			if len(plain) <= rem {
 				appBuf.Write(plain)
@@ -536,56 +673,57 @@ func (c *Capture) DecryptedTLSStreams(data []byte, extraKeyLog []byte) ([]TCPStr
 func decryptTLSStreams(streams []TCPStream, keyLog *TLSKeyLog) []TCPStream {
 	var decrypted []TCPStream
 	for i := range streams {
-		st := &streams[i]
-		clientBuf, serverBuf := st.Client, st.Server
-		cData, sData := clientBuf.Data, serverBuf.Data
-		srcAddr, dstAddr, srcPort, dstPort := st.SrcAddr, st.DstAddr, st.SrcPort, st.DstPort
-		if !hasTLSHandshakeStart(cData) || !hasTLSHandshakeStart(sData) {
-			continue
+		st, ok := decryptTLSStream(streams[i], keyLog, nil)
+		if ok && (len(st.Client.Data) != 0 || len(st.Server.Data) != 0) {
+			decrypted = append(decrypted, st)
 		}
-		hsClient, err1 := ParseTLSRecords(cData)
-		hsServer, err2 := ParseTLSRecords(sData)
-		if err1 != nil || err2 != nil {
-			continue
-		}
-		if !hsClient.HasClientHello && hsServer.HasClientHello && hsClient.HasServerHello {
-			hsClient, hsServer = hsServer, hsClient
-			cData, sData = sData, cData
-			clientBuf, serverBuf = serverBuf, clientBuf
-			srcAddr, dstAddr = dstAddr, srcAddr
-			srcPort, dstPort = dstPort, srcPort
-		}
-		if !hsClient.HasClientHello || !hsServer.HasServerHello {
-			continue
-		}
-		entry, ok := keyLog.Entries[hsClient.ClientHello.Random]
-		if !ok {
-			continue
-		}
-		suite := hsServer.ServerHello.CipherSuite
-		var clientApp, serverApp []byte
-		var errC, errS error
-
-		if hsServer.ServerHello.NegotiatedVersion == TLSVersion13 || len(entry.ClientTrafficSecret0) > 0 || len(entry.ServerTrafficSecret0) > 0 {
-			_, clientApp, errC = decryptTLS13Records(cData, suite, entry.ClientHandshakeSecret, entry.ClientTrafficSecret0, entry.ClientEarlyTrafficSecret)
-			_, serverApp, errS = DecryptTLS13Records(sData, suite, entry.ServerHandshakeSecret, entry.ServerTrafficSecret0)
-		} else if len(entry.MasterSecret) > 0 {
-			clientApp, errC = DecryptTLS12Records(cData, suite, entry.MasterSecret, hsClient.ClientHello.Random, hsServer.ServerHello.Random, true)
-			serverApp, errS = DecryptTLS12Records(sData, suite, entry.MasterSecret, hsClient.ClientHello.Random, hsServer.ServerHello.Random, false)
-		}
-		if (errC != nil && errS != nil) || (len(clientApp) == 0 && len(serverApp) == 0) {
-			continue
-		}
-		clientBuf.Data, serverBuf.Data = clientApp, serverApp
-		decrypted = append(decrypted, TCPStream{
-			FlowIndex: st.FlowIndex,
-			SrcAddr:   srcAddr,
-			DstAddr:   dstAddr,
-			SrcPort:   srcPort,
-			DstPort:   dstPort,
-			Client:    clientBuf,
-			Server:    serverBuf,
-		})
 	}
 	return decrypted
+}
+
+// The input is the inner stream after any proxy exchange. Provenance mappers
+// follow the same direction as the stream, including when the hellos reverse it.
+func decryptTLSStream(st TCPStream, keyLog *TLSKeyLog, mappers *[2]tlsRecordMapper) (TCPStream, bool) {
+	cData, sData := st.Client.Data, st.Server.Data
+	if !hasTLSHandshakeStart(cData) || !hasTLSHandshakeStart(sData) {
+		return TCPStream{}, false
+	}
+	hsClient, err1 := ParseTLSRecords(cData)
+	hsServer, err2 := ParseTLSRecords(sData)
+	if err1 != nil || err2 != nil {
+		return TCPStream{}, false
+	}
+	if !hsClient.HasClientHello && hsServer.HasClientHello && hsClient.HasServerHello {
+		hsClient, hsServer = hsServer, hsClient
+		st.reverse()
+		cData, sData = sData, cData
+		if mappers != nil {
+			mappers[0], mappers[1] = mappers[1], mappers[0]
+		}
+	}
+	if !hsClient.HasClientHello || !hsServer.HasServerHello {
+		return TCPStream{}, false
+	}
+
+	var client, server *tlsRecordMapper
+	if mappers != nil {
+		client, server = &mappers[0], &mappers[1]
+		const earlyDataExtension = 0x002a
+		client.earlyOffered = slices.Contains(hsClient.ClientHello.Extensions, earlyDataExtension)
+	}
+	entry, ok := keyLog.Entries[hsClient.ClientHello.Random]
+	if !ok && mappers == nil {
+		return TCPStream{}, false
+	}
+	suite := hsServer.ServerHello.CipherSuite
+	var clientApp, serverApp []byte
+	if hsServer.ServerHello.NegotiatedVersion == TLSVersion13 || len(entry.ClientTrafficSecret0) > 0 || len(entry.ServerTrafficSecret0) > 0 {
+		_, clientApp, _ = decryptTLS13Records(cData, suite, entry.ClientHandshakeSecret, entry.ClientTrafficSecret0, entry.ClientEarlyTrafficSecret, client)
+		_, serverApp, _ = decryptTLS13Records(sData, suite, entry.ServerHandshakeSecret, entry.ServerTrafficSecret0, nil, server)
+	} else if len(entry.MasterSecret) > 0 || mappers != nil {
+		clientApp, _ = decryptTLS12Records(cData, suite, entry.MasterSecret, hsClient.ClientHello.Random, hsServer.ServerHello.Random, true, client)
+		serverApp, _ = decryptTLS12Records(sData, suite, entry.MasterSecret, hsClient.ClientHello.Random, hsServer.ServerHello.Random, false, server)
+	}
+	st.Client.Data, st.Server.Data = clientApp, serverApp
+	return st, true
 }
