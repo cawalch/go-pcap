@@ -946,6 +946,11 @@ interface using standard-library `syscall` descriptors (`/dev/bpf*` on macOS,
 and `BPFFilterIPv4Host` to construct classic BPF filter programs, or `EvalBPF`
 to evaluate a classic BPF program in memory.
 
+On Linux, `Promiscuous` requests membership for the capture socket until it
+closes. `OriginalLen` retains the wire length when the socket filter or
+`SnapLen` shortens a packet. On Windows, a positive `Timeout` applies to
+each `ReadPacket` call, including time spent waiting for a filter match.
+
 Call `live.Stats()` before closing the handle to check kernel packet loss:
 
 ```go

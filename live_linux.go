@@ -15,6 +15,9 @@ import (
 
 const LinkTypeUnknown LinkType = 0xffff
 
+// PACKET_AUXDATA from linux/if_packet.h is absent from syscall on linux/386.
+const packetAuxdata = 8
+
 // LiveCapture reads live packets from an OS network interface using standard
 // library AF_PACKET syscalls on Linux.
 type LiveCapture struct {
@@ -87,7 +90,7 @@ func OpenLive(ifaceName string, opts LiveOptions) (*LiveCapture, error) {
 	if len(normOpts.BPFFilter) > 0 {
 		// A filter can shorten the packet before recvmsg sees it. AUXDATA
 		// supplies the length recorded before filtering in tpacket_auxdata.
-		if err := syscall.SetsockoptInt(fd, syscall.SOL_PACKET, syscall.PACKET_AUXDATA, 1); err != nil {
+		if err := syscall.SetsockoptInt(fd, syscall.SOL_PACKET, packetAuxdata, 1); err != nil {
 			_ = syscall.Close(fd)
 			return nil, fmt.Errorf("PACKET_AUXDATA: %w", err)
 		}
@@ -185,7 +188,7 @@ func (lc *LiveCapture) ReadPacket() (PacketRecord, []byte, error) {
 			return PacketRecord{}, nil, err
 		}
 		for _, msg := range messages {
-			if msg.Header.Level == syscall.SOL_PACKET && msg.Header.Type == syscall.PACKET_AUXDATA && len(msg.Data) >= 8 {
+			if msg.Header.Level == syscall.SOL_PACKET && msg.Header.Type == packetAuxdata && len(msg.Data) >= 8 {
 				wireLen = binary.NativeEndian.Uint32(msg.Data[4:8])
 				break
 			}
