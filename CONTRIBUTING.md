@@ -82,6 +82,24 @@ go work use . ../..
 go test -count=1 ./...
 ```
 
+From `testdata/consumer`, run the DNS consumer benchmark against your
+checkout with the workspace created above.
+
+```sh
+GOWORK="$workdir/go.work" go test -run '^$' -bench '^BenchmarkClientDNS$' -benchmem -count=10 .
+```
+
+The fixtures contain 32 synthetic DNS responses each. One has A and CNAME
+records, and the other has HTTPS (type 65) records with placeholder ECH bytes.
+
+When comparing capture-reader changes, use separate Go workspaces for the
+baseline and candidate and run the same benchmark and fixtures on native AMD64
+and ARM64. Alternate which revision runs first in each pair and check an
+unchanged-source control before interpreting the results. On Linux, build with
+`go test -c` and overwrite the same executable file between runs to keep the
+path and inode fixed. Separate executable files produced different timings in
+an unchanged-source control.
+
 CI tests the Go 1.26 compatibility floor and the current stable toolchain.
 Use the patched release for each line when reproducing a result. The Linux
 jobs cover race detection and 32-bit arithmetic. The stable job discovers
