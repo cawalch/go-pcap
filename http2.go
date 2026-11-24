@@ -89,6 +89,10 @@ func ParseHTTP2Frames(stream []byte) (HTTP2Summary, error) {
 }
 
 func parseHTTP2Frames(stream []byte, remaining *int, sequenceGap bool) (HTTP2Summary, error) {
+	return readHTTP2Frames(stream, remaining, sequenceGap, nil)
+}
+
+func readHTTP2Frames(stream []byte, remaining *int, sequenceGap bool, request func(offset int, streamID uint32, block HTTP2HeaderBlock) error) (HTTP2Summary, error) {
 	out := HTTP2Summary{HeadersIncomplete: sequenceGap}
 	offset := 0
 	if bytes.HasPrefix(stream, HTTP2ClientPreface) {
@@ -124,6 +128,8 @@ func parseHTTP2Frames(stream []byte, remaining *int, sequenceGap bool) (HTTP2Sum
 	}
 	headers := http2Headers{table: hpackTable{limit: MaxHTTP2DynamicTableBytes}}
 	var priorities []string
+	var headerStart int
+	var headerKind uint8
 	settingsSeen := false
 	totalDataBytes := 0
 
@@ -157,6 +163,9 @@ func parseHTTP2Frames(stream []byte, remaining *int, sequenceGap bool) (HTTP2Sum
 			if out.HeadersIncomplete {
 				continue
 			}
+			if fType != HTTP2FrameContinuation {
+				headerStart, headerKind = offset-fLen-9, fType
+			}
 			block, complete, err := headers.consume(fType, fFlags, streamID, payload, remaining)
 			if errors.Is(err, ErrHTTPLimit) {
 				return HTTP2Summary{}, err
@@ -166,6 +175,14 @@ func parseHTTP2Frames(stream []byte, remaining *int, sequenceGap bool) (HTTP2Sum
 				continue
 			}
 			if !complete {
+				continue
+			}
+			if request != nil {
+				if headerKind == HTTP2FrameHeaders && block.Method != "" {
+					if err := request(headerStart, headers.target, block); err != nil {
+						return HTTP2Summary{}, err
+					}
+				}
 				continue
 			}
 			st := getStream(headers.target)
@@ -202,7 +219,7 @@ func parseHTTP2Frames(stream []byte, remaining *int, sequenceGap bool) (HTTP2Sum
 			}
 
 		case HTTP2FrameData:
-			if streamID == 0 {
+			if request != nil || streamID == 0 {
 				break
 			}
 			dataPayload := payload
