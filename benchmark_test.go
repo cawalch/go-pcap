@@ -294,6 +294,38 @@ func BenchmarkCaptureHTTP2Huffman(b *testing.B) {
 	}
 }
 
+func BenchmarkHTTP1TransactionsFromReaderAt(b *testing.B) {
+	raw, err := os.ReadFile("testdata/deployments/http1-transactions.pcapng")
+	if err != nil {
+		b.Fatal(err)
+	}
+	source := bytes.NewReader(raw)
+	c, err := NewFromReaderAt(source, source.Size())
+	if err != nil {
+		b.Fatal(err)
+	}
+	for _, op := range []string{"scan", "export-pipelined"} {
+		b.Run(op, func(b *testing.B) {
+			r := &measuredReaderAt{Reader: source}
+			// The pipelined GET follows the four-byte upload body in packet 7.
+			id := HTTP1TransactionID{PacketIndex: 7, PacketPayloadOffset: 4}
+			b.ReportAllocs()
+			for b.Loop() {
+				if op == "scan" {
+					_, err = c.HTTP1TransactionsFromReaderAt(r)
+				} else {
+					err = c.ExtractHTTP1TransactionPCAPNGFromReaderAt(r, io.Discard, id)
+				}
+				if err != nil {
+					b.Fatal(err)
+				}
+			}
+			b.ReportMetric(float64(r.calls)/float64(b.N), "reads/op")
+			b.ReportMetric(float64(r.bytesRead)/float64(b.N), "read-B/op")
+		})
+	}
+}
+
 func BenchmarkCaptureWeb(b *testing.B) {
 	for _, h2 := range []bool{false, true} {
 		for _, keyed := range []bool{false, true} {

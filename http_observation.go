@@ -35,10 +35,15 @@ func (c *Capture) HTTPRequestsFromReaderAt(r io.ReaderAt) ([]HTTPRequestObservat
 }
 
 func collectHTTPRequestStreams(source ipFrameSource) (tcpMessageCollector, error) {
-	var table flowIndexTable
 	collector := tcpMessageCollector{separateInterfaces: source.capture != nil && source.capture.SeparateTCPInterfaces}
+	err := walkHTTPPackets(source, collector.add)
+	return collector, err
+}
+
+func walkHTTPPackets(source ipFrameSource, visit func(PacketRecord, Frame, int, []byte) error) error {
+	var table flowIndexTable
 	remaining := MaxTotalStreamBytes
-	err := source.walk(func(pkt PacketRecord, f Frame, payload []byte) error {
+	return source.walk(func(pkt PacketRecord, f Frame, payload []byte) error {
 		key, _ := makeCanonicalFlowKey(f.IPProtocol, f.SrcAddr, f.SrcPort, f.DstAddr, f.DstPort)
 		flow, _, err := table.lookupOrInsert(key)
 		if err != nil || f.IPProtocol != IPProtoTCP {
@@ -48,9 +53,8 @@ func collectHTTPRequestStreams(source ipFrameSource) (tcpMessageCollector, error
 			return ErrReassemblyLimit
 		}
 		remaining -= len(payload)
-		return collector.add(pkt, f, flow, payload)
+		return visit(pkt, f, flow, payload)
 	})
-	return collector, err
 }
 
 func scanHTTPRequests(source ipFrameSource) ([]HTTPRequestObservation, error) {

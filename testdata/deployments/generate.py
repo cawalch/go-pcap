@@ -1,5 +1,6 @@
 """Build the deployment captures using Python 3 and fixed, synthetic inputs."""
 
+from gzip import compress
 from pathlib import Path
 from socket import inet_aton
 from struct import pack
@@ -224,6 +225,52 @@ def dns_transactions():
     (OUT / "dns-transactions.pcap").write_bytes(trace)
 
 
+def http1_transactions():
+    client, server = "192.0.2.14", "198.51.100.80"
+    first = TCP(client, server, 50000, 1000, 2000)
+    reused = TCP(client, server, 50000, 7000, 8000)
+    first.ports = reused.ports = (50000, 80)
+    body = compress(b"upload accepted\n", mtime=0)
+    headers = (b"HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Encoding: gzip\r\n"
+               + f"Content-Length: {len(body)}\r\n\r\n".encode())
+    no_content = b"HTTP/1.1 204 No Content\r\n\r\n"
+
+    def get(path):
+        return f"GET {path} HTTP/1.1\r\nHost: trace.example\r\n\r\n".encode()
+
+    data = PSH | ACK
+    request = (b"POST /upload HTTP/1.1\r\nHost: trace.example\r\n"
+               b"Expect: 100-continue\r\nContent-Length: 4\r\n\r\n")
+    frames = [
+        first.send(False, SYN),
+        first.send(True, SYN | ACK),
+        first.send(False, ACK),
+        first.send(False, data, request[:24]),
+        first.send(False, data, request[24:]),
+        first.send(True, data, b"HTTP/1.1 100 Continue\r\n\r\n"),
+        first.send(False, data, b"data" + get("/pipelined")),
+        first.send(True, ACK),
+        first.send(True, data, headers + body[:8]),
+        first.send(True, data, body[8:] + no_content),
+        first.send(True, RST | ACK),
+        reused.send(False, SYN),
+        reused.send(True, SYN | ACK),
+        reused.send(False, ACK),
+        reused.send(False, data, get("/reused")),
+        reused.send(True, data, b"HTTP/1.1 200 OK\r\nContent-Length: 6\r\n\r\nreused"),
+        reused.send(False, data, get("/missing")),
+        reused.send(False, data, get("/after-gap")),
+    ]
+    # Advance the response sequence number without writing the missing frame.
+    reused.send(True, data, b"HTTP/1.1 200 OK\r\nContent-Length: 7\r\n\r\nmissing")
+    frames.append(reused.send(True, data, no_content))
+    unrelated = udp(client, "192.0.2.53", 53000, 53, dns("trace.example"))
+    packets = [(0, unrelated, None, b"")]
+    packets.extend((1, frame, None, option(1, b"request start") if i == 3 else b"")
+                   for i, frame in enumerate(frames))
+    write_pcapng("http1-transactions", ["unrelated", "http-client"], packets)
+
+
 def darwin_pktap():
     # Apple uses link type 149 for PKTAP in classic PCAP. Convert this
     # synthetic input with native tcpdump to obtain its PcapNG extensions.
@@ -253,4 +300,5 @@ if __name__ == "__main__":
     proxy()
     iot()
     dns_transactions()
+    http1_transactions()
     darwin_pktap()

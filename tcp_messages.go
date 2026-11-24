@@ -37,8 +37,14 @@ type messagePacket struct {
 }
 
 func (c *tcpMessageCollector) add(pkt PacketRecord, frame Frame, flow int, payload []byte) error {
-	if !frame.hasPorts || frame.Anomalies.IPFragment || frame.Anomalies.TruncatedLayer || frame.Anomalies.InvalidTCPDataOffset || len(payload) == 0 && frame.TCPFlags&TCPFlagSYN == 0 {
-		return nil
+	_, err := c.addWithPeer(pkt, frame, flow, payload, TCPFlagSYN)
+	return err
+}
+
+// Return the one-based indices of this direction and its peer in the same opening.
+func (c *tcpMessageCollector) addWithPeer(pkt PacketRecord, frame Frame, flow int, payload []byte, keepFlags uint8) ([2]int, error) {
+	if !frame.hasPorts || frame.Anomalies.IPFragment || frame.Anomalies.TruncatedLayer || frame.Anomalies.InvalidTCPDataOffset || len(payload) == 0 && frame.TCPFlags&keepFlags == 0 {
+		return [2]int{}, nil
 	}
 	key, canonical := makeCanonicalFlowKey(IPProtoTCP, frame.SrcAddr, frame.SrcPort, frame.DstAddr, frame.DstPort)
 	if c.flows == nil {
@@ -46,7 +52,7 @@ func (c *tcpMessageCollector) add(pkt PacketRecord, frame Frame, flow int, paylo
 	}
 	state, seen := c.flows[key]
 	if !seen && len(c.flows) >= MaxFlows {
-		return ErrFlowLimit
+		return [2]int{}, ErrFlowLimit
 	}
 	active := &state.tcpMessageOpening
 	if pkt.InterfaceID != 0 && c.separateInterfaces {
@@ -66,11 +72,11 @@ func (c *tcpMessageCollector) add(pkt PacketRecord, frame Frame, flow int, paylo
 	}
 	side := tcpSide(canonical)
 	if err := state.budget.addSegment(side); err != nil {
-		return err
+		return [2]int{}, err
 	}
 	if active.directions[side] == 0 {
 		if len(c.directions) >= 2*MaxFlows {
-			return ErrFlowLimit
+			return [2]int{}, ErrFlowLimit
 		}
 		c.directions = append(c.directions, tcpMessageDirection{
 			src: netip.AddrPortFrom(frame.SrcAddr, frame.SrcPort), dst: netip.AddrPortFrom(frame.DstAddr, frame.DstPort), flowIndex: flow,
@@ -81,7 +87,7 @@ func (c *tcpMessageCollector) add(pkt PacketRecord, frame Frame, flow int, paylo
 	c.flows[key] = state
 	dir.segments = append(dir.segments, TCPSegmentInput{Seq: frame.TCPSeq, Flags: frame.TCPFlags, Payload: payload})
 	dir.packets = append(dir.packets, messagePacket{pkt.Index, pkt.TimestampNs})
-	return nil
+	return [2]int{active.directions[side], active.directions[1-side]}, nil
 }
 
 // Attribute each message to the packet supplying the first byte of its
@@ -126,27 +132,39 @@ func (c *tcpMessageCollector) walkContiguous(visit func(*tcpMessageDirection, []
 			break
 		}
 		dir := &c.directions[i]
-		spans = spans[:0]
-		gapSeen := false
-		key, canonical := makeCanonicalFlowKey(IPProtoTCP, dir.src.Addr(), dir.src.Port(), dir.dst.Addr(), dir.dst.Port())
-		state := c.flows[key]
-		buf, err := state.budget.reassemble(tcpSide(canonical), dir.segments, &remaining, func(segment, end int, seq uint32, gap bool) {
-			gapSeen = gapSeen || gap
-			if !gapSeen {
-				spans = append(spans, packetSpan{end: end, segment: uint32(segment), seq: seq})
-			}
-		})
+		data, nextSpans, anomalies, err := c.contiguous(dir, &remaining, spans)
 		if err != nil {
 			return err
 		}
-		c.flows[key] = state
-		if len(spans) == 0 {
+		spans = nextSpans
+		if len(data) == 0 {
 			continue
 		}
-		data := buf.Data[:spans[len(spans)-1].end]
-		if err := visit(dir, data, spans, buf.Anomalies); err != nil {
+		if err := visit(dir, data, spans, anomalies); err != nil {
 			return err
 		}
 	}
 	return nil
+}
+
+func (c *tcpMessageCollector) contiguous(dir *tcpMessageDirection, remaining *int64, spans []packetSpan) ([]byte, []packetSpan, StreamAnomalies, error) {
+	spans = spans[:0]
+	gapSeen := false
+	key, canonical := makeCanonicalFlowKey(IPProtoTCP, dir.src.Addr(), dir.src.Port(), dir.dst.Addr(), dir.dst.Port())
+	state := c.flows[key]
+	buf, err := state.budget.reassemble(tcpSide(canonical), dir.segments, remaining, func(segment, end int, seq uint32, gap bool) {
+		gapSeen = gapSeen || gap
+		if !gapSeen {
+			spans = append(spans, packetSpan{end: end, segment: uint32(segment), seq: seq})
+		}
+	})
+	if err != nil {
+		return nil, nil, StreamAnomalies{}, err
+	}
+	c.flows[key] = state
+	if len(spans) == 0 {
+		return nil, spans, buf.Anomalies, nil
+	}
+	data := buf.Data[:spans[len(spans)-1].end]
+	return data, spans, buf.Anomalies, nil
 }

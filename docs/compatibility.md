@@ -40,6 +40,7 @@ be added compatibly.
 | `PacketPayload`, `SafeReader.Slice`, `UnwrapProxyStream` | The returned views borrow the input bytes. Copy before reusing or modifying the backing buffer if you need to retain the original content. |
 | `PacketPayloadFromReaderAt`, `ReassembleTCP`, `ParseWebSocketFrames` | The returned frame, stream data, and message payloads respectively survive reuse of the supplied input. |
 | `HTTP1RequestEvidence`, `HTTP1RequestEvidenceFromReaderAt` | The returned headers and body survive reuse of the supplied input. |
+| `HTTP1Transactions`, `HTTP1TransactionsFromReaderAt` | Returned headers, bodies and packet indices survive reuse of the input. Transaction IDs apply to the original capture. |
 | `DecompressCapture` | Plain input passes through by reference. A successful gzip decode returns decompressed bytes. |
 | `LiveCapture.ReadPacket` | For portable code, copy a packet that must survive the next read. The macOS backend reuses its buffer. |
 
@@ -62,6 +63,7 @@ from a failed call.
 | Direct protocol parsing | A short DNS header returns `ErrInvalidDNS`. Excessive advertised question counts return `ErrDNSLimit`. `ParseWebSocketFrames` returns preceding complete messages plus `ErrInvalidWebSocket` for malformed or truncated input. Frame-count exhaustion returns `ErrWebSocketLimit`. |
 | Combined web scan | `WebWithWebSockets` discards both results if an analysis fails. Capture-level dissectors may skip malformed or incomplete protocol observations as documented. |
 | HTTP/1 request evidence | The scan discards its result on a read or limit error. A parsed request with an incomplete, malformed, or unsupported body reports its state in `BodyState`. |
+| HTTP/1 transaction export | An invalid or absent request ID returns `ErrOutOfBounds` before writing. Once output starts, a read or write error can leave a partial PcapNG. ReaderAt selection and output share one `MaxReaderAtScanBytes` budget. |
 
 Use the named limits for the selected parser. A change that makes a
 previously accepted input exceed a limit warrants a compatibility review.
