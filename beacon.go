@@ -51,7 +51,8 @@ func ComputeBeaconStats(timestampsNs []int64, payloadBytes []uint64, clientBytes
 
 	sortedTS := slices.Clone(timestampsNs)
 	slices.Sort(sortedTS)
-	intervals := make([]int64, 0, len(sortedTS)-1)
+	// Each delta replaces a timestamp whose last use is in this iteration.
+	intervals := sortedTS[:0]
 	for i := 1; i < len(sortedTS); i++ {
 		delta := sortedTS[i] - sortedTS[i-1]
 		if delta >= 0 {
@@ -63,19 +64,12 @@ func ComputeBeaconStats(timestampsNs []int64, payloadBytes []uint64, clientBytes
 	}
 	slices.Sort(intervals)
 
-	medInterval := medianInt64(intervals)
+	medInterval := median(intervals)
 	out.MedianIntervalNs = medInterval
 
-	deviations := make([]int64, len(intervals))
-	for i, v := range intervals {
-		d := v - medInterval
-		if d < 0 {
-			d = -d
-		}
-		deviations[i] = d
-	}
-	slices.Sort(deviations)
-	madInterval := medianInt64(deviations)
+	q1 := float64(intervals[len(intervals)/4])
+	q3 := float64(intervals[3*len(intervals)/4])
+	madInterval := medianAbsoluteDeviation(intervals, medInterval)
 	out.MADIntervalNs = madInterval
 
 	if medInterval > 0 {
@@ -84,9 +78,7 @@ func ComputeBeaconStats(timestampsNs []int64, payloadBytes []uint64, clientBytes
 		regScore := max(0.0, 1.0-out.JitterRatio)
 
 		// Bowley quartile skewness symmetry score (1.0 - |skew|).
-		q1 := float64(intervals[len(intervals)/4])
 		q2 := float64(medInterval)
-		q3 := float64(intervals[(3*len(intervals))/4])
 		symScore := 1.0
 		if q3 > q1 {
 			bowley := (q1 + q3 - 2*q2) / (q3 - q1)
@@ -98,19 +90,10 @@ func ComputeBeaconStats(timestampsNs []int64, payloadBytes []uint64, clientBytes
 	if len(payloadBytes) > 0 {
 		sortedSizes := slices.Clone(payloadBytes)
 		slices.Sort(sortedSizes)
-		medSize := medianUint64(sortedSizes)
+		medSize := median(sortedSizes)
 		out.MedianPayloadBytes = medSize
 
-		sizeDevs := make([]uint64, len(sortedSizes))
-		for i, s := range sortedSizes {
-			if s >= medSize {
-				sizeDevs[i] = s - medSize
-			} else {
-				sizeDevs[i] = medSize - s
-			}
-		}
-		slices.Sort(sizeDevs)
-		madSize := medianUint64(sizeDevs)
+		madSize := medianAbsoluteDeviation(sortedSizes, medSize)
 		out.MADPayloadBytes = madSize
 		if medSize > 0 {
 			out.PayloadUniformity = max(0.0, 1.0-float64(madSize)/float64(medSize))
@@ -133,26 +116,26 @@ func computePCR(clientBytes, serverBytes uint64) float64 {
 	return (float64(clientBytes) - float64(serverBytes)) / total
 }
 
-func medianInt64(sorted []int64) int64 {
+// median returns the median of a sorted, nonempty slice of nonnegative samples.
+func median[T int64 | uint64](sorted []T) T {
 	n := len(sorted)
-	if n == 0 {
-		return 0
-	}
 	if n%2 == 1 {
 		return sorted[n/2]
 	}
 	return sorted[n/2-1] + (sorted[n/2]-sorted[n/2-1])/2
 }
 
-func medianUint64(sorted []uint64) uint64 {
-	n := len(sorted)
-	if n == 0 {
-		return 0
+// medianAbsoluteDeviation reuses the caller's scratch slice.
+func medianAbsoluteDeviation[T int64 | uint64](samples []T, center T) T {
+	for i, sample := range samples {
+		if sample >= center {
+			samples[i] = sample - center
+		} else {
+			samples[i] = center - sample
+		}
 	}
-	if n%2 == 1 {
-		return sorted[n/2]
-	}
-	return sorted[n/2-1] + (sorted[n/2]-sorted[n/2-1])/2
+	slices.Sort(samples)
+	return median(samples)
 }
 
 // BeaconOptions configures beacon aggregation in [Capture.BeaconsWithOptions].

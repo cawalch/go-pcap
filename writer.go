@@ -67,20 +67,16 @@ func newPCAPNGWriter(w io.Writer, opts PCAPNGWriterOptions) (*PCAPNGWriter, erro
 	binary.LittleEndian.PutUint16(shbFixed[6:8], 0)
 	binary.LittleEndian.PutUint64(shbFixed[8:16], 0xffffffffffffffff)
 	shb.Write(shbFixed[:])
-	hasSHBOpts := false
 	if opts.Hardware != "" {
 		writePCAPNGOptionLE(&shb, optSHBHardware, []byte(opts.Hardware))
-		hasSHBOpts = true
 	}
 	if opts.OS != "" {
 		writePCAPNGOptionLE(&shb, optSHBOS, []byte(opts.OS))
-		hasSHBOpts = true
 	}
 	if opts.UserApplication != "" {
 		writePCAPNGOptionLE(&shb, optSHBUserAppl, []byte(opts.UserApplication))
-		hasSHBOpts = true
 	}
-	if hasSHBOpts {
+	if shb.Len() > len(shbFixed) {
 		writePCAPNGOptionLE(&shb, optEndOfOpt, nil)
 	}
 	writePCAPNGBlockLE(&buf, BlockTypeSectionHeader, shb.Bytes())
@@ -220,18 +216,16 @@ func (pw *PCAPNGWriter) WritePacket(pkt PacketRecord, payload []byte) error {
 		body.Write(make([]byte, 4-rem))
 	}
 
-	hasOpts := false
+	optionsStart := body.Len()
 	if pkt.Flags != 0 {
 		var b [4]byte
 		binary.LittleEndian.PutUint32(b[:], pkt.Flags)
 		writePCAPNGOptionLE(&body, optEPBFlags, b[:])
-		hasOpts = true
 	}
 	if pkt.DropCount != 0 {
 		var b [8]byte
 		binary.LittleEndian.PutUint64(b[:], pkt.DropCount)
 		writePCAPNGOptionLE(&body, optEPBDropCount, b[:])
-		hasOpts = true
 	}
 	var block bytes.Buffer
 	var process ProcessEvent
@@ -263,25 +257,20 @@ func (pw *PCAPNGWriter) WritePacket(pkt PacketRecord, payload []byte) error {
 		var index [4]byte
 		binary.LittleEndian.PutUint32(index[:], processIndex)
 		writePCAPNGOptionLE(&body, optEPBDarwinProcessIndex, index[:])
-		hasOpts = true
 	}
 	if pkt.HasThreadID {
 		writeProcessCommentLE(&body, processCommentThread, strconv.FormatUint(uint64(pkt.ThreadID), 10))
-		hasOpts = true
 	}
 	if pkt.ProcessArgs != "" {
 		writeProcessCommentLE(&body, processCommentArgs, pkt.ProcessArgs)
-		hasOpts = true
 	}
 	if pkt.HasUserID {
 		writeProcessCommentLE(&body, processCommentUser, strconv.FormatUint(uint64(pkt.UserID), 10))
-		hasOpts = true
 	}
 	if pkt.ContainerID != "" {
 		writeProcessCommentLE(&body, processCommentContainer, pkt.ContainerID)
-		hasOpts = true
 	}
-	if hasOpts {
+	if body.Len() > optionsStart {
 		writePCAPNGOptionLE(&body, optEndOfOpt, nil)
 	}
 
@@ -391,14 +380,12 @@ func (pw *PCAPNGWriter) WriteInterfaceStats(stat InterfaceStatistics) error {
 	binary.LittleEndian.PutUint32(fixed[8:12], uint32(ts&0xffffffff))
 	body.Write(fixed[:])
 
-	hasOpts := false
 	writeTSOpt := func(code uint16, ns int64) {
 		u := uint64(ns)
 		var b [8]byte
 		binary.LittleEndian.PutUint32(b[0:4], uint32(u>>32))
 		binary.LittleEndian.PutUint32(b[4:8], uint32(u&0xffffffff))
 		writePCAPNGOptionLE(&body, code, b[:])
-		hasOpts = true
 	}
 	if stat.HasStartTime {
 		writeTSOpt(optISBStartTime, stat.StartTimeNs)
@@ -410,15 +397,13 @@ func (pw *PCAPNGWriter) WriteInterfaceStats(stat InterfaceStatistics) error {
 		var b [8]byte
 		binary.LittleEndian.PutUint64(b[:], stat.PacketsReceived)
 		writePCAPNGOptionLE(&body, optISBIfRecv, b[:])
-		hasOpts = true
 	}
 	if stat.HasPacketsDropped {
 		var b [8]byte
 		binary.LittleEndian.PutUint64(b[:], stat.PacketsDropped)
 		writePCAPNGOptionLE(&body, optISBIfDrop, b[:])
-		hasOpts = true
 	}
-	if hasOpts {
+	if body.Len() > len(fixed) {
 		writePCAPNGOptionLE(&body, optEndOfOpt, nil)
 	}
 

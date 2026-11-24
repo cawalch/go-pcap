@@ -11,69 +11,41 @@ For a runnable first scan, follow the [packet capture quick start](../README.md#
 
 ## Parse capture containers
 
-`New` parses classic Portable Packet Capture (PCAP) headers or PCAP Next
-Generation (PcapNG) section blocks (`SHB`, `IDB`, `DSB`, `NRB`, `ISB`, `DPEB`,
-`EPB`, `SPB`, and obsolete Packet Blocks) and validates block framing across
-the buffer. It copies header values, interface descriptors, Name Resolution
-Block (`NRB`) records, Interface Statistics Block (`ISB`) counters, Darwin
-Process Event Block (`DPEB`) entries, and Decryption Secrets Block (`DSB`)
-payloads without retaining the input buffer. It records `int64(len(data))` as `Capture.FileSize`.
+`New(data)` validates classic PCAP or PcapNG framing and copies container
+metadata, including PcapNG interfaces, names, process events, statistics and
+decryption secrets. The capture retains no reference to the input. Pass the
+same contents to later scans. For gzip input, call `DecompressCapture` first.
+It checks member trailers, limits combined output to 64 MiB and discards output
+on error. Plain input is returned by reference.
 
-For a `.pcap.gz` or `.pcapng.gz` buffer, call `DecompressCapture(input)`
-before `New`. Pass the returned bytes to `Packets`, `PacketPayload`, and
-other slice methods. Plain input is returned by reference. For gzip, the
-helper checks member trailers and enforces a combined 64 MiB output limit.
-An oversized stream returns `ErrPacketLimit`. Decompression errors return no
-partial buffer. Use `New` to validate the resulting capture format.
+Use `NewWithLength(data, streamLength)` for a buffered prefix of a known-length
+stream. After a valid initial header, an incomplete trailing record or block
+leaves the preceding records available. Check `InputTruncated()` and
+`DeclaredExtent()` to distinguish an incomplete input from an empty capture.
 
-A truncated capture succeeds as long as its initial container header (the
-24-byte classic PCAP header or the first PcapNG Section Header Block) is valid.
-When a trailing packet record or PcapNG block extends past `data`, `New` stops
-at the last complete record, sets `Capture.DeclaredExtent` to include the
-declared trailing record end, and marks `Capture.InputTruncated() == true`.
-If only a leading stream prefix is buffered while the total stream length is
-known, call `NewWithLength(data, streamLength)`. For large files on disk, call
-`NewFromReaderAt(r, size)` to parse container metadata without reading the
-entire capture into a single byte slice. On a file (including a wrapper exposing `Fd() uintptr`), a scan can
-prefetch up to 64 KiB of adjacent bytes, including frame data. Each scan owns
-its window. Other readers receive exact range requests. Opening a PcapNG capture
-validates its metadata blocks. Later packet walks reuse that validation and skip
-name resolution, interface statistics, and decryption secrets block bodies.
-They still read interface descriptions, process events, packet headers,
-options and block trailers. Large metadata blocks use a bounded read window
-for name records and options, including name resolution blocks larger than
-16 MiB. The block and record totals below apply when scanning a capture.
-Streaming writers check individual calls and can continue across those totals. Use `PacketSeqFromReaderAt` to process records
-in order and break when you have enough. `PacketsFromReaderAt` collects a
-packet record slice. `FlowsFromReaderAt` starts with a 256-byte prefix or the
-whole frame when shorter. It reads additional bytes into a reusable buffer
-when needed to resolve flow headers and lengths. Both container metadata and frame reads
-count toward the 64 MiB flow budget.
+Use `NewFromReaderAt(r, size)` for seekable input. Opening validates PcapNG
+metadata. Subsequent packet walks skip name, statistics and decryption-secret
+block bodies while reading interface descriptions, process events, packet
+headers, options and trailers. Large metadata blocks use a bounded read window.
+`PacketSeqFromReaderAt` lets you stop after the records you need.
 
-`DNSFromReaderAt`, `TLSFromReaderAt`, and `QUICFromReaderAt` each allow
-64 MiB of total reads, including container metadata, frame prefixes, and
-selected payloads. A call can finish on a larger file. A read that would
-exceed the remaining allowance returns `ErrPacketLimit` without partial results.
-File prefetch uses only the allowance left after reserving for exact reads,
-including overlapping PcapNG block headers. Large sparse captures keep exact
-reads when that reservation leaves no room. Cache hits still count toward
-the limit on selected input. Opening the capture has a separate scan cost.
+Flows start from up to 256 bytes per frame and read more to resolve headers.
+DNS selects DNS ports and UDP fragments, TLS reassembles TCP on any port, and
+QUIC selects candidate UDP long headers and fragments. Each bounded scan charges
+metadata, prefixes and selected payloads against `MaxReaderAtScanBytes`.
+Opening has a separate cost. A scan can finish on a file larger than its read
+budget. Exceeding the budget returns `ErrPacketLimit` and discards the results.
 
-DNS selects DNS ports and UDP fragments. TLS reassembles TCP on any port.
-QUIC selects candidate UDP long headers and UDP fragments. Incomplete headers
-and tunnels can require a full frame read. Each selected transport byte comes
-from the read allowance, bounding retained input payloads to 64 MiB per call.
-TCP reassembly separately allows 4 MiB per direction and 64 MiB total output.
-Fragment and QUIC reassembly also apply the limits below. Decoded records,
-flow tables and scratch buffers use additional memory.
-
-If you don't modify its exported fields, you can read a `Capture` concurrently
-from multiple goroutines. Unlike `Capture`, `SafeReader` retains a reference to
-its input buffer; don't modify that buffer concurrently with reads.
+Files and readers exposing `Fd() uintptr` can prefetch up to 64 KiB at a time.
+Prefetch uses only the allowance left after reserving exact reads, including
+overlapping block headers. Other readers get exact range requests. Cache hits
+still count against the selected-input limit. Reassembly, output and scratch
+memory have separate costs. For concurrent reads, keep the input and exported
+capture fields unchanged. [Input and buffer lifetimes](compatibility.md#inputs-and-payloads)
 
 ## Work and output limits
 
-The following limits bound parsing work and memory allocation on each call:
+These limits apply to capture scans. Streaming writers check individual calls and can exceed the cumulative scan totals.
 
 | Limit | Maximum | Purpose |
 | --- | --- | --- |
@@ -135,15 +107,8 @@ The following limits bound parsing work and memory allocation on each call:
 | `MaxRDPPacketBytes` | 16 KiB | Bounds RDP TPKT/X.224 negotiation PDU length |
 | `MaxRDPRecordsPerScan` | 16,384 records | Bounds RDP negotiation records returned per capture scan |
 
-Use `errors.Is` with `ErrNotPCAP`, `ErrInvalidMagic`, `ErrInvalidHeader`,
-`ErrInvalidBlock`, `ErrInvalidPacket`, `ErrInvalidFrame`, `ErrInvalidDNS`,
-`ErrInvalidTLS`, `ErrInvalidQUIC`, `ErrInvalidHTTP`, `ErrInvalidSSH`,
-`ErrInvalidSMB`, `ErrInvalidKRB5`, `ErrInvalidRDP`,
-`ErrLiveCaptureUnsupported`, `ErrInterfaceLimit`, `ErrPacketLimit`,
-`ErrFlowLimit`, `ErrSecretLimit`, `ErrOptionLimit`, `ErrReassemblyLimit`,
-`ErrFragmentLimit`, `ErrDNSLimit`, `ErrTLSLimit`, `ErrQUICLimit`,
-`ErrHTTPLimit`, `ErrSSHLimit`, `ErrSMBLimit`, `ErrKRB5Limit`, `ErrRDPLimit`,
-`ErrOutOfBounds`, or `ErrIntegerOverflow` to classify failures.
+Use `errors.Is` with the sentinel documented by the operation, for example
+`errors.Is(err, pcap.ErrPacketLimit)`. [Limits and error contracts](compatibility.md#limits-and-errors)
 
 ## Inspect truncation and anomalies
 
@@ -768,11 +733,14 @@ returns both input slices and `false`.
 
 ## Parse HTTP messages and carve payloads
 
-Call `ParseHTTPRequest(stream)` or `ParseHTTPResponse(stream)` on a TCP stream,
-or call `capture.HTTP(data)` to extract HTTP/1.x requests, responses, FoxIO
-`JA4H` fingerprints, and carved `Body` payloads (`Content-Length` and
-`Transfer-Encoding: chunked`) from both cleartext TCP streams and DSB-decrypted
-TLS 1.2 and TLS 1.3 flows.
+| Question | Capture API |
+| --- | --- |
+| Which packet started each request? | `HTTPRequests` for cleartext HTTP/1 and HTTP/2. [Request timeline](#locate-individual-http-requests-in-a-capture) |
+| What headers and entity bytes belong to this request? | `HTTP1RequestEvidence` for cleartext HTTP/1, including body completeness. [Request evidence](#inspect-cleartext-http1-request-evidence) |
+| What did the client and server exchange? | `HTTP` for HTTP/1 requests, responses, JA4H and carved bodies. `HTTP2` for frames and stream headers. Both support cleartext and keyed TLS. |
+| Do I need TLS and both HTTP versions? | `Web` shares reassembly and decryption across all three results. |
+
+For an individual HTTP/1 stream, call `ParseHTTPRequest` or `ParseHTTPResponse`.
 
 Inspect `Anomalies` for conflicting numeric lengths, simultaneous transfer
 encoding and content length, folded headers, and incomplete bodies. Folded
@@ -814,18 +782,19 @@ cleartext and decrypted directions. The budget counts bytes produced before a
 decoding failure and charges up to 4 MiB per message. On budget exhaustion,
 the call returns an error wrapping `ErrHTTPLimit` and no records.
 
-When you need TLS, HTTP/1 and HTTP/2 together, call `capture.Web(data)`.
-It reassembles the capture's TCP streams once and shares the decrypted
-application bytes between the HTTP parsers. The returned `TLS`, `HTTP` and
-`HTTP2` slices follow the same ordering and limits as the individual methods,
-including outer CONNECT records and cleartext records before decrypted ones.
-An analysis error returns an empty result.
+`Web` returns TLS, HTTP/1 and HTTP/2 records in the same order and with the
+same limits as the standalone methods, including outer CONNECT records and
+cleartext before decrypted HTTP traffic. An analysis error returns an empty result.
 
 For HTTP/2 (`h2c` cleartext or decrypted TLS `h2`), call
 `ParseHTTP2Frames(stream)` or `capture.HTTP2(data)` to parse the 24-byte HTTP/2
 client preface, `SETTINGS` parameter pairs and `SettingsFingerprint`
 (`id:val;id:val`), `WINDOW_UPDATE` increments, and reassembled per-stream `DATA`
 frame payloads (handling padded `DATA` frames under `MaxHTTPBodyBytes`).
+
+For cleartext HTTP/2, `HTTP2` and `Web` identify the client by its preface.
+If neither side supplies one, the first observed direction supplies the client
+role. TLS establishes the roles for decrypted traffic.
 
 For each stream ID, `HeaderBlocks` retains complete header blocks in order,
 including interim responses and trailers. Inspect `Method`, `Authority`,
@@ -848,64 +817,32 @@ the observed proxy leg. [HPACK format and examples](https://www.rfc-editor.org/r
 
 ### Locate individual HTTP requests in a capture
 
-Use `capture.HTTPRequests(data)` or `capture.HTTPRequestsFromReaderAt(r)` to
-build a request timeline from a cleartext capture, including the plaintext leg
-of a TLS-terminating proxy. Each observation contains the request method,
-authority, path, source and destination, flow index, zero-based packet index,
-and that packet’s timestamp in nanoseconds. For Wireshark, add one to the
-packet index.
+`HTTPRequests` and `HTTPRequestsFromReaderAt` return the method, authority,
+path, endpoints, flow index, packet index and timestamp. The supplying packet
+contains the first byte of the HTTP/1 request line or the initial HTTP/2 HEADERS
+frame, even if CONTINUATION frames follow. HTTP/2 requires a client preface and
+supplies a stream ID. HTTP/1 uses stream ID zero.
 
-For HTTP/1, the packet supplies the first byte of the request line. For HTTP/2
-with a client preface, it supplies the first byte of the initial HEADERS frame,
-even when a later CONTINUATION frame completes the header block. Multiple
-requests in one packet share its index and time. Retransmitted bytes produce
-one observation. Results follow packet-index order even when timestamps go
-backward. HTTP/2 requests carry a stream ID; HTTP/1 uses zero.
+Rows follow packet order even when timestamps move backward or are unavailable
+(zero). Requests starting in the same packet share its index and time.
+Retransmissions produce one observation. Wireshark frame numbers start at one.
 
-```go
-requests, err := capture.HTTPRequestsFromReaderAt(file)
-if err != nil {
-    return err
-}
-for _, r := range requests {
-    fmt.Printf("frame=%d time_ns=%d flow=%d stream=%d %s %s\n",
-        r.PacketIndex+1, r.TimestampNs, r.FlowIndex, r.StreamID, r.Method, r.Authority)
-}
-```
-
-The scan stops parsing each direction at its first known TCP gap. A capture
-beginning midstream needs a recognizable request at the start of the observed
-prefix. It reports an HTTP/1 CONNECT request and stops at the tunnel boundary.
-Use `Web` for keyed TLS inspection. This timeline has no mapping from decrypted
-bytes back to packets in an encrypted capture. Zero timestamp values can occur
-on packets recorded without a timestamp.
-
-The scan accepts up to `MaxTotalStreamBytes` of candidate TCP payload (including
-retransmissions), applies the existing stream and HTTP decoding limits, and
-returns at most `MaxHTTPMessagesPerScan` observations. Errors discard the result.
-ReaderAt also limits capture reads to `MaxReaderAtScanBytes`.
-
-For cleartext HTTP/2, `HTTP2` and `Web` use the client connection preface
-to identify the sender of each directional record. If neither direction has
-a preface, the first observed direction retains the client role. Decrypted
-streams use the roles established by TLS.
+Both methods scan cleartext, including the plaintext leg of a proxy. They stop
+at the first known TCP gap and after an HTTP/1 CONNECT. A midstream capture
+needs a recognizable request at the start of the observed prefix.
+`MaxTotalStreamBytes` includes retransmitted input, and `MaxHTTPMessagesPerScan`
+bounds the output. HTTP decoding and ReaderAt read limits also apply. An error
+discards the result.
 
 ### Inspect cleartext HTTP/1 request evidence
 
-Use `capture.HTTP1RequestEvidence(data)` or
-`capture.HTTP1RequestEvidenceFromReaderAt(file)` to inspect requests with
-complete headers on cleartext HTTP/1 connections. This scan covers requests
-on the plaintext leg of a proxy. Use `HTTPRequests` for a timeline that also
-includes cleartext HTTP/2, and `Web` to inspect responses or keyed TLS traffic.
-
-Each request starts at a unique `(PacketIndex, PacketPayloadOffset)` in the
-capture. The offset counts bytes from the start of that packet's TCP payload.
-Multiple requests in a packet have distinct offsets. For a split request,
-both fields refer to the packet that supplied the first byte of the request
-line. Reassembly uses the first captured copy of overlapping bytes. Results
-follow packet order, then payload offset. `FlowIndex` matches `Flows`, even
-when TCP connections reuse the same tuple. `Source`, `Destination`, and
-`TimestampNs` give direction and packet time.
+`HTTP1RequestEvidence` and `HTTP1RequestEvidenceFromReaderAt` return cleartext
+HTTP/1 requests with complete headers. Within a capture, identify each start by
+`(PacketIndex, PacketPayloadOffset)`, ordered by packet and then by byte offset
+in its TCP payload. For split or overlapping requests, attribution follows the
+first captured copy of the start byte. `FlowIndex` matches `Flows` across tuple
+reuse. The row includes directional endpoints and the starting packet’s timestamp.
+[Runnable example](../http_evidence_test.go)
 
 `Target` preserves the request target from the start line. `Authority` uses
 the authority component of a valid absolute-form target, the CONNECT target,
@@ -1070,35 +1007,22 @@ with `HasProcessID` set returns `ErrInvalidPacket`. A new entry that would
 exceed `MaxProcessEvents` returns `ErrOptionLimit`. The writer stores the
 thread ID, user ID, command line, and container ID in go-pcap packet comments.
 
-Call `capture.ExtractFlowPCAPNG(data, w, flowIndex)` to write one bidirectional
-flow. Pass the original capture bytes and the zero-based index from `Flows`.
-For PcapNG input, the export retains the source sections, registers only the
-interfaces used by selected packets, and preserves their block type, timestamp
-encoding, and packet options. Name records, process definitions and decryption secrets
-are capture-wide and can describe other flows. Classic PCAP input becomes a
-single-interface PcapNG capture. An absent flow returns `ErrOutOfBounds`
-before writing output.
+To export one bidirectional flow, pass its zero-based `Flows` index, the original
+capture bytes, and an `io.Writer`. Both exporters write PcapNG, retain selected
+packets in capture order, and leave the writer untouched for a missing flow
+(`ErrOutOfBounds`).
 
-Use `ExtractFlowPacketsPCAPNG(data, w, flowIndex)` to export only the selected
-packets and the container fields needed to interpret them. The export keeps
-packet order, captured bytes, captured and original lengths, timestamps,
-and the interfaces used by the packets. It retains PcapNG timestamp resolution
-and offset and any declared frame check sequence (FCS) length. A Simple Packet
-Block remains timestamp-free. The export omits unused sections and interfaces,
-name records, decryption secrets, interface statistics, process information,
-comments, descriptions, and other options. Packet headers and payloads still
-contain the original endpoints and application data.
+| Method | PcapNG metadata in the output |
+| --- | --- |
+| `ExtractFlowPCAPNG` | Source sections, selected interfaces, original packet block types, timestamp encoding and packet options. Capture-wide names, process definitions and decryption secrets can describe other flows. |
+| `ExtractFlowPacketsPCAPNG` | Only sections, interfaces and fields required to interpret the selected packets, including timestamp resolution, offset and declared frame check sequence length. Simple Packet Blocks stay timestamp-free. Comments, process data, names and secrets are omitted. Original packet bytes, endpoints, application data, captured lengths and wire lengths remain. |
 
-For a file opened with `NewFromReaderAt`, pass the same unchanged file to
-`ExtractFlowPCAPNGFromReaderAt(r, w, flowIndex)` or
-`ExtractFlowPacketsPCAPNGFromReaderAt(r, w, flowIndex)`. Both methods read
-frame prefixes to identify flows and skip unrelated packet bodies. The
-preserving method copies selected PcapNG blocks in chunks of up to 32 KiB.
-The packet-only method rebuilds container blocks and copies selected packet
-bytes in chunks of up to 32 KiB. All source reads during the export share the
-64 MiB `MaxReaderAtScanBytes` budget, including metadata and repeated reads.
-Budget exhaustion returns `ErrPacketLimit`. Discard partial output after a
-read, write, or budget error.
+For seekable input, call `ExtractFlowPCAPNGFromReaderAt` or
+`ExtractFlowPacketsPCAPNGFromReaderAt` with the same source. Both select flows
+using frame prefixes, skip unrelated packet bodies and copy in chunks of up to
+32 KiB. All reads, including metadata and repeated reads, share
+`MaxReaderAtScanBytes`. Discard partial output after a read, write, or budget
+error. [Packet-only sharing example](../README.md#share-packets-from-one-flow)
 
 ## Capture live interface traffic
 

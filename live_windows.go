@@ -12,9 +12,8 @@ import (
 )
 
 const (
-	LinkTypeUnknown LinkType = 0xffff
-	sioRcvAll       uint32   = 0x98000001
-	rcvallOn        uint32   = 1
+	sioRcvAll uint32 = 0x98000001
+	rcvallOn  uint32 = 1
 )
 
 // LiveCapture reads live IPv4 packets from a Windows network interface using
@@ -101,30 +100,6 @@ func OpenLive(ifaceName string, opts LiveOptions) (*LiveCapture, error) {
 		filter:    normOpts.BPFFilter,
 		buf:       make([]byte, normOpts.SnapLen),
 	}, nil
-}
-
-// InterfaceName returns the bound network interface name.
-func (lc *LiveCapture) InterfaceName() string {
-	if lc == nil {
-		return ""
-	}
-	return lc.ifaceName
-}
-
-// LinkType returns the link-layer encapsulation type ([LinkTypeIPv4]).
-func (lc *LiveCapture) LinkType() LinkType {
-	if lc == nil {
-		return LinkTypeUnknown
-	}
-	return lc.linkType
-}
-
-// SnapLen returns the configured snapshot length.
-func (lc *LiveCapture) SnapLen() uint32 {
-	if lc == nil {
-		return 0
-	}
-	return lc.snapLen
 }
 
 // ReadPacket reads the next live IPv4 packet from the Windows raw socket,

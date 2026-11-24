@@ -116,35 +116,28 @@ func (c *Capture) RDP(data []byte) ([]RDPRecord, error) {
 	var records []RDPRecord
 	for i := range streams {
 		st, _, _ := proxyStream(streams[i])
-		if len(st.Client.Data) >= 11 && st.Client.Data[0] == 0x03 && st.Client.Data[1] == 0x00 {
-			if neg, err := ParseRDPNegotiation(st.Client.Data); err == nil && isRDPNegotiationRecord(st.SrcPort, st.DstPort, neg) {
-				if len(records) >= MaxRDPRecordsPerScan {
-					return nil, fmt.Errorf("%w: exceeds %d RDP records", ErrRDPLimit, MaxRDPRecordsPerScan)
-				}
-				records = append(records, RDPRecord{
-					FlowIndex:   st.FlowIndex,
-					SrcAddr:     st.SrcAddr,
-					DstAddr:     st.DstAddr,
-					SrcPort:     st.SrcPort,
-					DstPort:     st.DstPort,
-					Negotiation: neg,
-				})
+		for dir, data := range [2][]byte{st.Client.Data, st.Server.Data} {
+			if len(data) < 11 || data[0] != 0x03 || data[1] != 0x00 {
+				continue
 			}
-		}
-		if len(st.Server.Data) >= 11 && st.Server.Data[0] == 0x03 && st.Server.Data[1] == 0x00 {
-			if neg, err := ParseRDPNegotiation(st.Server.Data); err == nil && isRDPNegotiationRecord(st.DstPort, st.SrcPort, neg) {
-				if len(records) >= MaxRDPRecordsPerScan {
-					return nil, fmt.Errorf("%w: exceeds %d RDP records", ErrRDPLimit, MaxRDPRecordsPerScan)
-				}
-				records = append(records, RDPRecord{
-					FlowIndex:   st.FlowIndex,
-					SrcAddr:     st.DstAddr,
-					DstAddr:     st.SrcAddr,
-					SrcPort:     st.DstPort,
-					DstPort:     st.SrcPort,
-					Negotiation: neg,
-				})
+			neg, err := ParseRDPNegotiation(data)
+			if err != nil || !isRDPNegotiationRecord(st.SrcPort, st.DstPort, neg) {
+				continue
 			}
+			if len(records) >= MaxRDPRecordsPerScan {
+				return nil, fmt.Errorf("%w: exceeds %d RDP records", ErrRDPLimit, MaxRDPRecordsPerScan)
+			}
+			if dir == 1 {
+				st.reverse()
+			}
+			records = append(records, RDPRecord{
+				FlowIndex:   st.FlowIndex,
+				SrcAddr:     st.SrcAddr,
+				DstAddr:     st.DstAddr,
+				SrcPort:     st.SrcPort,
+				DstPort:     st.DstPort,
+				Negotiation: neg,
+			})
 		}
 	}
 	return records, nil
