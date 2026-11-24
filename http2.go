@@ -74,7 +74,7 @@ type HTTP2Record struct {
 	DstAddr     netip.Addr
 	SrcPort     uint16
 	DstPort     uint16
-	IsServer    bool
+	IsServer    bool // The client preface identifies cleartext roles when present in one direction.
 	IsDecrypted bool
 	Summary     HTTP2Summary
 }
@@ -269,6 +269,8 @@ func (c *Capture) HTTP2(data []byte) ([]HTTP2Record, error) {
 }
 
 func appendHTTP2FromTCPStream(st *TCPStream, isDecrypted bool, records *[]HTTP2Record, remaining *int) error {
+	// TCP stream direction follows the first packet, which can come from the server.
+	reversed := !isDecrypted && bytes.HasPrefix(st.Server.Data, HTTP2ClientPreface) && !bytes.HasPrefix(st.Client.Data, HTTP2ClientPreface)
 	if len(st.Client.Data) >= 9 {
 		sum, err := parseHTTP2Frames(st.Client.Data, remaining, st.Client.Anomalies.SequenceGap)
 		if errors.Is(err, ErrHTTPLimit) {
@@ -284,7 +286,7 @@ func appendHTTP2FromTCPStream(st *TCPStream, isDecrypted bool, records *[]HTTP2R
 				DstAddr:     st.DstAddr,
 				SrcPort:     st.SrcPort,
 				DstPort:     st.DstPort,
-				IsServer:    false,
+				IsServer:    reversed,
 				IsDecrypted: isDecrypted,
 				Summary:     sum,
 			})
@@ -305,7 +307,7 @@ func appendHTTP2FromTCPStream(st *TCPStream, isDecrypted bool, records *[]HTTP2R
 				DstAddr:     st.SrcAddr,
 				SrcPort:     st.DstPort,
 				DstPort:     st.SrcPort,
-				IsServer:    true,
+				IsServer:    !reversed,
 				IsDecrypted: isDecrypted,
 				Summary:     sum,
 			})

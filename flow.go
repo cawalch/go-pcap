@@ -35,15 +35,18 @@ type FlowSummary struct {
 	SYNTimestamp TCPTimestamp
 	// SYNACKTimestamp is the first valid timestamp observed on a SYN with ACK.
 	SYNACKTimestamp TCPTimestamp
-	ClientJA4L      string
-	ServerJA4L      string
-	ProcessID       uint32
-	UserID          uint32
-	ProcessName     string
-	ProcessArgs     string
-	ContainerID     string
-	HasProcessID    bool
-	HasUserID       bool
+	// ClientJA4L and ServerJA4L use the first matched three-way handshake
+	// that completes in capture order. If none completes, ServerJA4L uses
+	// the first matching SYN and SYN-ACK pair.
+	ClientJA4L   string
+	ServerJA4L   string
+	ProcessID    uint32
+	UserID       uint32
+	ProcessName  string
+	ProcessArgs  string
+	ContainerID  string
+	HasProcessID bool
+	HasUserID    bool
 	// PortsUnavailable reports that no packet in the summary supplied transport ports.
 	PortsUnavailable bool
 	Anomalies        FrameAnomalies
@@ -134,7 +137,7 @@ func (c *Capture) Flows(data []byte) ([]FlowSummary, error) {
 	}
 
 	r := SafeReader{data: data, size: int64(len(data))}
-	var acc flowAccumulator
+	acc := flowAccumulator{separateInterfaces: c.SeparateTCPInterfaces && len(c.Interfaces) > 1}
 
 	err := c.walkPackets(&r, func(pkt PacketRecord) error {
 		payload, err := r.Slice(pkt.PayloadOffset, pkt.PayloadLength)
@@ -156,17 +159,76 @@ func (c *Capture) Flows(data []byte) ([]FlowSummary, error) {
 }
 
 type tcpHandshakeTime struct {
-	synNs      int64
-	synAckNs   int64
-	hasSYN     bool
-	hasSYNACK  bool
-	hasClientL bool
+	synNs, synAckNs           int64
+	synNext, synAckNext       uint32
+	synPayload, synAckPayload uint32
+	synAckTTL                 uint8
+	clientCanonical           bool
+	hasSYN, hasSYNACK         bool
+	reportedServer            bool
 }
 
 type flowAccumulator struct {
-	table   flowIndexTable
-	flows   []FlowSummary
-	hsTimes []tcpHandshakeTime
+	table              flowIndexTable
+	flows              []FlowSummary
+	hsTimes            []tcpHandshakeTime
+	hsInterfaces       map[int]map[uint32]tcpHandshakeTime
+	pendingInterfaces  int
+	separateInterfaces bool
+}
+
+func (hs *tcpHandshakeTime) observe(flow *FlowSummary, frame *Frame, canonical bool, timestamp int64) {
+	flags := frame.TCPFlags & (TCPFlagSYN | TCPFlagACK | TCPFlagRST)
+	switch flags {
+	case TCPFlagSYN:
+		next := frame.TCPSeq + 1
+		if !hs.hasSYN || canonical != hs.clientCanonical || next != hs.synNext {
+			*hs = tcpHandshakeTime{synNs: timestamp, synNext: next, clientCanonical: canonical, hasSYN: true}
+		}
+		hs.synPayload = max(hs.synPayload, frame.PayloadLength)
+	case TCPFlagSYN | TCPFlagACK:
+		// Fast Open can acknowledge part or all of the payload on a SYN.
+		if !hs.hasSYN || canonical == hs.clientCanonical || frame.TCPAck-hs.synNext > hs.synPayload {
+			return
+		}
+		next := frame.TCPSeq + 1
+		if !hs.hasSYNACK || next != hs.synAckNext {
+			hs.hasSYNACK = true
+			hs.synAckNs, hs.synAckNext, hs.synAckTTL = timestamp, next, frame.TTL
+			hs.synAckPayload = 0
+			hs.reportedServer = flow.ServerJA4L == ""
+			if hs.reportedServer {
+				flow.ServerJA4L = JA4L(timestamp-hs.synNs, frame.TTL)
+			}
+		}
+		hs.synAckPayload = max(hs.synAckPayload, frame.PayloadLength)
+	case TCPFlagACK:
+		if hs.hasSYNACK && canonical == hs.clientCanonical &&
+			frame.TCPSeq-hs.synNext <= hs.synPayload && frame.TCPAck-hs.synAckNext <= hs.synAckPayload {
+			if !hs.reportedServer {
+				flow.ServerJA4L = JA4L(hs.synAckNs-hs.synNs, hs.synAckTTL)
+			}
+			flow.ClientJA4L = JA4L(timestamp-hs.synAckNs, frame.TTL)
+		}
+	case TCPFlagRST, TCPFlagRST | TCPFlagACK:
+		if !hs.hasSYN {
+			return
+		}
+		hasAck := flags&TCPFlagACK != 0
+		if canonical == hs.clientCanonical {
+			if frame.TCPSeq-hs.synNext > hs.synPayload ||
+				hs.hasSYNACK && hasAck && frame.TCPAck-hs.synAckNext > hs.synAckPayload {
+				return
+			}
+		} else if hasAck {
+			if frame.TCPAck-hs.synNext > hs.synPayload {
+				return
+			}
+		} else if !hs.hasSYNACK || frame.TCPSeq-hs.synAckNext > hs.synAckPayload {
+			return
+		}
+		*hs = tcpHandshakeTime{}
+	}
 }
 
 // Preserve the first attribution. Only an observation of the same PID can
@@ -202,7 +264,7 @@ func (flow *FlowSummary) observeProcess(pkt *PacketRecord) {
 }
 
 func (acc *flowAccumulator) observe(pkt *PacketRecord, frame *Frame, payload []byte) error {
-	key, _ := makeCanonicalFlowKey(frame.IPProtocol, frame.SrcAddr, frame.SrcPort, frame.DstAddr, frame.DstPort)
+	key, canonical := makeCanonicalFlowKey(frame.IPProtocol, frame.SrcAddr, frame.SrcPort, frame.DstAddr, frame.DstPort)
 	idx, exists, err := acc.table.lookupOrInsert(key)
 	if err != nil {
 		return err
@@ -218,14 +280,15 @@ func (acc *flowAccumulator) observe(pkt *PacketRecord, frame *Frame, payload []b
 			LastTimestampNs:  pkt.TimestampNs,
 			PortsUnavailable: !frame.hasPorts,
 		})
-		acc.hsTimes = append(acc.hsTimes, tcpHandshakeTime{})
+		if !acc.separateInterfaces {
+			acc.hsTimes = append(acc.hsTimes, tcpHandshakeTime{})
+		}
 	}
 
 	flow := &acc.flows[idx]
 	if flow.PortsUnavailable && frame.hasPorts {
 		flow.PortsUnavailable = false
 	}
-	hst := &acc.hsTimes[idx]
 	flow.PacketCount++
 	if pkt.TimestampNs < flow.FirstTimestampNs {
 		flow.FirstTimestampNs = pkt.TimestampNs
@@ -249,13 +312,6 @@ func (acc *flowAccumulator) observe(pkt *PacketRecord, frame *Frame, payload []b
 					flow.ClientJA4T = fp
 				}
 			}
-			if !hst.hasSYN {
-				hst.synNs = pkt.TimestampNs
-				hst.hasSYN = true
-			}
-		} else if hst.hasSYNACK && !hst.hasClientL && (frame.TCPFlags&TCPFlagACK) != 0 {
-			flow.ClientJA4L = JA4L(pkt.TimestampNs-hst.synAckNs, frame.TTL)
-			hst.hasClientL = true
 		}
 	} else {
 		flow.ServerPackets++
@@ -266,13 +322,54 @@ func (acc *flowAccumulator) observe(pkt *PacketRecord, frame *Frame, payload []b
 					flow.ServerJA4TS = fp
 				}
 			}
-			if hst.hasSYN && !hst.hasSYNACK {
-				hst.synAckNs = pkt.TimestampNs
-				hst.hasSYNACK = true
-				flow.ServerJA4L = JA4L(pkt.TimestampNs-hst.synNs, frame.TTL)
-			}
 		}
 	}
+	flags := frame.TCPFlags & (TCPFlagSYN | TCPFlagACK | TCPFlagRST)
+	if flags == 0 || flow.ClientJA4L != "" ||
+		!acc.separateInterfaces && flags&TCPFlagSYN == 0 && !acc.hsTimes[idx].hasSYN ||
+		!frame.hasPorts || frame.Anomalies.IPFragment || frame.Anomalies.TruncatedLayer || frame.Anomalies.InvalidTCPDataOffset {
+		return nil
+	}
+	if !acc.separateInterfaces {
+		acc.hsTimes[idx].observe(flow, frame, canonical, pkt.TimestampNs)
+		return nil
+	}
+	return acc.observeInterfaceHandshake(idx, flow, pkt, frame, canonical)
+}
+
+func (acc *flowAccumulator) observeInterfaceHandshake(idx int, flow *FlowSummary, pkt *PacketRecord, frame *Frame, canonical bool) error {
+	byInterface := acc.hsInterfaces[idx]
+	hs, pending := byInterface[pkt.InterfaceID]
+	hs.observe(flow, frame, canonical, pkt.TimestampNs)
+	if flow.ClientJA4L != "" {
+		acc.pendingInterfaces -= len(byInterface)
+		delete(acc.hsInterfaces, idx)
+		return nil
+	}
+	if !hs.hasSYN {
+		if pending {
+			acc.pendingInterfaces--
+			delete(byInterface, pkt.InterfaceID)
+			if len(byInterface) == 0 {
+				delete(acc.hsInterfaces, idx)
+			}
+		}
+		return nil
+	}
+	if !pending {
+		if acc.pendingInterfaces >= MaxFlows {
+			return fmt.Errorf("%w: exceeds %d interface-specific TCP handshakes", ErrFlowLimit, MaxFlows)
+		}
+		acc.pendingInterfaces++
+	}
+	if byInterface == nil {
+		if acc.hsInterfaces == nil {
+			acc.hsInterfaces = make(map[int]map[uint32]tcpHandshakeTime)
+		}
+		byInterface = make(map[uint32]tcpHandshakeTime)
+		acc.hsInterfaces[idx] = byInterface
+	}
+	byInterface[pkt.InterfaceID] = hs
 	return nil
 }
 

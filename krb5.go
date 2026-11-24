@@ -351,7 +351,7 @@ func (c *Capture) Kerberos(data []byte) ([]KRB5Record, error) {
 	r := SafeReader{data: data, size: int64(len(data))}
 	var table flowIndexTable
 	var records []KRB5Record
-	var tcp tcpMessageCollector
+	tcp := tcpMessageCollector{separateInterfaces: c.SeparateTCPInterfaces}
 
 	err := c.walkPackets(&r, func(pkt PacketRecord) error {
 		payload, err := r.Slice(pkt.PayloadOffset, pkt.PayloadLength)

@@ -13,11 +13,11 @@ For a runnable first scan, follow the [packet capture quick start](../README.md#
 
 `New` parses classic Portable Packet Capture (PCAP) headers or PCAP Next
 Generation (PcapNG) section blocks (`SHB`, `IDB`, `DSB`, `NRB`, `ISB`, `DPEB`,
-`EPB`, and `SPB`) and validates block framing across the buffer. It copies
-header values, interface descriptors, Name Resolution Block (`NRB`) records,
-Interface Statistics Block (`ISB`) counters, Darwin Process Event Block (`DPEB`)
-entries, and Decryption Secrets Block (`DSB`) payloads without retaining the
-input buffer. It records `int64(len(data))` as `Capture.FileSize`.
+`EPB`, `SPB`, and obsolete Packet Blocks) and validates block framing across
+the buffer. It copies header values, interface descriptors, Name Resolution
+Block (`NRB`) records, Interface Statistics Block (`ISB`) counters, Darwin
+Process Event Block (`DPEB`) entries, and Decryption Secrets Block (`DSB`)
+payloads without retaining the input buffer. It records `int64(len(data))` as `Capture.FileSize`.
 
 For a `.pcap.gz` or `.pcapng.gz` buffer, call `DecompressCapture(input)`
 before `New`. Pass the returned bytes to `Packets`, `PacketPayload`, and
@@ -160,8 +160,8 @@ input ends before a declared packet record or PcapNG block finishes. Call
   complete record header.
 - `UnalignedBlockLength`: A PcapNG block declared a total length that was not a
   multiple of 4 bytes.
-- `InvalidTimestampResolution`: An interface declared an invalid `if_tsresol`
-  option (such as a decimal exponent greater than 9).
+- `InvalidTimestampResolution`: An interface declared an `if_tsresol` option
+  whose value is longer or shorter than one byte.
 
 In PcapNG, each section defines its own interface table and byte order. Packet
 and statistics records expose the resolved index into `Capture.Interfaces`.
@@ -191,8 +191,10 @@ If you need a slice of all packet records, call `capture.Packets(data)` (or
 - `Index`: Zero-based packet index in file order.
 - `InterfaceID` and `LinkType`: Link-layer encapsulation type for decoding.
 - `TimestampNs`: Packet timestamp normalized to nanoseconds since the Unix
-  epoch, applying any PcapNG decimal ($10^{-N}$) or binary ($2^{-N}$)
-  `if_tsresol` scaling and `if_tsoffset` seconds offset.
+  epoch. PcapNG decimal ($10^{-N}$) and binary ($2^{-N}$) resolutions
+  round down to a whole nanosecond. The reader applies the signed
+  `if_tsoffset` in seconds before clamping the result to the signed
+  64-bit nanosecond range. Interface statistics use the same conversion.
 - `CaptureLen` and `OriginalLen`: Captured and on-wire byte counts.
 - `PayloadOffset` and `PayloadLength`: Byte range of the captured frame inside
   `data`. Pass `pkt` to `capture.PacketPayload(data, pkt)` to obtain a
@@ -200,6 +202,9 @@ If you need a slice of all packet records, call `capture.Packets(data)` (or
 - `ProcessID`, `ThreadID`, `UserID`, `ProcessName`, `ProcessArgs`,
   `ContainerID`, `Flags`, and `DropCount`: Process attribution and packet
   metadata decoded from PcapNG Enhanced Packet Block (EPB) options.
+  Obsolete Packet Blocks supply `Flags` from their flags option and `DropCount`
+  from their fixed header. A drop count of `0xffff` in that header means the
+  count was unavailable and leaves `DropCount` at zero.
 
 Apple PcapNG captures store process IDs and names in Process Information Blocks,
 also called Darwin Process Event Blocks (DPEB). An EPB's Apple primary process
@@ -268,7 +273,11 @@ header longer than the default ReaderAt prefix. See the
 [IKEv2 message format](https://www.rfc-editor.org/rfc/rfc7296#section-3.1).
 
 IPv6 reassembly discards a datagram if fragments overlap, including identical
-bytes. A first UDP or TCP fragment must contain its complete transport header.
+bytes. A first fragment must contain the complete UDP or TCP header, including
+any preceding Authentication or Destination Options headers. DNS and QUIC
+resolve those headers using fragment zero's Next Header field. The completion
+packet supplies the flow index even when another fragment has a different
+Next Header value.
 Atomic IPv6 packets are decoded independently of pending fragment groups.
 
 The [fingerprint reference fixtures](../testdata/foxio/README.md) identify the
@@ -384,7 +393,14 @@ increment `ServerPackets` and `ServerBytes`. For TCP flows, `Flows` records:
 
 - `ServerJA4L` (`<half_syn_synack_rtt_us>_<server_ttl>`) and `ClientJA4L`
   (`<half_synack_ack_rtt_us>_<client_ttl>`) from the 3-way handshake timestamps
-  and IP `TTL` / `HopLimit`.
+  and IP `TTL` / `HopLimit`. Both values come from the first matching 3-way
+  handshake completed in capture order. The SYN sender defines the client
+  for these samples. If no handshake completes, `ServerJA4L` uses the first
+  matching SYN and SYN-ACK pair. Matching retransmissions keep the first
+  timestamp, and a matching reset clears the pending opening. Both flow readers
+  use the same selection. With `SeparateTCPInterfaces` enabled, packets must
+  match on the same interface. The scan limits pending interface-specific
+  handshakes to `MaxFlows`.
 - First-seen process attribution (`ProcessID`, `UserID`, `ProcessName`,
   `ProcessArgs`, and `ContainerID`). The first packet with attribution supplies
   these fields. Later packets can fill missing fields when they carry the same
@@ -450,6 +466,27 @@ SYN retransmission stays in its connection. Each connection uses its first
 observed packet to define the client direction. Connections that reuse a
 five-tuple share the same `FlowIndex` and directional segment and byte limits.
 Without a new opening SYN, tuple reuse can be indistinguishable from a gap.
+
+By default, TCP reassembly combines observations across capture interfaces.
+This lets you recover a connection when its packets were captured on different
+interfaces. When the PcapNG interfaces observe independent networks, set
+`capture.SeparateTCPInterfaces` before calling a stream-based analyzer. It
+tracks connections by the capture-wide `PacketRecord.InterfaceID` as well as
+by the five-tuple. The flow index and packet totals still cover the entire
+capture. All connections on that tuple share the directional segment and byte
+limits.
+
+For example, if `capture` was parsed from `data`, recover HTTP/1 requests and
+responses separately for each interface.
+
+```go
+capture.SeparateTCPInterfaces = true
+records, err := capture.HTTP(data)
+```
+
+Set the same field on a capture from `NewFromReaderAt` before calling
+`HTTPRequestsFromReaderAt` to get packet-attributed requests. Look up each
+observation's `PacketIndex` in the packet records to identify its interface.
 
 ## Parse DNS messages and tunneling metrics
 
@@ -847,6 +884,11 @@ retransmissions), applies the existing stream and HTTP decoding limits, and
 returns at most `MaxHTTPMessagesPerScan` observations. Errors discard the result.
 ReaderAt also limits capture reads to `MaxReaderAtScanBytes`.
 
+For cleartext HTTP/2, `HTTP2` and `Web` use the client connection preface
+to identify the sender of each directional record. If neither direction has
+a preface, the first observed direction retains the client role. Decrypted
+streams use the roles established by TLS.
+
 ### Extract WebSocket messages
 
 Call `capture.WebSockets(data)` for HTTP/1.1 upgrades in cleartext or in
@@ -979,8 +1021,8 @@ thread ID, user ID, command line, and container ID in go-pcap packet comments.
 Call `capture.ExtractFlowPCAPNG(data, w, flowIndex)` to write one bidirectional
 flow. Pass the original capture bytes and the zero-based index from `Flows`.
 For PcapNG input, the export retains the source sections, registers only the
-interfaces used by selected packets, and preserves their timestamp encoding
-and packet options. Name records, process definitions and decryption secrets
+interfaces used by selected packets, and preserves their block type, timestamp
+encoding, and packet options. Name records, process definitions and decryption secrets
 are capture-wide and can describe other flows. Classic PCAP input becomes a
 single-interface PcapNG capture. An absent flow returns `ErrOutOfBounds`
 before writing output.
@@ -1005,8 +1047,25 @@ to evaluate a classic BPF program in memory.
 
 On Linux, `Promiscuous` requests membership for the capture socket until it
 closes. `OriginalLen` retains the wire length when the socket filter or
-`SnapLen` shortens a packet. On Windows, a positive `Timeout` applies to
-each `ReadPacket` call, including time spent waiting for a filter match.
+`SnapLen` shortens a packet. `TimestampNs` comes from the kernel when it
+captures the packet and uses nanosecond resolution. The receive ring holds at
+least two blocks sized to fit the requested snapshot, so its allocation can
+exceed `BufferSize`. With no explicit `BufferSize`, Linux sizes the ring for
+up to 32 blocks and budgets 4 MiB for the ring and snapshot buffer, unless the
+snapshot length requires more. The kernel publishes partially filled blocks on
+a timer, so sparse traffic can fill the available blocks before it uses their
+full byte capacity. `Immediate` selects a one-millisecond interval, and a
+positive `Timeout` still bounds how long `ReadPacket` waits.
+
+On macOS, `TimestampNs` comes from the kernel BPF packet header and has
+microsecond resolution. `OpenLive` translates the interface's native BPF
+datalink type to the corresponding capture-file `LinkType`, including native
+`DLT_RAW` (12) to `LinkTypeRaw` (101). It returns an error if the kernel cannot
+report a datalink type or the library has no mapping for it.
+
+On Windows, `TimestampNs` uses the userspace wall clock when `ReadPacket`
+accepts the packet. A positive `Timeout` applies to each `ReadPacket` call,
+including time spent waiting for a filter match.
 
 Call `live.Stats()` before closing the handle to check kernel packet loss:
 

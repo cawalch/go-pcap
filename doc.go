@@ -32,9 +32,9 @@
 // [Capture.PacketSeq] (single-pass iterator without slice allocation) or
 // [Capture.Packets], and slice individual packet frames with
 // [Capture.PacketPayload]. Each [PacketRecord] reports normalized nanosecond
-// timestamps, zero-copy payload offsets, and any PcapNG Enhanced Packet Block
-// process attribution (process ID, thread ID, user ID, process name, command
-// arguments, container ID, flags, and drop counts).
+// timestamps and zero-copy payload offsets. PcapNG Enhanced Packet Blocks
+// can provide process attribution, flags, and drop counts. Obsolete Packet
+// Blocks can provide flags and drop counts.
 //
 // Use [DecodeFrame] to decode Ethernet, 802.1Q/802.1ad VLAN, MPLS, PPPoE, GRE,
 // VXLAN, Geneve, Linux SLL/SLL2, BSD Loopback/Null, or Raw IP frames into

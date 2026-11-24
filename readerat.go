@@ -251,7 +251,7 @@ func (c *Capture) FlowsFromReaderAt(r io.ReaderAt) ([]FlowSummary, error) {
 	}) {
 		return c.flowsFromRadiotapReader(r)
 	}
-	var acc flowAccumulator
+	acc := flowAccumulator{separateInterfaces: c.SeparateTCPInterfaces && len(c.Interfaces) > 1}
 	var header [256]byte
 	var scratch []byte
 	budget := scanReadBudget{r: r, remaining: MaxReaderAtScanBytes}
@@ -289,7 +289,7 @@ func (c *Capture) FlowsFromReaderAt(r io.ReaderAt) ([]FlowSummary, error) {
 // headers. Other captures use the direct loop without that recovery path.
 func (c *Capture) flowsFromRadiotapReader(r io.ReaderAt) ([]FlowSummary, error) {
 	budget := scanReadBudget{r: r, remaining: MaxReaderAtScanBytes}
-	var acc flowAccumulator
+	acc := flowAccumulator{separateInterfaces: c.SeparateTCPInterfaces && len(c.Interfaces) > 1}
 	err := c.walkFlowPrefixes(&budget, func(pkt PacketRecord, f Frame, prefix []byte) error {
 		return acc.observe(&pkt, &f, prefix)
 	})
@@ -376,7 +376,7 @@ func completeFlowPrefix(f *Frame, prefix []byte, captured int64) (complete bool,
 // DNS transport and UDP fragment reads under [MaxReaderAtScanBytes].
 func (c *Capture) DNSFromReaderAt(r io.ReaderAt) ([]DNSRecord, error) {
 	return scanDNS(ipFrameSource{capture: c, reader: r, needsPayload: func(f Frame, _ []byte) bool {
-		return f.IPProtocol == IPProtoUDP && f.Anomalies.IPFragment ||
+		return f.mayContainUDPFragment() ||
 			(f.IPProtocol == IPProtoUDP || f.IPProtocol == IPProtoTCP) && (isDNSPort(f.SrcPort) || isDNSPort(f.DstPort))
 	}})
 }
@@ -395,8 +395,8 @@ func (c *Capture) TLSFromReaderAt(r io.ReaderAt) ([]TLSRecord, error) {
 // using bounded UDP datagram and fragment reads under [MaxReaderAtScanBytes].
 func (c *Capture) QUICFromReaderAt(r io.ReaderAt) ([]QUICRecord, error) {
 	return scanQUIC(ipFrameSource{capture: c, reader: r, needsPayload: func(f Frame, start []byte) bool {
-		return f.IPProtocol == IPProtoUDP && (f.Anomalies.IPFragment ||
-			f.PayloadLength >= 7 && (len(start) == 0 || start[0]&0x80 != 0 && (start[0]&0x40 != 0 || len(start) < 5 || binary.BigEndian.Uint32(start[1:5]) == 0)))
+		return f.mayContainUDPFragment() || f.IPProtocol == IPProtoUDP &&
+			f.PayloadLength >= 7 && (len(start) == 0 || start[0]&0x80 != 0 && (start[0]&0x40 != 0 || len(start) < 5 || binary.BigEndian.Uint32(start[1:5]) == 0))
 	}})
 }
 
@@ -848,7 +848,7 @@ func scanPCAPNGReaderAt(r io.ReaderAt, size int64, cb func(PacketRecord) error, 
 		var rec PacketRecord
 		var packetErr error
 		switch blockType {
-		case BlockTypeEnhancedPacket:
+		case blockTypeLegacyPacket, BlockTypeEnhancedPacket:
 			var header []byte
 			if bodyEnd-offset >= 28 {
 				if err := readExactAt(r, headerBuf[8:28], offset+8, size); err != nil {
@@ -857,7 +857,7 @@ func scanPCAPNGReaderAt(r io.ReaderAt, size int64, cb func(PacketRecord) error, 
 				header = headerBuf[8:28]
 			}
 			var options int64
-			rec, options, packetErr = decodeEPBHeader(header, offset+28, bodyEnd, order, &summary)
+			rec, options, packetErr = decodePacketBlockHeader(blockType, header, offset+28, bodyEnd, order, &summary)
 			if packetErr == nil {
 				tailOffset = options
 			}
@@ -923,9 +923,9 @@ func scanPCAPNGReaderAt(r io.ReaderAt, size int64, cb func(PacketRecord) error, 
 			if err := decodeIDB(&sr, 0, sr.size, order, &summary); err != nil {
 				return scanSummary{}, err
 			}
-		case BlockTypeEnhancedPacket, BlockTypeSimplePacket:
+		case blockTypeLegacyPacket, BlockTypeEnhancedPacket, BlockTypeSimplePacket:
 			if len(body) > 0 {
-				if err := decodeEPBOptions(body, order, &summary, &rec); err != nil {
+				if err := decodePacketBlockOptions(blockType, body, order, &summary, &rec); err != nil {
 					return scanSummary{}, err
 				}
 			}

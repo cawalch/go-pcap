@@ -448,7 +448,7 @@ func TestPCAPNGProcessOptionDisambiguation(t *testing.T) {
 			}
 			var packet PacketRecord
 			summary := scanSummary{processes: processes, sectionProcessBase: tc.base}
-			if err := decodeEPBOptions(raw.Bytes(), order, &summary, &packet); err != nil {
+			if err := decodePacketBlockOptions(BlockTypeEnhancedPacket, raw.Bytes(), order, &summary, &packet); err != nil {
 				t.Fatal(err)
 			}
 			if packet.HasProcessID != (tc.wantID != 0) || packet.ProcessID != tc.wantID || packet.ProcessName != tc.wantName ||

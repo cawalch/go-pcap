@@ -3,6 +3,7 @@
 package pcap
 
 import (
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -34,7 +35,8 @@ type bpfIfreq struct {
 }
 
 // OpenLive opens a live packet capture handle on ifaceName using /dev/bpf* and
-// standard library syscalls without cgo or libpcap.
+// standard library syscalls without cgo or libpcap. It returns an error if the
+// interface's native BPF datalink type has no supported capture-file mapping.
 func OpenLive(ifaceName string, opts LiveOptions) (*LiveCapture, error) {
 	if ifaceName == "" {
 		return nil, fmt.Errorf("%w: empty interface name", ErrInvalidHeader)
@@ -136,7 +138,13 @@ func OpenLive(ifaceName string, opts LiveOptions) (*LiveCapture, error) {
 	var dlt uint32
 	_, _, errno = syscall.Syscall(syscall.SYS_IOCTL, uintptr(fd), syscall.BIOCGDLT, uintptr(unsafe.Pointer(&dlt)))
 	if errno != 0 {
-		dlt = uint32(LinkTypeEthernet)
+		_ = syscall.Close(fd)
+		return nil, fmt.Errorf("ioctl BIOCGDLT: %w", errno)
+	}
+	linkType, err := darwinBPFLinkType(dlt)
+	if err != nil {
+		_ = syscall.Close(fd)
+		return nil, err
 	}
 
 	if err := syscall.SetNonblock(fd, true); err != nil {
@@ -147,10 +155,37 @@ func OpenLive(ifaceName string, opts LiveOptions) (*LiveCapture, error) {
 	return &LiveCapture{
 		file:      os.NewFile(uintptr(fd), dev),
 		ifaceName: ifaceName,
-		linkType:  LinkType(dlt & 0xffff),
+		linkType:  linkType,
 		snapLen:   normOpts.SnapLen,
 		buf:       make([]byte, actualBufLen),
 	}, nil
+}
+
+func darwinBPFLinkType(dlt uint32) (LinkType, error) {
+	// These Darwin SDK DLT constants are absent from syscall.
+	const dltIPv4, dltIPv6, dltLinuxSLL2 = 228, 229, 276
+	switch dlt {
+	case syscall.DLT_NULL:
+		return LinkTypeNull, nil
+	case syscall.DLT_EN10MB:
+		return LinkTypeEthernet, nil
+	case syscall.DLT_RAW:
+		return LinkTypeRaw, nil
+	case syscall.DLT_IEEE802_11:
+		return LinkTypeIEEE80211, nil
+	case syscall.DLT_LINUX_SLL:
+		return LinkTypeLinuxSLL, nil
+	case dltLinuxSLL2:
+		return LinkTypeLinuxSLL2, nil
+	case syscall.DLT_IEEE802_11_RADIO:
+		return LinkTypeIEEE80211RadioTap, nil
+	case dltIPv4:
+		return LinkTypeIPv4, nil
+	case dltIPv6:
+		return LinkTypeIPv6, nil
+	default:
+		return LinkTypeUnknown, fmt.Errorf("unsupported Darwin BPF datalink type %d", dlt)
+	}
 }
 
 // InterfaceName returns the bound network interface name.
@@ -161,7 +196,7 @@ func (lc *LiveCapture) InterfaceName() string {
 	return lc.ifaceName
 }
 
-// LinkType returns the link-layer encapsulation type reported by the interface.
+// LinkType returns the capture-file link type for the interface's encapsulation.
 func (lc *LiveCapture) LinkType() LinkType {
 	if lc == nil {
 		return LinkTypeUnknown
@@ -179,9 +214,10 @@ func (lc *LiveCapture) SnapLen() uint32 {
 	return lc.snapLen
 }
 
-// ReadPacket reads the next live packet from the kernel BPF buffer. The returned
-// byte slice aliases the LiveCapture's internal read buffer and remains valid
-// until the next call to ReadPacket.
+// ReadPacket reads the next live packet from the kernel BPF buffer using the
+// kernel timestamp in the BPF packet header. The returned byte slice aliases
+// the LiveCapture's internal read buffer and remains valid until the next call
+// to ReadPacket.
 func (lc *LiveCapture) ReadPacket() (PacketRecord, []byte, error) {
 	if lc == nil || lc.file == nil || len(lc.buf) == 0 {
 		return PacketRecord{}, nil, ErrInvalidHeader
@@ -225,4 +261,25 @@ func (lc *LiveCapture) statsDelta(fd int) (LiveStats, error) {
 		PacketsReceived: uint64(raw.Recv - uint32(lc.stats.PacketsReceived)),
 		PacketsDropped:  uint64(raw.Drop - uint32(lc.stats.PacketsDropped)),
 	}, nil
+}
+
+// Close closes the underlying live capture descriptor and unblocks any
+// concurrent ReadPacket call.
+func (lc *LiveCapture) Close() error {
+	if lc == nil || lc.file == nil {
+		return nil
+	}
+	lc.statsMu.Lock()
+	if lc.closed {
+		lc.statsMu.Unlock()
+		return nil
+	}
+	lc.closed = true
+	lc.statsMu.Unlock()
+
+	err := lc.file.Close()
+	if errors.Is(err, os.ErrClosed) {
+		return nil
+	}
+	return err
 }

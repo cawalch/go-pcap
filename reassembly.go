@@ -359,10 +359,19 @@ func (b *tcpFlowBudget) reassemble(side int, segments []TCPSegmentInput, remaini
 	return buf, err
 }
 
-type tcpFlowUsage struct {
+type tcpObservationKey struct {
+	flow        flowKey
+	interfaceID uint32
+}
+
+type tcpStreamOpening struct {
 	opening tcpOpening
-	budget  tcpFlowBudget
 	slot    int // One-based index of the current connection.
+}
+
+type tcpFlowUsage struct {
+	tcpStreamOpening
+	budget tcpFlowBudget
 }
 
 // streamMetadata describes the packet and byte boundaries used by dissectors.
@@ -425,6 +434,7 @@ func (wire *tcpWireDirection) add(end int, seq uint32, packet tcpPacketEvidence)
 // Streams reassembles TCP connections in order of their first observed packet.
 // An opening SYN after midstream traffic or with a different initial sequence
 // number starts a new connection on the same [FlowSummary].
+// Set [Capture.SeparateTCPInterfaces] to track openings per PcapNG interface.
 func (c *Capture) Streams(data []byte) ([]TCPStream, error) {
 	return collectStreams(ipFrameSource{capture: c, data: data}, 0, nil, false)
 }
@@ -436,6 +446,7 @@ func collectStreams(source ipFrameSource, port uint16, meta *[]streamMetadata, t
 	usage := inline[:0]
 	var collected []flowSegments
 	var wire []tcpWireCapture
+	var interfaces map[tcpObservationKey]*tcpStreamOpening
 
 	err := source.walk(func(pkt PacketRecord, frame Frame, l4 []byte) error {
 		key, canonical := makeCanonicalFlowKey(frame.IPProtocol, frame.SrcAddr, frame.SrcPort, frame.DstAddr, frame.DstPort)
@@ -454,11 +465,24 @@ func collectStreams(source ipFrameSource, port uint16, meta *[]streamMetadata, t
 			usage = append(usage, make([]tcpFlowUsage, flowIdx+1-len(usage))...)
 		}
 		state := &usage[flowIdx]
-		if changed := state.opening.observe(&frame, canonical); state.slot == 0 || changed {
+		active := &state.tcpStreamOpening
+		if pkt.InterfaceID != 0 && source.capture.SeparateTCPInterfaces {
+			if interfaces == nil {
+				interfaces = make(map[tcpObservationKey]*tcpStreamOpening)
+			}
+			key := tcpObservationKey{flow: key, interfaceID: pkt.InterfaceID}
+			active = interfaces[key]
+			if active == nil {
+				opening := new(tcpStreamOpening)
+				interfaces[key] = opening
+				active = opening
+			}
+		}
+		if changed := active.opening.observe(&frame, canonical); active.slot == 0 || changed {
 			if len(collected) >= MaxFlows {
 				return fmt.Errorf("%w: exceeds %d TCP connections", ErrFlowLimit, MaxFlows)
 			}
-			state.slot = len(collected) + 1
+			active.slot = len(collected) + 1
 			collected = append(collected, flowSegments{
 				flowIndex: flowIdx, firstPacket: pkt.Index,
 				srcAddr: frame.SrcAddr, dstAddr: frame.DstAddr,
@@ -472,14 +496,14 @@ func collectStreams(source ipFrameSource, port uint16, meta *[]streamMetadata, t
 		if err := state.budget.addSegment(tcpSide(canonical)); err != nil {
 			return err
 		}
-		entry := &collected[state.slot-1]
+		entry := &collected[active.slot-1]
 		dir, segments := 0, &entry.client
 		if canonical != entry.canonical {
 			dir, segments = 1, &entry.server
 		}
 		*segments = append(*segments, TCPSegmentInput{Seq: frame.TCPSeq, Flags: frame.TCPFlags, Payload: l4})
 		if trackWire {
-			wire[state.slot-1].observe(dir, len(*segments)-1, pkt.Index, &frame, len(l4) != 0)
+			wire[active.slot-1].observe(dir, len(*segments)-1, pkt.Index, &frame, len(l4) != 0)
 		}
 		return nil
 	})

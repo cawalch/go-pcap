@@ -504,7 +504,7 @@ func scanDNS(source ipFrameSource) ([]DNSRecord, error) {
 	var table flowIndexTable
 	var defrag ipFragAccumulator
 	var records []DNSRecord
-	var tcp tcpMessageCollector
+	tcp := tcpMessageCollector{separateInterfaces: source.capture != nil && source.capture.SeparateTCPInterfaces}
 
 	err := source.walk(func(pkt PacketRecord, frame Frame, l4 []byte) error {
 		key, _ := makeCanonicalFlowKey(frame.IPProtocol, frame.SrcAddr, frame.SrcPort, frame.DstAddr, frame.DstPort)
@@ -513,12 +513,13 @@ func scanDNS(source ipFrameSource) ([]DNSRecord, error) {
 			return err
 		}
 
-		if frame.Anomalies.IPFragment && frame.IPProtocol == IPProtoUDP {
+		if frame.mayContainUDPFragment() {
 			var ok bool
 			l4, frame.SrcPort, frame.DstPort, ok = defrag.addUDPFragment(&frame, l4)
 			if !ok {
 				return nil
 			}
+			frame.IPProtocol = IPProtoUDP
 		}
 
 		if !isDNSPort(frame.SrcPort) && !isDNSPort(frame.DstPort) {
@@ -590,7 +591,7 @@ func (c *Capture) HasDNSQuery(data []byte, qname string) (bool, error) {
 	r := SafeReader{data: data, size: int64(len(data))}
 	var defrag ipFragAccumulator
 	found := false
-	var tcp tcpMessageCollector
+	tcp := tcpMessageCollector{separateInterfaces: c.SeparateTCPInterfaces}
 
 	err := c.walkPackets(&r, func(pkt PacketRecord) error {
 		payload, err := r.Slice(pkt.PayloadOffset, pkt.PayloadLength)
@@ -598,10 +599,10 @@ func (c *Capture) HasDNSQuery(data []byte, qname string) (bool, error) {
 			return err
 		}
 		frame, err := DecodeFrame(payload, pkt.LinkType)
-		if err != nil || frame.IPVersion == 0 || frame.PayloadLength == 0 && frame.IPProtocol != IPProtoTCP {
+		if err != nil || frame.IPVersion == 0 {
 			return nil
 		}
-		if frame.Anomalies.IPFragment && frame.IPProtocol == IPProtoUDP {
+		if frame.mayContainUDPFragment() {
 			udpPayload, srcPort, dstPort, ok := defrag.addUDPFragment(&frame, payload[frame.PayloadOffset:frame.PayloadOffset+frame.PayloadLength])
 			if !ok || (!isDNSPort(srcPort) && !isDNSPort(dstPort)) {
 				return nil

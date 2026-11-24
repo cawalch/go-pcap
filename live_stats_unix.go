@@ -43,24 +43,3 @@ func (lc *LiveCapture) Stats() (LiveStats, error) {
 	lc.stats.PacketsDropped += delta.PacketsDropped
 	return lc.stats, nil
 }
-
-// Close closes the underlying live capture descriptor and unblocks any
-// concurrent ReadPacket call.
-func (lc *LiveCapture) Close() error {
-	if lc == nil || lc.file == nil {
-		return nil
-	}
-	lc.statsMu.Lock()
-	if lc.closed {
-		lc.statsMu.Unlock()
-		return nil
-	}
-	lc.closed = true
-	lc.statsMu.Unlock()
-
-	err := lc.file.Close()
-	if errors.Is(err, os.ErrClosed) {
-		return nil
-	}
-	return err
-}

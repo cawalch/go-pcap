@@ -8,14 +8,20 @@ import (
 // Collect only the TCP directions needed by a length-prefixed dissector.
 // Preserve first-seen order when applying the aggregate reassembly budget.
 type tcpMessageCollector struct {
-	flows      map[flowKey]tcpMessageFlow
-	directions []tcpMessageDirection
+	flows              map[flowKey]tcpMessageFlow
+	interfaces         map[tcpObservationKey]*tcpMessageOpening
+	directions         []tcpMessageDirection
+	separateInterfaces bool
+}
+
+type tcpMessageOpening struct {
+	opening    tcpOpening
+	directions [2]int // One-based direction indices for the current connection.
 }
 
 type tcpMessageFlow struct {
-	opening    tcpOpening
-	directions [2]int // One-based direction indices for the current connection.
-	budget     tcpFlowBudget
+	tcpMessageOpening
+	budget tcpFlowBudget
 }
 
 type tcpMessageDirection struct {
@@ -42,23 +48,36 @@ func (c *tcpMessageCollector) add(pkt PacketRecord, frame Frame, flow int, paylo
 	if !seen && len(c.flows) >= MaxFlows {
 		return ErrFlowLimit
 	}
-	if state.opening.observe(&frame, canonical) {
-		state.directions = [2]int{}
+	active := &state.tcpMessageOpening
+	if pkt.InterfaceID != 0 && c.separateInterfaces {
+		if c.interfaces == nil {
+			c.interfaces = make(map[tcpObservationKey]*tcpMessageOpening)
+		}
+		key := tcpObservationKey{flow: key, interfaceID: pkt.InterfaceID}
+		active = c.interfaces[key]
+		if active == nil {
+			opening := new(tcpMessageOpening)
+			c.interfaces[key] = opening
+			active = opening
+		}
+	}
+	if active.opening.observe(&frame, canonical) {
+		active.directions = [2]int{}
 	}
 	side := tcpSide(canonical)
 	if err := state.budget.addSegment(side); err != nil {
 		return err
 	}
-	if state.directions[side] == 0 {
+	if active.directions[side] == 0 {
 		if len(c.directions) >= 2*MaxFlows {
 			return ErrFlowLimit
 		}
 		c.directions = append(c.directions, tcpMessageDirection{
 			src: netip.AddrPortFrom(frame.SrcAddr, frame.SrcPort), dst: netip.AddrPortFrom(frame.DstAddr, frame.DstPort), flowIndex: flow,
 		})
-		state.directions[side] = len(c.directions)
+		active.directions[side] = len(c.directions)
 	}
-	dir := &c.directions[state.directions[side]-1]
+	dir := &c.directions[active.directions[side]-1]
 	c.flows[key] = state
 	dir.segments = append(dir.segments, TCPSegmentInput{Seq: frame.TCPSeq, Flags: frame.TCPFlags, Payload: payload})
 	dir.packets = append(dir.packets, messagePacket{pkt.Index, pkt.TimestampNs})

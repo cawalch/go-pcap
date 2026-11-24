@@ -42,13 +42,13 @@ jobs:
           done
       - name: Test 32-bit arithmetic
         run: GOARCH=386 go test ./...
-      - name: Test Linux live counters on loopback
+      - name: Test Linux live capture on loopback
         if: matrix.go == '1.26.x'
         run: |
           for arch in amd64 386; do
             GOARCH="$arch" go test -c -o "$RUNNER_TEMP/live.test" .
             sudo setcap cap_net_raw=ep "$RUNNER_TEMP/live.test"
-            "$RUNNER_TEMP/live.test" -test.v -test.run '^TestLive(StatsLoopback|LinuxTruncatedWireLength)$'
+            "$RUNNER_TEMP/live.test" -test.v -test.run '^TestLive(StatsLoopback|Linux.*|CaptureConcurrentCloseUnblocksReadPacket)$'
           done
       - name: Bounded fuzz smoke tests
         if: matrix.go == 'stable'
