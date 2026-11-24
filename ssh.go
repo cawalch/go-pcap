@@ -216,7 +216,7 @@ func (c *Capture) SSH(data []byte) ([]SSHRecord, error) {
 	// Accumulate JA4SSH statistics directly while walking packets without retaining segment slices.
 	r := SafeReader{data: data, size: int64(len(data))}
 	accByRecord := make([]ja4sshAccumulator, len(records))
-	active := make(map[flowKey]int)
+	active := make(map[tcpObservationKey]int)
 	next := 0
 	if err := c.walkPackets(&r, func(pkt PacketRecord) error {
 		payload, err := r.Slice(pkt.PayloadOffset, pkt.PayloadLength)
@@ -227,7 +227,11 @@ func (c *Capture) SSH(data []byte) ([]SSHRecord, error) {
 		if err != nil || frame.IPVersion == 0 || frame.IPProtocol != IPProtoTCP || !frame.hasPorts || frame.Anomalies.IPFragment {
 			return nil
 		}
-		key, _ := makeCanonicalFlowKey(frame.IPProtocol, frame.SrcAddr, frame.SrcPort, frame.DstAddr, frame.DstPort)
+		flow, _ := makeCanonicalFlowKey(frame.IPProtocol, frame.SrcAddr, frame.SrcPort, frame.DstAddr, frame.DstPort)
+		key := tcpObservationKey{flow: flow}
+		if c.SeparateTCPInterfaces {
+			key.interfaceID = pkt.InterfaceID
+		}
 		if next < len(meta) && meta[next].firstPacket == pkt.Index {
 			active[key] = recordByStream[next]
 			next++

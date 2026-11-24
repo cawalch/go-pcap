@@ -15,7 +15,9 @@ be added compatibly.
   order. The first observed direction defines the source and destination.
   `Streams` returns TCP connections in order of their first observed packet.
   Connections that reuse a five-tuple share a `FlowIndex`. This index refers
-  to the flow list, which can also contain UDP flows.
+  to the flow list, which can also contain UDP flows. When
+  `Capture.SeparateTCPInterfaces` tracks connections by PcapNG interface,
+  their flow indices still refer to this same capture-wide list.
   Reassembled bytes within a direction follow TCP sequence order. A gap sets
   `SequenceGap` and concatenates the available ranges.
 - DNS capture records follow packet-index order. DHCPv4 and neighbor records

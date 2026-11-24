@@ -504,7 +504,7 @@ func scanDNS(source ipFrameSource) ([]DNSRecord, error) {
 	var table flowIndexTable
 	var defrag ipFragAccumulator
 	var records []DNSRecord
-	var tcp tcpMessageCollector
+	tcp := tcpMessageCollector{separateInterfaces: source.capture != nil && source.capture.SeparateTCPInterfaces}
 
 	err := source.walk(func(pkt PacketRecord, frame Frame, l4 []byte) error {
 		key, _ := makeCanonicalFlowKey(frame.IPProtocol, frame.SrcAddr, frame.SrcPort, frame.DstAddr, frame.DstPort)
@@ -591,7 +591,7 @@ func (c *Capture) HasDNSQuery(data []byte, qname string) (bool, error) {
 	r := SafeReader{data: data, size: int64(len(data))}
 	var defrag ipFragAccumulator
 	found := false
-	var tcp tcpMessageCollector
+	tcp := tcpMessageCollector{separateInterfaces: c.SeparateTCPInterfaces}
 
 	err := c.walkPackets(&r, func(pkt PacketRecord) error {
 		payload, err := r.Slice(pkt.PayloadOffset, pkt.PayloadLength)

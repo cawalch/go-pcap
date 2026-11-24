@@ -160,6 +160,12 @@ type Capture struct {
 	InterfaceStats []InterfaceStatistics
 	Processes      []ProcessEvent
 	PacketCount    int
+	// SeparateTCPInterfaces tracks TCP connections independently on each
+	// PcapNG interface for reassembly and JA4L. Set it before analysis when
+	// interfaces observe independent networks. The default combines interfaces
+	// so packets of one connection can be captured on different interfaces.
+	// Flow indices, packet totals and per-tuple reassembly limits are shared.
+	SeparateTCPInterfaces bool
 
 	fileSize       int64
 	declaredExtent uint64

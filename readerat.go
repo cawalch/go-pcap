@@ -251,7 +251,7 @@ func (c *Capture) FlowsFromReaderAt(r io.ReaderAt) ([]FlowSummary, error) {
 	}) {
 		return c.flowsFromRadiotapReader(r)
 	}
-	var acc flowAccumulator
+	acc := flowAccumulator{separateInterfaces: c.SeparateTCPInterfaces && len(c.Interfaces) > 1}
 	var header [256]byte
 	var scratch []byte
 	budget := scanReadBudget{r: r, remaining: MaxReaderAtScanBytes}
@@ -289,7 +289,7 @@ func (c *Capture) FlowsFromReaderAt(r io.ReaderAt) ([]FlowSummary, error) {
 // headers. Other captures use the direct loop without that recovery path.
 func (c *Capture) flowsFromRadiotapReader(r io.ReaderAt) ([]FlowSummary, error) {
 	budget := scanReadBudget{r: r, remaining: MaxReaderAtScanBytes}
-	var acc flowAccumulator
+	acc := flowAccumulator{separateInterfaces: c.SeparateTCPInterfaces && len(c.Interfaces) > 1}
 	err := c.walkFlowPrefixes(&budget, func(pkt PacketRecord, f Frame, prefix []byte) error {
 		return acc.observe(&pkt, &f, prefix)
 	})

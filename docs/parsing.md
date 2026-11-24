@@ -393,7 +393,14 @@ increment `ServerPackets` and `ServerBytes`. For TCP flows, `Flows` records:
 
 - `ServerJA4L` (`<half_syn_synack_rtt_us>_<server_ttl>`) and `ClientJA4L`
   (`<half_synack_ack_rtt_us>_<client_ttl>`) from the 3-way handshake timestamps
-  and IP `TTL` / `HopLimit`.
+  and IP `TTL` / `HopLimit`. Both values come from the first matching 3-way
+  handshake completed in capture order. The SYN sender defines the client
+  for these samples. If no handshake completes, `ServerJA4L` uses the first
+  matching SYN and SYN-ACK pair. Matching retransmissions keep the first
+  timestamp, and a reset clears the pending opening. Both flow readers use
+  the same selection. With `SeparateTCPInterfaces` enabled, packets must
+  match on the same interface. The scan limits pending interface-specific
+  handshakes to `MaxFlows`.
 - First-seen process attribution (`ProcessID`, `UserID`, `ProcessName`,
   `ProcessArgs`, and `ContainerID`). The first packet with attribution supplies
   these fields. Later packets can fill missing fields when they carry the same
@@ -459,6 +466,27 @@ SYN retransmission stays in its connection. Each connection uses its first
 observed packet to define the client direction. Connections that reuse a
 five-tuple share the same `FlowIndex` and directional segment and byte limits.
 Without a new opening SYN, tuple reuse can be indistinguishable from a gap.
+
+By default, TCP reassembly combines observations across capture interfaces.
+This lets you recover a connection when its packets were captured on different
+interfaces. When the PcapNG interfaces observe independent networks, set
+`capture.SeparateTCPInterfaces` before calling a stream-based analyzer. It
+tracks connections by the capture-wide `PacketRecord.InterfaceID` as well as
+by the five-tuple. The flow index and packet totals still cover the entire
+capture. All connections on that tuple share the directional segment and byte
+limits.
+
+For example, if `capture` was parsed from `data`, recover HTTP/1 requests and
+responses separately for each interface.
+
+```go
+capture.SeparateTCPInterfaces = true
+records, err := capture.HTTP(data)
+```
+
+Set the same field on a capture from `NewFromReaderAt` before calling
+`HTTPRequestsFromReaderAt` to get packet-attributed requests. Look up each
+observation's `PacketIndex` in the packet records to identify its interface.
 
 ## Parse DNS messages and tunneling metrics
 

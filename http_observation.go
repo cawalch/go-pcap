@@ -36,7 +36,7 @@ func (c *Capture) HTTPRequestsFromReaderAt(r io.ReaderAt) ([]HTTPRequestObservat
 
 func scanHTTPRequests(source ipFrameSource) ([]HTTPRequestObservation, error) {
 	var table flowIndexTable
-	var collector tcpMessageCollector
+	collector := tcpMessageCollector{separateInterfaces: source.capture != nil && source.capture.SeparateTCPInterfaces}
 	remaining := MaxTotalStreamBytes
 	err := source.walk(func(pkt PacketRecord, f Frame, payload []byte) error {
 		key, _ := makeCanonicalFlowKey(f.IPProtocol, f.SrcAddr, f.SrcPort, f.DstAddr, f.DstPort)

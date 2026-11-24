@@ -9,11 +9,13 @@ import (
 func handshakeFrame(port uint16, flags uint8, opts []byte) []byte {
 	src, dst := [4]byte{10, 0, 0, 1}, [4]byte{10, 0, 0, 2}
 	sport, dport := port, uint16(443)
+	var ack uint32
 	if flags&TCPFlagSYN != 0 && flags&TCPFlagACK != 0 {
 		src, dst = dst, src
 		sport, dport = dport, sport
+		ack = 2 // Acknowledge the opening SYN at sequence 1.
 	}
-	frame := buildEthernetIPv4TCPFrame(src, dst, sport, dport, 1, 0, flags, opts)
+	frame := buildEthernetIPv4TCPFrame(src, dst, sport, dport, 1, ack, flags, opts)
 	frame[46] = byte(5+len(opts)/4) << 4
 	return frame
 }
