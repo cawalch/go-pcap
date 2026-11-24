@@ -177,7 +177,7 @@ func computeHASSH(kex, enc, mac, comp string) string {
 // JA4SSH session fingerprints across all TCP flows in the capture.
 func (c *Capture) SSH(data []byte) ([]SSHRecord, error) {
 	var meta []streamMetadata
-	streams, err := collectStreams(ipFrameSource{capture: c, data: data}, 0, &meta, false)
+	streams, err := collectStreams(ipFrameSource{capture: c, data: data}, 0, &meta, tcpWireNone)
 	if err != nil {
 		return nil, err
 	}

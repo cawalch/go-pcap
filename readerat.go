@@ -335,6 +335,7 @@ func completeFlowPrefix(f *Frame, prefix []byte, captured int64) (complete bool,
 		return false, 0
 	}
 	f.Anomalies.IPTotalLengthExceedsFrame = end > captured
+	f.ipMissingBytes = uint16(max(0, end-captured))
 	ipBound := min(end, captured)
 	payloadBound := ipBound
 	if transport == LayerUDP {
@@ -384,7 +385,7 @@ func (c *Capture) DNSFromReaderAt(r io.ReaderAt) ([]DNSRecord, error) {
 // TLSFromReaderAt extracts TLS handshakes and fingerprints from reassembled
 // TCP payloads on any port under [MaxReaderAtScanBytes].
 func (c *Capture) TLSFromReaderAt(r io.ReaderAt) ([]TLSRecord, error) {
-	streams, err := collectStreams(ipFrameSource{capture: c, reader: r, needsPayload: func(f Frame, _ []byte) bool { return f.IPProtocol == IPProtoTCP }}, 0, nil, false)
+	streams, err := collectStreams(ipFrameSource{capture: c, reader: r, needsPayload: func(f Frame, _ []byte) bool { return f.IPProtocol == IPProtoTCP }}, 0, nil, tcpWireNone)
 	if err != nil {
 		return nil, err
 	}

@@ -59,6 +59,7 @@ type Frame struct {
 	IPID            uint32
 	IPFragOffset    uint16 // Fragment offset in bytes (8-byte units * 8)
 	IPMoreFragments bool
+	ipMissingBytes  uint16 // Uncaptured bytes declared by the innermost IP header.
 	SrcAddr         netip.Addr
 	DstAddr         netip.Addr
 
@@ -449,10 +450,12 @@ func decodeIPv4(r *SafeReader, offset, bound int64, f *Frame) {
 		return
 	}
 	ipBound := bound
+	f.ipMissingBytes = 0
 	if offset+totalLen <= bound {
 		ipBound = offset + totalLen
 	} else {
 		f.Anomalies.IPTotalLengthExceedsFrame = true
+		f.ipMissingBytes = uint16(offset + totalLen - bound)
 	}
 
 	ipID := binary.BigEndian.Uint16(ip[4:6])
@@ -503,11 +506,13 @@ func decodeIPv6(r *SafeReader, offset, bound int64, f *Frame) {
 	hopLimit := r.data[offset+7]
 
 	ipBound := bound
+	f.ipMissingBytes = 0
 	declaredEnd := offset + 40 + int64(payloadLenU16)
 	if declaredEnd <= bound {
 		ipBound = declaredEnd
 	} else {
 		f.Anomalies.IPTotalLengthExceedsFrame = true
+		f.ipMissingBytes = uint16(declaredEnd - bound)
 	}
 
 	resetTransportFields(f)
