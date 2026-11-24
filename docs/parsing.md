@@ -1079,14 +1079,26 @@ are capture-wide and can describe other flows. Classic PCAP input becomes a
 single-interface PcapNG capture. An absent flow returns `ErrOutOfBounds`
 before writing output.
 
+Use `ExtractFlowPacketsPCAPNG(data, w, flowIndex)` to export only the selected
+packets and the container fields needed to interpret them. The export keeps
+packet order, captured bytes, captured and original lengths, timestamps,
+and the interfaces used by the packets. It retains PcapNG timestamp resolution
+and offset and any declared frame check sequence (FCS) length. A Simple Packet
+Block remains timestamp-free. The export omits unused sections and interfaces,
+name records, decryption secrets, interface statistics, process information,
+comments, descriptions, and other options. Packet headers and payloads still
+contain the original endpoints and application data.
+
 For a file opened with `NewFromReaderAt`, pass the same unchanged file to
-`ExtractFlowPCAPNGFromReaderAt(r, w, flowIndex)`. The method reads frame
-prefixes to identify flows. For PcapNG it then copies selected blocks in
-chunks of up to 32 KiB and skips unrelated packet bodies. Classic PCAP
-conversion buffers one selected packet at a time. All source reads during the
-export share the 64 MiB `MaxReaderAtScanBytes` budget, including copied metadata
-and repeated reads. Budget exhaustion returns `ErrPacketLimit`. Discard partial
-output after a read, write, or budget error.
+`ExtractFlowPCAPNGFromReaderAt(r, w, flowIndex)` or
+`ExtractFlowPacketsPCAPNGFromReaderAt(r, w, flowIndex)`. Both methods read
+frame prefixes to identify flows and skip unrelated packet bodies. The
+preserving method copies selected PcapNG blocks in chunks of up to 32 KiB.
+The packet-only method rebuilds container blocks and copies selected packet
+bytes in chunks of up to 32 KiB. All source reads during the export share the
+64 MiB `MaxReaderAtScanBytes` budget, including metadata and repeated reads.
+Budget exhaustion returns `ErrPacketLimit`. Discard partial output after a
+read, write, or budget error.
 
 ## Capture live interface traffic
 

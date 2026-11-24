@@ -76,6 +76,7 @@ const (
 	optIDBDescription uint16 = 3
 	optIDBTsResol     uint16 = 9
 	optIDBOS          uint16 = 12
+	optIDBFCSLen      uint16 = 13
 	optIDBTsOffset    uint16 = 14
 
 	// Enhanced Packet Block (EPB) options.
