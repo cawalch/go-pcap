@@ -91,9 +91,14 @@ GOWORK="$workdir/go.work" go test -run '^$' -bench '^BenchmarkClientDNS$' -bench
 
 The fixtures contain 32 synthetic DNS responses each. One has A and CNAME
 records, and the other has HTTPS (type 65) records with placeholder ECH bytes.
-Before opening a capture-reader or DNS decoder PR, use separate Go workspaces
-for the baseline and candidate checkouts and compare the same consumer
-benchmark and fixtures on native AMD64 and ARM64.
+
+When comparing capture-reader changes, use separate Go workspaces for the
+baseline and candidate and run the same benchmark and fixtures on native AMD64
+and ARM64. Alternate which revision runs first in each pair and check an
+unchanged-source control before interpreting the results. On Linux, build with
+`go test -c` and overwrite the same executable file between runs to keep the
+path and inode fixed. Separate executable files produced different timings in
+an unchanged-source control.
 
 CI tests the Go 1.26 compatibility floor and the current stable toolchain.
 Use the patched release for each line when reproducing a result. The Linux
