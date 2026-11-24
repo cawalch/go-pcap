@@ -87,7 +87,7 @@ func (c *tcpMessageCollector) add(pkt PacketRecord, frame Frame, flow int, paylo
 // Attribute each message to the packet supplying the first byte of its
 // length prefix. Stop at a gap because framing beyond it is unknown.
 func (c *tcpMessageCollector) walk(prefix, minSize, maxSize int, visit func(*tcpMessageDirection, messagePacket, []byte) error) error {
-	return c.walkContiguous(func(dir *tcpMessageDirection, data []byte, spans []packetSpan) error {
+	return c.walkContiguous(func(dir *tcpMessageDirection, data []byte, spans []packetSpan, _ StreamAnomalies) error {
 		spanIndex := 0
 		for off := 0; len(data)-off >= prefix; {
 			var length uint32
@@ -112,10 +112,13 @@ func (c *tcpMessageCollector) walk(prefix, minSize, maxSize int, visit func(*tcp
 	})
 }
 
-type packetSpan struct{ end, segment int }
+type packetSpan struct {
+	end          int
+	segment, seq uint32
+}
 
 // Supply the contiguous prefix and the contributing segment for each byte range.
-func (c *tcpMessageCollector) walkContiguous(visit func(*tcpMessageDirection, []byte, []packetSpan) error) error {
+func (c *tcpMessageCollector) walkContiguous(visit func(*tcpMessageDirection, []byte, []packetSpan, StreamAnomalies) error) error {
 	remaining := int64(MaxTotalStreamBytes)
 	var spans []packetSpan
 	for i := range c.directions {
@@ -127,10 +130,10 @@ func (c *tcpMessageCollector) walkContiguous(visit func(*tcpMessageDirection, []
 		gapSeen := false
 		key, canonical := makeCanonicalFlowKey(IPProtoTCP, dir.src.Addr(), dir.src.Port(), dir.dst.Addr(), dir.dst.Port())
 		state := c.flows[key]
-		buf, err := state.budget.reassemble(tcpSide(canonical), dir.segments, &remaining, func(segment, end int, _ uint32, gap bool) {
+		buf, err := state.budget.reassemble(tcpSide(canonical), dir.segments, &remaining, func(segment, end int, seq uint32, gap bool) {
 			gapSeen = gapSeen || gap
 			if !gapSeen {
-				spans = append(spans, packetSpan{end, segment})
+				spans = append(spans, packetSpan{end: end, segment: uint32(segment), seq: seq})
 			}
 		})
 		if err != nil {
@@ -141,7 +144,7 @@ func (c *tcpMessageCollector) walkContiguous(visit func(*tcpMessageDirection, []
 			continue
 		}
 		data := buf.Data[:spans[len(spans)-1].end]
-		if err := visit(dir, data, spans); err != nil {
+		if err := visit(dir, data, spans, buf.Anomalies); err != nil {
 			return err
 		}
 	}

@@ -28,6 +28,9 @@ be added compatibly.
   and client before server messages within a stream. Within a direction
   messages appear on completion, so a ping can precede an interrupted text
   message. Use packet indexes when correlating different record families.
+- Cleartext HTTP/1 request evidence follows packet-index and then TCP
+  payload-offset order. These two fields identify a request start within a
+  capture, including when multiple requests start in one packet.
 
 ## Inputs and payloads
 
@@ -36,6 +39,7 @@ be added compatibly.
 | `New`, `NewWithLength`, `NewFromReaderAt`, `Open` | The capture owns its metadata snapshot, including copied decryption secrets. Supply the same underlying capture contents to later scans. Keep a ReaderAt available and its size and bytes stable throughout use. Concurrent reads of a capture require its exported fields to remain unmodified. |
 | `PacketPayload`, `SafeReader.Slice`, `UnwrapProxyStream` | The returned views borrow the input bytes. Copy before reusing or modifying the backing buffer if you need to retain the original content. |
 | `PacketPayloadFromReaderAt`, `ReassembleTCP`, `ParseWebSocketFrames` | The returned frame, stream data, and message payloads respectively survive reuse of the supplied input. |
+| `HTTP1RequestEvidence`, `HTTP1RequestEvidenceFromReaderAt` | The returned headers and body survive reuse of the supplied input. |
 | `DecompressCapture` | Plain input passes through by reference. A successful gzip decode returns decompressed bytes. |
 | `LiveCapture.ReadPacket` | For portable code, copy a packet that must survive the next read. The macOS backend reuses its buffer. |
 
@@ -57,6 +61,7 @@ from a failed call.
 | TCP reassembly | A directional byte cap produces a bounded stream with `Anomalies.Truncated`. Exceeding `MaxSegmentsPerFlow` in `ReassembleTCP` returns `ErrReassemblyLimit`. |
 | Direct protocol parsing | A short DNS header returns `ErrInvalidDNS`. Excessive advertised question counts return `ErrDNSLimit`. `ParseWebSocketFrames` returns preceding complete messages plus `ErrInvalidWebSocket` for malformed or truncated input. Frame-count exhaustion returns `ErrWebSocketLimit`. |
 | Combined web scan | `WebWithWebSockets` discards both results if an analysis fails. Capture-level dissectors may skip malformed or incomplete protocol observations as documented. |
+| HTTP/1 request evidence | The scan discards its result on a read or limit error. A parsed request with an incomplete, malformed, or unsupported body reports its state in `BodyState`. |
 
 Use the named limits for the selected parser. A change that makes a
 previously accepted input exceed a limit warrants a compatibility review.

@@ -636,6 +636,7 @@ func TestReaderAtProtocolErrors(t *testing.T) {
 	checkProtocolErrors(t, c.DNS, c.DNSFromReaderAt, bad, injected)
 	checkProtocolErrors(t, c.TLS, c.TLSFromReaderAt, bad, injected)
 	checkProtocolErrors(t, c.QUIC, c.QUICFromReaderAt, bad, injected)
+	checkProtocolErrors(t, c.HTTP1RequestEvidence, c.HTTP1RequestEvidenceFromReaderAt, bad, injected)
 }
 
 func checkProtocolErrors[T any](t *testing.T, slice func([]byte) ([]T, error), reader func(io.ReaderAt) ([]T, error), bad []byte, injected error) {
