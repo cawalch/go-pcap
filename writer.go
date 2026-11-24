@@ -446,9 +446,13 @@ func writePCAPNGBlockLE(buf *bytes.Buffer, blockType uint32, body []byte) {
 }
 
 func writePCAPNGOptionLE(buf *bytes.Buffer, code uint16, val []byte) {
+	writePCAPNGOption(buf, binary.LittleEndian, code, val)
+}
+
+func writePCAPNGOption(buf *bytes.Buffer, order binary.ByteOrder, code uint16, val []byte) {
 	var hdr [4]byte
-	binary.LittleEndian.PutUint16(hdr[0:2], code)
-	binary.LittleEndian.PutUint16(hdr[2:4], uint16(len(val)))
+	order.PutUint16(hdr[0:2], code)
+	order.PutUint16(hdr[2:4], uint16(len(val)))
 	buf.Write(hdr[:])
 	buf.Write(val)
 	if rem := len(val) % 4; rem != 0 {

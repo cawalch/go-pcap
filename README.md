@@ -84,8 +84,25 @@ func main() {
 | Which device requested this address? | Read lease observations with `DHCPv4`. [Address assignments](docs/parsing.md#dhcpv4-address-assignments) |
 | What did the client offer during the handshake? | Inspect server names and fingerprints with `TLS` or `QUIC`. [TLS handshakes](docs/parsing.md#parse-tls-handshakes-and-ja4-fingerprints) |
 | What did the web client request? | Use `Web` for HTTP/1, HTTP/2 and TLS records. [Web traffic and decryption](docs/parsing.md#parse-http-messages-and-carve-payloads) |
-| How do I share one connection? | Call `ExtractFlowPCAPNG`. Check for capture-wide names and decryption secrets before sharing. [Flow export](docs/parsing.md#write-captures) |
+| How do I share one connection? | Call `ExtractFlowPacketsPCAPNG` to keep selected packets and omit capture-wide names and decryption secrets. [Packet-only export](#share-packets-from-one-flow) |
 | How do I collect packets on a host? | Open an interface with `OpenLive`. [Live capture](docs/parsing.md#capture-live-interface-traffic) |
+
+## Share packets from one flow
+
+Use the zero-based flow index from `Flows`. For example, pass `0` to export
+the first flow from the capture bytes you used to open `c`.
+
+```go
+var out bytes.Buffer
+if err := c.ExtractFlowPacketsPCAPNG(data, &out, 0); err != nil {
+	log.Fatal(err)
+}
+```
+
+The export omits capture-wide metadata such as names, process information,
+and decryption secrets. Packet headers and payloads still contain the original
+endpoints and application data. The ReaderAt variant uses the same policy for
+large files. [Flow export](docs/parsing.md#write-captures) · [Runnable example](example_test.go)
 
 ## Choose an input
 

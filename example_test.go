@@ -334,6 +334,25 @@ func ExampleCapture_ExtractFlowPCAPNGFromReaderAt() {
 	// Output: pcapng 1 en0
 }
 
+func ExampleCapture_ExtractFlowPacketsPCAPNG() {
+	data := buildExamplePCAPNG()
+	c, err := pcap.New(data)
+	if err != nil {
+		log.Fatal(err)
+	}
+	var out bytes.Buffer
+	// The packet headers and payloads retain the endpoints and application data.
+	if err := c.ExtractFlowPacketsPCAPNG(data, &out, 0); err != nil {
+		log.Fatal(err)
+	}
+	selected, err := pcap.New(out.Bytes())
+	if err != nil {
+		log.Fatal(err)
+	}
+	fmt.Printf("%s packets=%d interface name=%q\n", selected.Format, selected.PacketCount, selected.Interfaces[0].Name)
+	// Output: pcapng packets=1 interface name=""
+}
+
 func ExampleParseHTTP2Frames_headers() {
 	// Indexed GET, http and / fields from the HPACK static table.
 	data := append(bytes.Clone(pcap.HTTP2ClientPreface), 0, 0, 3, 1, 4, 0, 0, 0, 1, 0x82, 0x86, 0x84)
