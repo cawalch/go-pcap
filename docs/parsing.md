@@ -737,6 +737,7 @@ returns both input slices and `false`.
 | --- | --- |
 | Which packet started each request? | `HTTPRequests` for cleartext HTTP/1 and HTTP/2. [Request timeline](#locate-individual-http-requests-in-a-capture) |
 | What headers and entity bytes belong to this request? | `HTTP1RequestEvidence` for cleartext HTTP/1, including body completeness. [Request evidence](#inspect-cleartext-http1-request-evidence) |
+| Which response belongs to this request, and which packets carry the exchange? | Use `HTTP1Transactions` to select a cleartext HTTP/1 exchange, then export it to PcapNG. [Transaction selection](#select-and-export-a-cleartext-http1-transaction) |
 | What did the client and server exchange? | `HTTP` for HTTP/1 requests, responses, JA4H and carved bodies. `HTTP2` for frames and stream headers. Both support cleartext and keyed TLS. |
 | Do I need TLS and both HTTP versions? | `Web` shares reassembly and decryption across all three results. |
 
@@ -833,6 +834,51 @@ needs a recognizable request at the start of the observed prefix.
 `MaxTotalStreamBytes` includes retransmitted input, and `MaxHTTPMessagesPerScan`
 bounds the output. HTTP decoding and ReaderAt read limits also apply. An error
 discards the result.
+
+### Select and export a cleartext HTTP/1 transaction
+
+Use `HTTP1Transactions` or `HTTP1TransactionsFromReaderAt` to list requests.
+Select a row by its raw request target, authority, or other evidence. Pass
+`tx.ID()` to `ExtractHTTP1TransactionPCAPNG` or its `FromReaderAt` variant,
+using the same capture and unchanged source. The ID identifies the request's
+first byte by original packet index and offset within its TCP payload. Opening
+the exported file assigns new packet indices.
+
+A confirmed response requires the opening SYN and matching SYN-ACK, contiguous
+HTTP framing in both directions through the exchange, and consistent TCP
+acknowledgements. The scanner pairs pipelined requests in order. An interim
+response such as `100 Continue` keeps its request pending. A response to
+`HEAD`, or one with status 204 or 304, ends at its headers. Examine `Pairing`
+when `Response` is nil. `HTTP1ResponseUnseen` means no final response was
+observed for this request. `HTTP1ResponseAmbiguous` means the reverse stream
+contains bytes the scanner could not associate reliably. A midstream capture
+can therefore yield a request and no confirmed response.
+
+Request and response locations point to the first byte of their respective
+start lines. Packet indices describe the wire bytes used for reconstruction.
+For gzip or chunked content, inspect `BodyState` before using the decoded
+body. Decoded entity offsets cannot address the source capture. A
+close-delimited response needs an observed TCP FIN at the end of its body to
+establish completeness.
+
+Check these fields before sharing an export.
+
+- `SharedPackets` means a contributing packet carries TCP payload outside the
+  selected message ranges. Export preserves the entire original frame.
+- `ExportIncludesPriorMessages` means the selection includes earlier HTTP
+  data to preserve request boundaries or reproduce the response pairing.
+  For example, reconstructing the second pipelined exchange can require the
+  first exchange. `PacketIndices` lists the packets supporting the selected
+  exchange. The exported file also carries any required context.
+
+The exported PcapNG retains original endpoints and payloads and omits
+capture-wide names and decryption secrets. If the response is ambiguous,
+export preserves the request side. Reopening that file cannot establish the
+response that was missing in the original.
+
+The [runnable selection example](../example_test.go) exports an exchange on a
+reused TCP tuple. The [reference capture](../testdata/deployments/README.md)
+also includes a pipelined request, an interim response, and a capture gap.
 
 ### Inspect cleartext HTTP/1 request evidence
 

@@ -353,6 +353,33 @@ func ExampleCapture_ExtractFlowPacketsPCAPNG() {
 	// Output: pcapng packets=1 interface name=""
 }
 
+func ExampleCapture_ExtractHTTP1TransactionPCAPNG() {
+	data, err := os.ReadFile("testdata/deployments/http1-transactions.pcapng")
+	if err != nil {
+		log.Fatal(err)
+	}
+	c, err := pcap.New(data)
+	if err != nil {
+		log.Fatal(err)
+	}
+	rows, err := c.HTTP1Transactions(data)
+	if err != nil {
+		log.Fatal(err)
+	}
+	for _, tx := range rows {
+		if tx.Request.Target != "/reused" || tx.Response == nil {
+			continue
+		}
+		var selected bytes.Buffer
+		if err := c.ExtractHTTP1TransactionPCAPNG(data, &selected, tx.ID()); err != nil {
+			log.Fatal(err)
+		}
+		fmt.Printf("%s %s: %d %q\n", tx.Request.Method, tx.Request.Target,
+			tx.Response.StatusCode, tx.Response.Body)
+	}
+	// Output: GET /reused: 200 "reused"
+}
+
 func ExampleParseHTTP2Frames_headers() {
 	// Indexed GET, http and / fields from the HPACK static table.
 	data := append(bytes.Clone(pcap.HTTP2ClientPreface), 0, 0, 3, 1, 4, 0, 0, 0, 1, 0x82, 0x86, 0x84)

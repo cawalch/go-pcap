@@ -82,65 +82,11 @@ func scanHTTP1RequestEvidence(source ipFrameSource) ([]HTTP1RequestEvidence, err
 		return nil, err
 	}
 	var rows []HTTP1RequestEvidence
-	bodyBudget := httpDecodeBudget{remaining: MaxHTTPDecodedBodyBytesPerScan}
-	remaining := MaxHTTP1RequestEvidenceBytesPerScan
+	budget := newHTTP1EvidenceBudget()
 	err = collector.walkContiguous(func(dir *tcpMessageDirection, stream []byte, spans []packetSpan, anomalies StreamAnomalies) error {
-		spanIndex, spanStart := 0, 0
-		for off := 0; off < len(stream); {
-			data := stream[off:]
-			req, lineEnd, err := parseHTTPRequestLine(data)
-			if err != nil || req.Version[2] < '0' || req.Version[2] > '9' ||
-				strings.IndexFunc(req.Path, func(r rune) bool { return r <= ' ' || r == 0x7f }) >= 0 {
-				break
-			}
-			headers, bodyStart, framing, err := parseHTTPHeaders(data, lineEnd+2, true)
-			if errors.Is(err, ErrHTTPLimit) {
-				return err
-			}
-			if err != nil {
-				break
-			}
-			if len(rows) >= MaxHTTPMessagesPerScan || bodyStart > remaining {
-				return ErrHTTPLimit
-			}
-			remaining -= bodyStart
-			for spans[spanIndex].end <= off {
-				spanStart = spans[spanIndex].end
-				spanIndex++
-			}
-			span := spans[spanIndex]
-			packet := dir.packets[span.segment]
-			segment := dir.segments[span.segment]
-			seq := segment.Seq
-			if segment.Flags&TCPFlagSYN != 0 {
-				seq++
-			}
-			row := HTTP1RequestEvidence{
-				PacketIndex: packet.index, PacketPayloadOffset: int(span.seq-seq) + off - spanStart,
-				FlowIndex: dir.flowIndex, TimestampNs: packet.timestamp, Source: dir.src, Destination: dir.dst,
-				Method: req.Method, Target: req.Path, Version: req.Version, Headers: headers,
-				Anomalies: framing.anomalies, TCPAnomalies: anomalies,
-			}
-			var host string
-			var hostSeen, upgrade bool
-			for _, h := range headers {
-				if !hostSeen && strings.EqualFold(h.Name, "Host") {
-					host, hostSeen = strings.Trim(h.Value, " \t"), true
-				}
-				upgrade = upgrade || strings.EqualFold(h.Name, "Upgrade")
-			}
-			row.Authority = httpRequestAuthority(req.Method, req.Path, host)
-			body := framing.body(data, bodyStart, true)
-			if err := row.retainBody(body, framing, &bodyBudget, &remaining); err != nil {
-				return err
-			}
+		return walkHTTP1Evidence(dir, stream, spans, anomalies, &budget, func(row HTTP1RequestEvidence, _, _ int, _ bool) {
 			rows = append(rows, row)
-			if req.Method == "CONNECT" || upgrade || body.malformed {
-				break
-			}
-			off += body.consumed
-		}
-		return nil
+		})
 	})
 	if err != nil {
 		return nil, err
@@ -152,6 +98,88 @@ func scanHTTP1RequestEvidence(source ipFrameSource) ([]HTTP1RequestEvidence, err
 		return cmp.Compare(a.PacketPayloadOffset, b.PacketPayloadOffset)
 	})
 	return rows, nil
+}
+
+type http1EvidenceBudget struct {
+	messages, remaining int
+	decode              httpDecodeBudget
+}
+
+func newHTTP1EvidenceBudget() http1EvidenceBudget {
+	return http1EvidenceBudget{remaining: MaxHTTP1RequestEvidenceBytesPerScan, decode: httpDecodeBudget{remaining: MaxHTTPDecodedBodyBytesPerScan}}
+}
+
+func (b *http1EvidenceBudget) charge(headers int) error {
+	if b.messages >= MaxHTTPMessagesPerScan || headers > b.remaining {
+		return ErrHTTPLimit
+	}
+	b.messages++
+	b.remaining -= headers
+	return nil
+}
+
+// Visit each request with its known wire interval in stream sequence order.
+func walkHTTP1Evidence(dir *tcpMessageDirection, stream []byte, spans []packetSpan, anomalies StreamAnomalies, budget *http1EvidenceBudget, visit func(HTTP1RequestEvidence, int, int, bool)) error {
+	spanIndex, spanStart := 0, 0
+	for off := 0; off < len(stream); {
+		data := stream[off:]
+		req, lineEnd, err := parseHTTPRequestLine(data)
+		if err != nil || req.Version[2] < '0' || req.Version[2] > '9' ||
+			strings.IndexFunc(req.Path, func(r rune) bool { return r <= ' ' || r == 0x7f }) >= 0 {
+			break
+		}
+		headers, bodyStart, framing, err := parseHTTPHeaders(data, lineEnd+2, true)
+		if errors.Is(err, ErrHTTPLimit) {
+			return err
+		}
+		if err != nil {
+			break
+		}
+		if err := budget.charge(bodyStart); err != nil {
+			return err
+		}
+		for spans[spanIndex].end <= off {
+			spanStart = spans[spanIndex].end
+			spanIndex++
+		}
+		span := spans[spanIndex]
+		packet := dir.packets[span.segment]
+		segment := dir.segments[span.segment]
+		seq := segment.Seq
+		if segment.Flags&TCPFlagSYN != 0 {
+			seq++
+		}
+		row := HTTP1RequestEvidence{
+			PacketIndex: packet.index, PacketPayloadOffset: int(span.seq-seq) + off - spanStart,
+			FlowIndex: dir.flowIndex, TimestampNs: packet.timestamp, Source: dir.src, Destination: dir.dst,
+			Method: req.Method, Target: req.Path, Version: req.Version, Headers: headers,
+			Anomalies: framing.anomalies, TCPAnomalies: anomalies,
+		}
+		var host string
+		var hostSeen, upgrade bool
+		for _, h := range headers {
+			if !hostSeen && strings.EqualFold(h.Name, "Host") {
+				host, hostSeen = strings.Trim(h.Value, " \t"), true
+			}
+			upgrade = upgrade || strings.EqualFold(h.Name, "Upgrade")
+		}
+		row.Authority = httpRequestAuthority(req.Method, req.Path, host)
+		body := framing.body(data, bodyStart, true)
+		if err := row.retainBody(body, framing, &budget.decode, &budget.remaining); err != nil {
+			return err
+		}
+		end := body.consumed
+		known := !body.malformed && (!framing.hasTransfer || framing.chunked)
+		if !known {
+			end = max(bodyStart, body.invalidEnd)
+		}
+		visit(row, off, off+end, known)
+		if req.Method == "CONNECT" || upgrade || body.malformed {
+			break
+		}
+		off += body.consumed
+	}
+	return nil
 }
 
 func httpRequestAuthority(method, target, host string) string {

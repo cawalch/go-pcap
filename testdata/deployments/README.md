@@ -126,3 +126,28 @@ The four unambiguous pairs have elapsed times of 8 ms, 5 ms, 1.2 s and 6 ms
 in query order. TShark associates frame 11 with frame 9. Frame 10 carries
 the same question and ID, so the go-pcap example leaves the pair ambiguous.
 See the [transaction walkthrough](../../docs/parsing.md#diagnose-dns-transactions).
+
+## HTTP/1 transaction fixture
+
+`http1-transactions.pcapng` contains 20 synthetic Ethernet frames across two
+interfaces. Regenerate it with the same script. Run TShark in two-pass mode
+to inspect reassembly and request and response observations.
+
+```sh
+tshark -2 -n -r http1-transactions.pcapng -T fields \
+  -e frame.number -e tcp.stream -e tcp.segment -e tcp.analysis.lost_segment \
+  -e http.request.method -e http.request.uri -e http.response.code \
+  -e http.request_in -e http.response_in -e http.file_data
+```
+
+- TCP stream 0 starts at frame 2. Frames 5, 6, and 8 supply the request
+  `POST /upload`. Frame 7 carries `100 Continue`. Frame 8 also starts
+  `GET /pipelined` immediately after the four-byte upload body.
+- TShark reassembles the gzip response across frames 10 and 11 and decodes
+  it to `upload accepted\n`. Frame 11 also carries the next response,
+  `204 No Content`.
+- TCP stream 1 starts at frame 13 and reuses the same tuple. The independent
+  pair `GET /reused` spans frames 16 and 17. The server response in frame
+  20 follows a TCP sequence gap with two pending requests. TShark links it
+  to `/after-gap`. The Go tests expect ambiguous pairing because the gap
+  hides response framing.

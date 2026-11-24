@@ -202,25 +202,10 @@ func ParseHTTPResponse(stream []byte) (HTTPResponse, int, error) {
 }
 
 func parseHTTPResponse(stream []byte, method string, decodedBudget *httpDecodeBudget) (HTTPResponse, int, error) {
-	lineEnd := httpStartLineEnd(stream)
-	if lineEnd <= 0 || lineEnd > MaxHTTPHeaderLineBytes {
-		return HTTPResponse{}, 0, fmt.Errorf("%w: missing or oversize HTTP status line", ErrInvalidHTTP)
+	ver, code, statusText, lineEnd, err := parseHTTPStatusLine(stream)
+	if err != nil {
+		return HTTPResponse{}, 0, err
 	}
-	statusLine := string(stream[:lineEnd])
-	if !strings.HasPrefix(statusLine, "HTTP/1.") || len(statusLine) < 12 || statusLine[8] != ' ' {
-		return HTTPResponse{}, 0, fmt.Errorf("%w: malformed HTTP status line", ErrInvalidHTTP)
-	}
-	ver := statusLine[5:8]
-	codeStr := statusLine[9:12]
-	code, err := strconv.Atoi(codeStr)
-	if err != nil || code < 100 || code > 599 {
-		return HTTPResponse{}, 0, fmt.Errorf("%w: invalid HTTP status code %q", ErrInvalidHTTP, codeStr)
-	}
-	var statusText string
-	if len(statusLine) > 13 && statusLine[12] == ' ' {
-		statusText = statusLine[13:]
-	}
-
 	headers, bodyStart, framing, err := parseHTTPHeaders(stream, lineEnd+2, false)
 	if err != nil {
 		return HTTPResponse{}, 0, err
@@ -247,7 +232,7 @@ func parseHTTPResponse(stream []byte, method string, decodedBudget *httpDecodeBu
 		}
 	}
 
-	if method == "HEAD" || method == "CONNECT" && code/100 == 2 || code/100 == 1 || code == 204 || code == 304 {
+	if httpResponseHasNoBody(method, code) {
 		resp.BodyOffset = bodyStart
 		return resp, bodyStart, nil
 	}
@@ -261,6 +246,33 @@ func parseHTTPResponse(stream []byte, method string, decodedBudget *httpDecodeBu
 	resp.BodyOffset = bodyStart
 	resp.BodyLength = len(resp.Body)
 	return resp, body.consumed, nil
+}
+
+func parseHTTPStatusLine(stream []byte) (string, int, string, int, error) {
+	lineEnd := httpStartLineEnd(stream)
+	if lineEnd <= 0 || lineEnd > MaxHTTPHeaderLineBytes {
+		return "", 0, "", 0, fmt.Errorf("%w: missing or oversize HTTP status line", ErrInvalidHTTP)
+	}
+	statusLine := string(stream[:lineEnd])
+	if !strings.HasPrefix(statusLine, "HTTP/1.") || len(statusLine) < 12 || statusLine[8] != ' ' {
+		return "", 0, "", 0, fmt.Errorf("%w: malformed HTTP status line", ErrInvalidHTTP)
+	}
+	ver := statusLine[5:8]
+	codeStr := statusLine[9:12]
+	code, err := strconv.Atoi(codeStr)
+	if err != nil || code < 100 || code > 599 {
+		return "", 0, "", 0, fmt.Errorf("%w: invalid HTTP status code %q", ErrInvalidHTTP, codeStr)
+	}
+	var statusText string
+	if len(statusLine) > 13 && statusLine[12] == ' ' {
+		statusText = statusLine[13:]
+	}
+
+	return ver, code, statusText, lineEnd, nil
+}
+
+func httpResponseHasNoBody(method string, code int) bool {
+	return method == "HEAD" || method == "CONNECT" && code/100 == 2 || code/100 == 1 || code == 204 || code == 304
 }
 
 func isStandardHTTPMethod(m string) bool {
@@ -423,6 +435,7 @@ func validHTTPFieldValue(value []byte) bool {
 type httpFramedBody struct {
 	data                         []byte
 	consumed                     int
+	invalidEnd                   int // Exclusive wire offset providing the first framing error.
 	truncated, capped, malformed bool
 }
 
@@ -430,11 +443,14 @@ type httpFramedBody struct {
 func (f httpFraming) body(stream []byte, start int, request bool) httpFramedBody {
 	avail := len(stream) - start
 	if f.malformed {
-		return httpFramedBody{consumed: len(stream), malformed: true}
+		return httpFramedBody{consumed: len(stream), invalidEnd: start, malformed: true}
 	}
 	if f.chunked {
 		body := decodeChunkedBody(stream[start:], f.strict)
 		body.consumed += start
+		if body.malformed {
+			body.invalidEnd += start
+		}
 		return body
 	}
 	if f.hasTransfer {
@@ -443,7 +459,7 @@ func (f httpFraming) body(stream []byte, start int, request bool) httpFramedBody
 		}
 		f.length = -1 // A response with a final non-chunked coding is close-delimited.
 	} else if f.invalidLength || f.anomalies.MultipleContentLength {
-		return httpFramedBody{consumed: len(stream), malformed: true}
+		return httpFramedBody{consumed: len(stream), invalidEnd: start, malformed: true}
 	}
 	wireLen := avail
 	if f.length >= 0 {
@@ -557,6 +573,12 @@ func decodeChunkedBody(raw []byte, strict bool) httpFramedBody {
 		lineEnd := bytes.Index(raw[offset:], []byte("\r\n"))
 		if lineEnd <= 0 || lineEnd > MaxHTTPHeaderLineBytes {
 			body.malformed = lineEnd >= 0 || len(raw)-offset > MaxHTTPHeaderLineBytes+1
+			if body.malformed {
+				body.invalidEnd = offset + MaxHTTPHeaderLineBytes + 2
+				if lineEnd == 0 {
+					body.invalidEnd = offset + 2
+				}
+			}
 			break
 		}
 		line := raw[offset : offset+lineEnd]
@@ -572,11 +594,13 @@ func decodeChunkedBody(raw []byte, strict bool) httpFramedBody {
 		}
 		if strict && (len(sizeHex) == 0 || sizeHex[0] == '+' || sizeHex[0] == '-' || !validHTTPFieldValue(line)) {
 			body.malformed = true
+			body.invalidEnd = offset + lineEnd + 2
 			break
 		}
 		chunkSize, err := strconv.ParseInt(sizeHex, 16, 32)
 		if err != nil || chunkSize < 0 {
 			body.malformed = true
+			body.invalidEnd = offset + lineEnd + 2
 			break
 		}
 		offset += lineEnd + 2
@@ -585,12 +609,18 @@ func decodeChunkedBody(raw []byte, strict bool) httpFramedBody {
 			for i := range MaxHTTPHeaders + 1 {
 				trEnd := bytes.Index(raw[offset:], []byte("\r\n"))
 				if trEnd < 0 || trEnd > MaxHTTPHeaderLineBytes {
-					body.malformed = body.malformed || trEnd >= 0 || len(raw)-offset > MaxHTTPHeaderLineBytes+1
+					if !body.malformed && (trEnd >= 0 || len(raw)-offset > MaxHTTPHeaderLineBytes+1) {
+						body.malformed = true
+						body.invalidEnd = offset + MaxHTTPHeaderLineBytes + 2
+					}
 					break
 				}
 				if strict && trEnd != 0 {
 					name, value, found := bytes.Cut(raw[offset:offset+trEnd], []byte{':'})
-					body.malformed = body.malformed || i == MaxHTTPHeaders || !found || !validHTTPFieldName(name) || !validHTTPFieldValue(value)
+					if !body.malformed && (i == MaxHTTPHeaders || !found || !validHTTPFieldName(name) || !validHTTPFieldValue(value)) {
+						body.malformed = true
+						body.invalidEnd = offset + trEnd + 2
+					}
 				}
 				offset += trEnd + 2
 				if trEnd == 0 {
@@ -617,7 +647,11 @@ func decodeChunkedBody(raw []byte, strict bool) httpFramedBody {
 		}
 		offset += chunkLen
 		if len(raw)-offset < 2 || raw[offset] != '\r' || raw[offset+1] != '\n' {
-			body.malformed = offset < len(raw) && raw[offset] != '\r' || len(raw)-offset >= 2
+			if offset < len(raw) && raw[offset] != '\r' {
+				body.malformed, body.invalidEnd = true, offset+1
+			} else if len(raw)-offset >= 2 {
+				body.malformed, body.invalidEnd = true, offset+2
+			}
 			break
 		}
 		offset += 2
