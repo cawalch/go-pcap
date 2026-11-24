@@ -381,3 +381,151 @@ func TestQUICRebindToEarlierUDPFlow(t *testing.T) {
 		t.Fatalf("rebound exchange: %+v", records)
 	}
 }
+
+func TestQUICDistinctInitialExchangesOnOneTuple(t *testing.T) {
+	client, server := [4]byte{192, 0, 2, 1}, [4]byte{192, 0, 2, 2}
+	frame := func(wire []byte) []byte {
+		return buildEthernetIPv4UDPFrame(client, server, 55555, 443, wire)
+	}
+	for _, tc := range []struct {
+		name       string
+		dcid, scid string
+		v          uint32
+	}{
+		{"distinct IDs", "dest-b", "src-b", QUICVersion1},
+		{"shared DCID", "dest-a", "src-b", QUICVersion1},
+		{"shared SCID", "dest-b", "src-a", QUICVersion1},
+		{"different version", "dest-a", "src-a", QUICVersion2},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			a := buildTLS13ClientHelloRecord("first.example", "h3")[5:]
+			b := buildTLS13ClientHelloRecord("later.example", "h3")[5:]
+			a1 := buildEncryptedQUICInitialDatagram(t, QUICVersion1, []byte("dest-a"), []byte("src-a"), nil, 1, 0, a[:40])
+			a2 := buildEncryptedQUICInitialDatagram(t, QUICVersion1, []byte("dest-a"), []byte("src-a"), nil, 2, 40, a[40:])
+			b1 := buildEncryptedQUICInitialDatagram(t, tc.v, []byte(tc.dcid), []byte(tc.scid), nil, 1, 0, b)
+			// A mixed datagram must not use a second exchange's CRYPTO bytes.
+			mixed := append(bytes.Clone(a1), b1...)
+			for _, frames := range [][][]byte{{frame(mixed), frame(b1), frame(a2)}, {frame(a1), frame(a2), frame(b1)}} {
+				records := quicTestRecords(t, frames...)
+				if len(records) != 2 {
+					t.Fatalf("got %d records, want 2", len(records))
+				}
+				for i, want := range []struct {
+					name, dcid, scid string
+					v                uint32
+				}{{"first.example", "dest-a", "src-a", QUICVersion1}, {"later.example", tc.dcid, tc.scid, tc.v}} {
+					r := records[i]
+					if r.FlowIndex != 0 || r.SrcPort != 55555 || r.DstPort != 443 || r.Handshake.ClientHello.SNI != want.name ||
+						string(r.Handshake.DCID) != want.dcid || string(r.Handshake.SCID) != want.scid || r.Handshake.Version != want.v {
+						t.Fatalf("record %d = %+v", i, r)
+					}
+				}
+			}
+		})
+	}
+}
+
+func TestQUICOverlappingRetryAndPacketLimits(t *testing.T) {
+	client, server := [4]byte{192, 0, 2, 1}, [4]byte{192, 0, 2, 2}
+	frame := func(wire []byte) []byte {
+		return buildEthernetIPv4UDPFrame(client, server, 55555, 443, wire)
+	}
+	dcid, scid, retryID := []byte("initial"), []byte("source"), []byte("retry")
+	hello := buildTLS13ClientHelloRecord("retried.example", "h3")[5:]
+	a := buildEncryptedQUICInitialDatagram(t, QUICVersion1, dcid, scid, nil, 1, 0, hello[:40])
+	b := buildEncryptedQUICInitialDatagram(t, QUICVersion1, []byte("other"), []byte("other-src"), nil, 1, 0, buildTLS13ClientHelloRecord("other.example", "h3")[5:])
+	retry := quicControlPacket(0xf0, QUICVersion1, scid, retryID, make([]byte, 17))
+	last := buildEncryptedQUICInitialDatagram(t, QUICVersion1, retryID, scid, []byte{0}, 2, 40, hello[40:])
+	frames := [][]byte{frame(a)}
+	for range MaxQUICPacketsPerFlow {
+		frames = append(frames, frame(b))
+	}
+	frames = append(frames, buildEthernetIPv4UDPFrame(server, client, 443, 55555, retry), frame(last), frame(a))
+	records := quicTestRecords(t, frames...)
+	if len(records) != 2 || !records[0].Handshake.HasRetry || !bytes.Equal(records[0].Handshake.DCID, retryID) ||
+		records[0].Handshake.ClientHello.SNI != "retried.example" || records[1].Handshake.HasRetry || records[1].Handshake.ClientHello.SNI != "other.example" {
+		t.Fatalf("overlapping Retry = %+v", records)
+	}
+
+	// The cap independently blocks a continuation of the saturated exchange.
+	frames = frames[:0]
+	for range MaxQUICPacketsPerFlow {
+		frames = append(frames, frame(a))
+	}
+	frames = append(frames, frame(b), frame(buildEncryptedQUICInitialDatagram(t, QUICVersion1, dcid, scid, nil, 3, 40, hello[40:])))
+	records = quicTestRecords(t, frames...)
+	if len(records) != 1 || records[0].Handshake.ClientHello.SNI != "other.example" {
+		t.Fatalf("overlapping cap = %+v", records)
+	}
+}
+
+func TestQUICServerFirstWithOverlappingExchange(t *testing.T) {
+	client, server := [4]byte{192, 0, 2, 1}, [4]byte{192, 0, 2, 2}
+	ch := func(dcid, scid, sni string) []byte {
+		wire := buildEncryptedQUICInitialDatagram(t, QUICVersion1, []byte(dcid), []byte(scid), nil, 1, 0, buildTLS13ClientHelloRecord(sni, "h3")[5:])
+		return buildEthernetIPv4UDPFrame(client, server, 55555, 443, wire)
+	}
+	sh := buildQUICInitialWithKeys(t, QUICVersion1, []byte("client-first"), []byte("server-id"), nil, 1, 0,
+		buildTLSServerHelloRecord()[5:], []byte("first"), false)
+	records := quicTestRecords(t, buildEthernetIPv4UDPFrame(server, client, 443, 55555, sh),
+		ch("other", "client-other", "other.example"), ch("first", "client-first", "server-first.example"))
+	if len(records) != 2 || records[0].FlowIndex != 0 || records[0].SrcPort != 55555 || records[0].DstPort != 443 ||
+		!records[0].Handshake.HasServerHello || records[0].Handshake.ClientHello.SNI != "server-first.example" ||
+		records[1].Handshake.HasServerHello || records[1].Handshake.ClientHello.SNI != "other.example" {
+		t.Fatalf("server-first records = %+v", records)
+	}
+}
+
+func TestQUICServerConnectionIDChange(t *testing.T) {
+	client, server := [4]byte{192, 0, 2, 1}, [4]byte{192, 0, 2, 2}
+	dcid, scid, serverID := []byte("initial"), []byte("source"), []byte("server")
+	hello := buildTLS13ClientHelloRecord("original.example", "h3")[5:]
+	start := buildEncryptedQUICInitialDatagram(t, QUICVersion1, dcid, scid, nil, 1, 0, hello[:40])
+	reply := buildQUICInitialWithKeys(t, QUICVersion1, scid, serverID, nil, 1, 0, buildTLSServerHelloRecord()[5:], dcid, false)
+	end := buildQUICInitialWithKeys(t, QUICVersion1, serverID, scid, nil, 2, 40, hello[40:], dcid, true)
+	independent := buildEncryptedQUICInitialDatagram(t, QUICVersion1, serverID, scid, nil, 1, 0, buildTLS13ClientHelloRecord("independent.example", "h3")[5:])
+	frames := [][]byte{
+		buildEthernetIPv4UDPFrame(client, server, 55555, 443, start),
+		buildEthernetIPv4UDPFrame(server, client, 443, 55555, reply),
+		buildEthernetIPv4UDPFrame(client, server, 55555, 443, end),
+	}
+	other := buildEthernetIPv4UDPFrame(client, server, 55555, 443, independent)
+	for _, saturated := range []bool{false, true} {
+		if saturated {
+			for len(frames) < MaxQUICPacketsPerFlow {
+				frames = append(frames, frames[0])
+			}
+		}
+		records := quicTestRecords(t, append(frames, other)...)
+		if len(records) != 2 || !records[0].Handshake.HasServerHello || !bytes.Equal(records[0].Handshake.DCID, dcid) ||
+			records[0].Handshake.ClientHello.SNI != "original.example" || records[1].Handshake.HasServerHello ||
+			!bytes.Equal(records[1].Handshake.DCID, serverID) || records[1].Handshake.ClientHello.SNI != "independent.example" {
+			t.Fatalf("server connection ID change (saturated = %t) = %+v", saturated, records)
+		}
+	}
+}
+
+func TestQUICExchangeLimitOnOneTuple(t *testing.T) {
+	client, server := [4]byte{192, 0, 2, 1}, [4]byte{192, 0, 2, 2}
+	wire := buildEncryptedQUICInitialDatagram(t, QUICVersion1, []byte{1, 2, 3, 4}, []byte("source"), nil, 1, 0,
+		buildTLS13ClientHelloRecord("exchange.example", "h3")[5:])
+	frames := make([][]byte, 0, MaxQUICFlowsPerScan+1)
+	for i := range MaxQUICFlowsPerScan + 1 {
+		// Only the headers are needed to hit the limit. Each wire DCID
+		// differs, and the scan reaches the limit before decryption.
+		binary.BigEndian.PutUint32(wire[6:10], uint32(i))
+		frames = append(frames, buildEthernetIPv4UDPFrame(client, server, 55555, 443, wire))
+	}
+	raw := buildClassicPCAP(binary.LittleEndian, false, LinkTypeEthernet, 65535, frames)
+	r := bytes.NewReader(raw)
+	c, err := NewFromReaderAt(r, int64(len(raw)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if records, err := c.QUIC(raw); records != nil || !errors.Is(err, ErrQUICLimit) {
+		t.Fatalf("slice has %d records and error %v", len(records), err)
+	}
+	if records, err := c.QUICFromReaderAt(r); records != nil || !errors.Is(err, ErrQUICLimit) {
+		t.Fatalf("ReaderAt has %d records and error %v", len(records), err)
+	}
+}

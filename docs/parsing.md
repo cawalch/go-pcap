@@ -111,8 +111,8 @@ The following limits bound parsing work and memory allocation on each call:
 | `MaxTLSHandshakesPerScan` | 16,384 handshakes | Bounds TLS handshakes returned per capture scan |
 | `MaxTLSKeyLogEntries` | 4,096 entries | Bounds NSS keylog entries parsed per `ParseTLSKeyLog` / `TLSKeyLog` call |
 | `MaxQUICCryptoBytes` | 64 KiB | Bounds reassembled QUIC Initial `CRYPTO` stream size |
-| `MaxQUICPacketsPerFlow` | 64 packets | Bounds Initial UDP datagrams inspected per QUIC flow |
-| `MaxQUICFlowsPerScan` | 16,384 flows | Bounds QUIC Initial flows returned per capture scan |
+| `MaxQUICPacketsPerFlow` | 64 packets | Bounds UDP datagrams inspected per QUIC Initial exchange |
+| `MaxQUICFlowsPerScan` | 16,384 exchanges | Bounds QUIC Initial exchanges tracked per capture scan |
 | `MaxHTTPHeaders` | 128 headers | Bounds HTTP header lines per request or response |
 | `MaxHTTPBodyBytes` | 4 MiB | Bounds each carved HTTP body before and after content decoding |
 | `MaxHTTPDecodedBodyBytesPerScan` | 64 MiB | Bounds cumulative HTTP/1.x content decoding per `Capture.HTTP` call, including failed attempts |
@@ -464,6 +464,12 @@ stops decoding that direction. For a split message, `PacketIndex` and
 `TimestampNs` identify the packet supplying the first prefix byte. This lets
 you locate the message in the original capture even when the final bytes
 arrived later. Slice and ReaderAt scans return records in packet-index order.
+
+DNS record flow indices use the order returned by `capture.Flows(data)`. For
+fragmented UDP messages, the record uses the fragment flow index and the
+reassembled UDP ports. The packet index and timestamp identify the fragment
+that completed the message.
+
 [DNS over TCP (RFC 7766)](https://www.rfc-editor.org/rfc/rfc7766)
 
 ### Diagnose DNS transactions
@@ -653,13 +659,19 @@ handshake metadata even when application payloads remain opaque.
 [QUIC v1 Initial secrets](https://www.rfc-editor.org/rfc/rfc9001#section-5.2) ·
 [QUIC v2 changes](https://www.rfc-editor.org/rfc/rfc9369#section-3.3)
 
-`QUIC` and `QUICFromReaderAt` group Initials across a client port change when
-the same endpoint IPs and server port have a unique matching nonempty connection
-ID. The record keeps the original flow index and ports. A matching Retry can
-supply a new destination ID for a subsequent client Initial. For example, read
-`record.Handshake.HasRetry` or `record.Handshake.HasVersionNegotiation` on
-each returned record to check which server responses appeared in the capture.
-These flags describe packet observations. Retry integrity tags are not verified.
+`QUIC` and `QUICFromReaderAt` return distinct Initial exchanges on the same
+UDP tuple in first-observed order. They group Initials across a client port
+change when the same endpoint IPs and server port have a unique matching
+nonempty connection ID. Each record uses the flow index of its first observed
+Initial packet in `capture.Flows(data)`. The record retains the original ports,
+including UDP ports recovered from fragments. A matching Retry can supply a new
+destination ID for a subsequent client Initial. Read `record.Handshake.HasRetry`
+or `record.Handshake.HasVersionNegotiation` on each record to check which server
+responses appeared in the capture. These flags describe packet observations.
+Retry integrity tags are not verified.
+When authentication is needed to resolve a server-first packet or a changed
+server connection ID, unsuccessful checks count toward the exchange's budget
+for resolving ambiguous packets.
 
 ## Decrypt TLS 1.2 and TLS 1.3 streams offline
 

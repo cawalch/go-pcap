@@ -97,7 +97,10 @@ type DNSMessage struct {
 
 // DNSRecord associates a parsed [DNSMessage] with its packet and flow indices
 // in a [Capture].
-// For TCP, PacketIndex and TimestampNs identify the packet containing the first length-prefix byte.
+// FlowIndex uses the ordering of [Capture.Flows]. For fragmented UDP, the ports
+// come from the reassembled datagram and PacketIndex and TimestampNs identify
+// the fragment that completed it. For TCP, they identify the packet containing
+// the first length-prefix byte.
 type DNSRecord struct {
 	PacketIndex int
 	FlowIndex   int
@@ -504,46 +507,18 @@ func scanDNS(source ipFrameSource) ([]DNSRecord, error) {
 	var tcp tcpMessageCollector
 
 	err := source.walk(func(pkt PacketRecord, frame Frame, l4 []byte) error {
-
-		if frame.Anomalies.IPFragment && frame.IPProtocol == IPProtoUDP {
-			udpPayload, srcPort, dstPort, ok := defrag.addUDPFragment(&frame, l4)
-			if !ok {
-				return nil
-			}
-			frame.SrcPort = srcPort
-			frame.DstPort = dstPort
-			key, _ := makeCanonicalFlowKey(frame.IPProtocol, frame.SrcAddr, frame.SrcPort, frame.DstAddr, frame.DstPort)
-			flowIdx, _, err := table.lookupOrInsert(key)
-			if err != nil {
-				return err
-			}
-			if !isDNSPort(srcPort) && !isDNSPort(dstPort) {
-				return nil
-			}
-			msg, err := ParseDNS(udpPayload)
-			if err != nil {
-				return nil
-			}
-			if len(records) >= MaxDNSMessagesPerScan {
-				return fmt.Errorf("%w: exceeds %d messages", ErrDNSLimit, MaxDNSMessagesPerScan)
-			}
-			records = append(records, DNSRecord{
-				PacketIndex: pkt.Index,
-				FlowIndex:   flowIdx,
-				SrcAddr:     frame.SrcAddr,
-				DstAddr:     frame.DstAddr,
-				SrcPort:     srcPort,
-				DstPort:     dstPort,
-				TimestampNs: pkt.TimestampNs,
-				Message:     msg,
-			})
-			return nil
-		}
-
 		key, _ := makeCanonicalFlowKey(frame.IPProtocol, frame.SrcAddr, frame.SrcPort, frame.DstAddr, frame.DstPort)
 		flowIdx, _, err := table.lookupOrInsert(key)
 		if err != nil {
 			return err
+		}
+
+		if frame.Anomalies.IPFragment && frame.IPProtocol == IPProtoUDP {
+			var ok bool
+			l4, frame.SrcPort, frame.DstPort, ok = defrag.addUDPFragment(&frame, l4)
+			if !ok {
+				return nil
+			}
 		}
 
 		if !isDNSPort(frame.SrcPort) && !isDNSPort(frame.DstPort) {
