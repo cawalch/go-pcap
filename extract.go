@@ -11,7 +11,7 @@ import (
 // entries and decryption secrets.
 // A missing flow returns [ErrOutOfBounds] without writing to w.
 func (c *Capture) ExtractFlowPCAPNG(data []byte, w io.Writer, flowIndex int) error {
-	return c.extractFlowPCAPNG(flowExportSource{data: *NewSafeReader(data)}, w, flowIndex)
+	return c.extractFlowPCAPNG(flowExportSource{data: *NewSafeReader(data)}, w, flowIndex, false)
 }
 
 // ExtractFlowPCAPNGFromReaderAt writes the same packets and metadata as
@@ -20,10 +20,35 @@ func (c *Capture) ExtractFlowPCAPNG(data []byte, w io.Writer, flowIndex int) err
 // budget. Exceeding it returns an error wrapping [ErrPacketLimit]. A missing
 // flow leaves w untouched. Other errors can leave partial output.
 func (c *Capture) ExtractFlowPCAPNGFromReaderAt(r io.ReaderAt, w io.Writer, flowIndex int) error {
+	return c.extractFlowPCAPNGFromReaderAt(r, w, flowIndex, false)
+}
+
+// ExtractFlowPacketsPCAPNG writes one bidirectional IP flow from the unchanged
+// source data to w. flowIndex uses the first-seen ordering of [Capture.Flows].
+// The export retains packet bytes, lengths, timestamps, and the interface
+// and frame check sequence information needed to read them. It omits other
+// capture and packet metadata. Packet headers and payloads still contain
+// the original endpoints and application data.
+// A missing flow returns [ErrOutOfBounds] without writing to w. Other errors
+// can leave partial output.
+func (c *Capture) ExtractFlowPacketsPCAPNG(data []byte, w io.Writer, flowIndex int) error {
+	return c.extractFlowPCAPNG(flowExportSource{data: *NewSafeReader(data)}, w, flowIndex, true)
+}
+
+// ExtractFlowPacketsPCAPNGFromReaderAt writes the same output as
+// [Capture.ExtractFlowPacketsPCAPNG] from the unchanged source used to open
+// the capture. Selection, framing, and copying share one [MaxReaderAtScanBytes]
+// budget. Exceeding it returns an error wrapping [ErrPacketLimit]. A missing
+// flow leaves w untouched. Other errors can leave partial output.
+func (c *Capture) ExtractFlowPacketsPCAPNGFromReaderAt(r io.ReaderAt, w io.Writer, flowIndex int) error {
+	return c.extractFlowPCAPNGFromReaderAt(r, w, flowIndex, true)
+}
+
+func (c *Capture) extractFlowPCAPNGFromReaderAt(r io.ReaderAt, w io.Writer, flowIndex int, packetOnly bool) error {
 	if r == nil {
 		return ErrInvalidHeader
 	}
-	return c.extractFlowPCAPNG(flowExportSource{budget: &scanReadBudget{r: r, remaining: MaxReaderAtScanBytes}}, w, flowIndex)
+	return c.extractFlowPCAPNG(flowExportSource{budget: &scanReadBudget{r: r, remaining: MaxReaderAtScanBytes}}, w, flowIndex, packetOnly)
 }
 
 type flowExportSource struct {
@@ -47,7 +72,25 @@ func (s *flowExportSource) read(offset, length int64) ([]byte, error) {
 	return buf, readExactAt(s.budget, buf, offset, s.size)
 }
 
-func (c *Capture) extractFlowPCAPNG(source flowExportSource, w io.Writer, flowIndex int) error {
+func (s *flowExportSource) copyRange(out *captureOutput, offset, end int64) error {
+	for offset < end {
+		n := end - offset
+		if s.budget != nil {
+			n = min(n, 32<<10)
+		}
+		data, err := s.read(offset, n)
+		if err != nil {
+			return err
+		}
+		if err := out.write(data); err != nil {
+			return err
+		}
+		offset += n
+	}
+	return nil
+}
+
+func (c *Capture) extractFlowPCAPNG(source flowExportSource, w io.Writer, flowIndex int, packetOnly bool) error {
 	if err := c.validateContainer(); err != nil {
 		return err
 	}
@@ -67,6 +110,10 @@ func (c *Capture) extractFlowPCAPNG(source flowExportSource, w io.Writer, flowIn
 	var used [MaxInterfaces]bool
 	var selected []uint64
 	source.size = c.fileSize
+	packets := packetOnlyFlowWriter{out: captureOutput{w: w}, order: binary.LittleEndian}
+	if c.BigEndian {
+		packets.order = binary.BigEndian
+	}
 	observe := func(pkt *PacketRecord, frame *Frame, payload []byte) error {
 		key, _ := makeCanonicalFlowKey(frame.IPProtocol, frame.SrcAddr, frame.SrcPort, frame.DstAddr, frame.DstPort)
 		idx, _, err := table.lookupOrInsert(key)
@@ -76,8 +123,12 @@ func (c *Capture) extractFlowPCAPNG(source flowExportSource, w io.Writer, flowIn
 		if idx != flowIndex {
 			return nil
 		}
+		first := !found
 		found = true
 		if c.Format == FormatPCAP {
+			if packetOnly {
+				return packets.writeClassicPacket(&source, c, pkt, payload, first)
+			}
 			if classic == nil {
 				classic, err = newPCAPNGWriter(w, PCAPNGWriterOptions{LinkType: c.LinkType, SnapLen: c.SnapLen})
 				if err != nil {
@@ -126,26 +177,32 @@ func (c *Capture) extractFlowPCAPNG(source flowExportSource, w io.Writer, flowIn
 	if !found {
 		return ErrOutOfBounds
 	}
-	if classic != nil {
+	if c.Format == FormatPCAP {
 		return nil
 	}
 
-	return source.writeSelectedBlocks(w, &used, selected)
+	return source.writeSelectedBlocks(w, &used, selected, packetOnly)
 }
 
-func (s *flowExportSource) writeSelectedBlocks(w io.Writer, used *[MaxInterfaces]bool, selected []uint64) error {
+func (s *flowExportSource) writeSelectedBlocks(w io.Writer, used *[MaxInterfaces]bool, selected []uint64, packetOnly bool) error {
 	out := captureOutput{w: w}
 	var globalID, sectionBase, packet int
-	var nextID uint32
+	var nextID, spbSnapLen uint32
+	var sectionOffset int64
 	var remap [MaxInterfaces]uint32
 	var head [24]byte // Reuse scratch when rewriting a header.
 	writeBlock := func(kind uint32, order binary.ByteOrder, offset, end int64) error {
+		packets := packetOnlyFlowWriter{out: out, order: order}
 		switch kind {
 		case BlockTypeSectionHeader:
 			sectionBase, nextID = globalID, 0
 			// Filtering changes the length of sections with a declared size.
-			if end-offset < 28 {
+			if end-offset < pcapngSHBMinSize {
 				return ErrInvalidBlock
+			}
+			if packetOnly {
+				sectionOffset = offset
+				return nil
 			}
 			header, err := s.read(offset, 24)
 			if err != nil {
@@ -171,6 +228,22 @@ func (s *flowExportSource) writeSelectedBlocks(w io.Writer, used *[MaxInterfaces
 			}
 			remap[id] = nextID
 			nextID++
+			if packetOnly {
+				if nextID == 1 {
+					version, err := s.read(sectionOffset+12, 4)
+					if err != nil {
+						return err
+					}
+					if err := packets.writeSection(order.Uint16(version), order.Uint16(version[2:])); err != nil {
+						return err
+					}
+				}
+				snapLen, err := packets.writeSourceInterface(s, offset+8, end-4)
+				if id == sectionBase {
+					spbSnapLen = snapLen
+				}
+				return err
+			}
 		case blockTypeLegacyPacket, BlockTypeEnhancedPacket, BlockTypeSimplePacket:
 			i := packet
 			packet++
@@ -179,11 +252,29 @@ func (s *flowExportSource) writeSelectedBlocks(w io.Writer, used *[MaxInterfaces
 			}
 			// An SPB implicitly uses section interface zero, which is first
 			// among the retained interfaces whenever one of its packets matches.
+			if kind == BlockTypeSimplePacket && packetOnly {
+				if end-offset < pcapngSPBMinSize || globalID == sectionBase || !used[sectionBase] {
+					return ErrInvalidBlock
+				}
+				fixed, err := s.read(offset+8, 4)
+				if err != nil {
+					return err
+				}
+				length := order.Uint32(fixed)
+				if spbSnapLen != 0 {
+					length = min(length, spbSnapLen)
+				}
+				return packets.writeSourcePacket(s, kind, fixed, offset+12, end-4, length)
+			}
 			if kind != BlockTypeSimplePacket {
 				if end-offset < pcapngPacketBlockMinSize {
 					return ErrInvalidBlock
 				}
-				header, err := s.read(offset, 12)
+				headerLen := int64(12)
+				if packetOnly {
+					headerLen = 28
+				}
+				header, err := s.read(offset, headerLen)
 				if err != nil {
 					return err
 				}
@@ -195,6 +286,17 @@ func (s *flowExportSource) writeSelectedBlocks(w io.Writer, used *[MaxInterfaces
 					return ErrInvalidPacket
 				}
 				newID := remap[sectionBase+int(id)]
+				if packetOnly {
+					var fixed [20]byte
+					copy(fixed[:], header[8:])
+					if kind == blockTypeLegacyPacket {
+						order.PutUint16(fixed[:2], uint16(newID))
+						order.PutUint16(fixed[2:4], 0xffff) // Drop count unavailable.
+					} else {
+						order.PutUint32(fixed[:4], newID)
+					}
+					return packets.writeSourcePacket(s, kind, fixed[:], offset+28, end-4, order.Uint32(fixed[12:16]))
+				}
 				if s.budget == nil && newID == id {
 					break
 				}
@@ -210,26 +312,15 @@ func (s *flowExportSource) writeSelectedBlocks(w io.Writer, used *[MaxInterfaces
 				offset += 12
 			}
 		case BlockTypeNameResolution, BlockTypeDecryptionSecrets, BlockTypeDarwinProcessEvent:
+			if packetOnly {
+				return nil
+			}
 			// Keep Darwin process blocks in their original section order so
 			// primary and effective process references retain their indices.
 		default:
 			return nil
 		}
-		for offset < end {
-			n := end - offset
-			if s.budget != nil {
-				n = min(n, 32<<10)
-			}
-			block, err := s.read(offset, n)
-			if err != nil {
-				return err
-			}
-			if err := out.write(block); err != nil {
-				return err
-			}
-			offset += n
-		}
-		return nil
+		return s.copyRange(&out, offset, end)
 	}
 	if s.budget == nil {
 		return walkPCAPNGBlockBytes(&s.data, &scanSummary{}, func(kind uint32, order binary.ByteOrder, offset int64, block []byte) error {
