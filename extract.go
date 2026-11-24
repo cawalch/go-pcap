@@ -270,32 +270,34 @@ func (s *flowExportSource) writeSelectedBlocks(w io.Writer, used *[MaxInterfaces
 				if end-offset < pcapngPacketBlockMinSize {
 					return ErrInvalidBlock
 				}
-				headerLen := int64(12)
+				headerStart, headerLen := int64(0), int64(12)
 				if packetOnly {
-					headerLen = 28
+					headerStart, headerLen = 8, 20
 				}
-				header, err := s.read(offset, headerLen)
+				header, err := s.read(offset+headerStart, headerLen)
 				if err != nil {
 					return err
 				}
-				id := order.Uint32(header[8:12])
+				fields := header[8-headerStart:]
+				id := order.Uint32(fields)
 				if kind == blockTypeLegacyPacket {
-					id = uint32(order.Uint16(header[8:10]))
+					id = uint32(order.Uint16(fields))
 				}
 				if uint64(id) >= uint64(globalID-sectionBase) {
 					return ErrInvalidPacket
 				}
 				newID := remap[sectionBase+int(id)]
 				if packetOnly {
-					var fixed [20]byte
-					copy(fixed[:], header[8:])
+					// Keep the fixed fields across the options read, which reuses s.scratch.
+					fixed := head[:20]
+					copy(fixed, fields)
 					if kind == blockTypeLegacyPacket {
 						order.PutUint16(fixed[:2], uint16(newID))
 						order.PutUint16(fixed[2:4], 0xffff) // Drop count unavailable.
 					} else {
 						order.PutUint32(fixed[:4], newID)
 					}
-					return packets.writeSourcePacket(s, kind, fixed[:], offset+28, end-4, order.Uint32(fixed[12:16]))
+					return packets.writeSourcePacket(s, kind, fixed, offset+28, end-4, order.Uint32(fixed[12:16]))
 				}
 				if s.budget == nil && newID == id {
 					break
