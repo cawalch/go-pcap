@@ -268,7 +268,10 @@ header longer than the default ReaderAt prefix. See the
 [IKEv2 message format](https://www.rfc-editor.org/rfc/rfc7296#section-3.1).
 
 IPv6 reassembly discards a datagram if fragments overlap, including identical
-bytes. A first UDP or TCP fragment must contain its complete transport header.
+bytes. A first fragment must contain the complete UDP or TCP header, including
+any preceding Authentication or Destination Options headers. DNS and QUIC
+resolve those headers after reassembly. The flow index continues to refer to
+the fragment flow as observed on the wire.
 Atomic IPv6 packets are decoded independently of pending fragment groups.
 
 The [fingerprint reference fixtures](../testdata/foxio/README.md) identify the

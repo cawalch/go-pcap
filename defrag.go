@@ -57,9 +57,11 @@ func DefragmentIP(fragments []IPFragmentInput) ([]byte, FrameAnomalies, error) {
 
 	for i := range fragments {
 		frag := &fragments[i]
-		if ipv6 && frag.FragmentOffset == 0 && frag.MoreFragments && shortFragmentHeader(frag.Protocol, frag.Payload) {
-			anomalies.TruncatedLayer = true
-			return nil, anomalies, nil
+		if ipv6 && frag.FragmentOffset == 0 && frag.MoreFragments {
+			ipv6FragmentTransport(frag.Protocol, frag.Payload, 1, &anomalies)
+			if anomalies.TruncatedLayer || anomalies.IPv6ExtLimitExceeded {
+				return nil, anomalies, nil
+			}
 		}
 		if frag.FragmentOffset < 0 {
 			continue
@@ -174,6 +176,42 @@ func DefragmentIP(fragments []IPFragmentInput) ([]byte, FrameAnomalies, error) {
 	return out, anomalies, nil
 }
 
+// The fragment's next-header field describes the start of the fragmentable
+// part. AH and Destination Options may precede the upper-layer header.
+func postFragmentExtension(proto uint8) bool {
+	return proto == IPProtoAH || proto == IPProtoIPv6Opts
+}
+
+func (f *Frame) mayContainUDPFragment() bool {
+	return f.Anomalies.IPFragment && (f.IPProtocol == IPProtoUDP ||
+		f.IPVersion == 6 && postFragmentExtension(f.IPProtocol))
+}
+
+func ipv6FragmentTransport(proto uint8, data []byte, seen int, anomalies *FrameAnomalies) (uint8, []byte) {
+	for postFragmentExtension(proto) {
+		if seen >= MaxIPv6ExtHeaders {
+			anomalies.IPv6ExtLimitExceeded = true
+			return proto, nil
+		}
+		if len(data) < 8 {
+			anomalies.TruncatedLayer = true
+			return proto, nil
+		}
+		size := ipv6ExtLength(proto, data[1])
+		if size > len(data) {
+			anomalies.TruncatedLayer = true
+			return proto, nil
+		}
+		proto, data = data[0], data[size:]
+		seen++
+	}
+	if shortFragmentHeader(proto, data) {
+		anomalies.TruncatedLayer = true
+		return proto, nil
+	}
+	return proto, data
+}
+
 // A fragmented IPv6 datagram must carry the complete transport header
 // in its first fragment (RFC 8200, section 4.5).
 func shortFragmentHeader(proto uint8, payload []byte) bool {
@@ -264,7 +302,7 @@ func (a *ipFragAccumulator) addUDPFragment(frame *Frame, fragBytes []byte) (udpP
 		return nil, 0, 0, false
 	}
 
-	if frame.IPVersion == 6 && frame.Anomalies.TruncatedLayer {
+	if frame.IPVersion == 6 && (frame.Anomalies.TruncatedLayer || frame.Anomalies.IPv6ExtLimitExceeded) {
 		g.done = true
 		g.frags = nil
 		return nil, 0, 0, false
@@ -293,11 +331,22 @@ func (a *ipFragAccumulator) addUDPFragment(frame *Frame, fragBytes []byte) (udpP
 		g.done = true
 		g.frags = nil
 	}
-	if err != nil || anomalies.TruncatedLayer || len(reassembled) < 8 {
+	if err != nil || anomalies.TruncatedLayer || anomalies.IPv6ExtLimitExceeded || len(reassembled) < 8 {
 		return nil, 0, 0, false
 	}
 	a.removeGroup(g)
+	if frame.IPVersion == 6 && postFragmentExtension(frame.IPProtocol) {
+		var proto uint8
+		proto, reassembled = ipv6FragmentTransport(frame.IPProtocol, reassembled, 1, &anomalies)
+		if proto != IPProtoUDP || len(reassembled) < 8 {
+			return nil, 0, 0, false
+		}
+	}
+	length := int(binary.BigEndian.Uint16(reassembled[4:6]))
+	if length < 8 || length > len(reassembled) {
+		return nil, 0, 0, false
+	}
 	srcPort = binary.BigEndian.Uint16(reassembled[0:2])
 	dstPort = binary.BigEndian.Uint16(reassembled[2:4])
-	return reassembled[8:], srcPort, dstPort, true
+	return reassembled[8:length], srcPort, dstPort, true
 }

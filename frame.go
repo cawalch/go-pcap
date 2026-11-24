@@ -534,10 +534,8 @@ func decodeIPv6(r *SafeReader, offset, bound int64, f *Frame) {
 			return
 		}
 		nh := r.data[cur]
-		var extLen int64
-		switch nextHeader {
-		case IPProtoIPv6Frag:
-			extLen = 8
+		extLen := int64(ipv6ExtLength(nextHeader, r.data[cur+1]))
+		if nextHeader == IPProtoIPv6Frag {
 			fragWord := binary.BigEndian.Uint16(r.data[cur+2 : cur+4])
 			f.IPFragOffset = fragWord & 0xfff8
 			f.IPMoreFragments = (fragWord & 0x0001) != 0
@@ -545,10 +543,6 @@ func decodeIPv6(r *SafeReader, offset, bound int64, f *Frame) {
 			if (fragWord & 0xfff9) != 0 {
 				f.Anomalies.IPFragment = true
 			}
-		case IPProtoAH:
-			extLen = (int64(r.data[cur+1]) + 2) * 4
-		default:
-			extLen = (int64(r.data[cur+1]) + 1) * 8
 		}
 		if extLen <= 0 || cur+extLen > ipBound {
 			f.Anomalies.TruncatedLayer = true
@@ -559,8 +553,8 @@ func decodeIPv6(r *SafeReader, offset, bound int64, f *Frame) {
 		f.IPProtocol = nextHeader
 		cur += extLen
 		if f.Anomalies.IPFragment {
-			if f.IPFragOffset == 0 && shortFragmentHeader(nextHeader, r.data[cur:ipBound]) {
-				f.Anomalies.TruncatedLayer = true
+			if f.IPFragOffset == 0 {
+				ipv6FragmentTransport(nextHeader, r.data[cur:ipBound], extCount, &f.Anomalies)
 			}
 			f.PayloadOffset = uint32(cur)
 			if ipBound > cur {
@@ -573,6 +567,17 @@ func decodeIPv6(r *SafeReader, offset, bound int64, f *Frame) {
 	}
 
 	decodeTransport(r, cur, ipBound, nextHeader, f)
+}
+
+func ipv6ExtLength(proto, length byte) int {
+	switch proto {
+	case IPProtoIPv6Frag:
+		return 8
+	case IPProtoAH:
+		return (int(length) + 2) * 4
+	default:
+		return (int(length) + 1) * 8
+	}
 }
 
 func isIPv6ExtHeader(proto uint8) bool {

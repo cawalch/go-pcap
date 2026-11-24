@@ -305,12 +305,23 @@ func TestIPv6FragmentPolicy(t *testing.T) {
 		first := frame(0, true, udp[:16])
 		last := frame(16, false, udp[16:])
 		atomic := frame(0, false, udp)
+		// AH (16 bytes) and Destination Options (8 bytes) precede UDP.
+		headers := make([]byte, 24)
+		headers[0], headers[1], headers[16] = IPProtoIPv6Opts, 2, IPProtoUDP
+		withExtensions := append(headers, udp...)
+		extFragment := func(off uint16, more bool, data []byte) []byte {
+			wire := frame(off, more, data)
+			wire[54] = IPProtoAH
+			return wire
+		}
 		for _, tc := range []struct {
 			name   string
 			frames [][]byte
 			want   int
 		}{
 			{"reordered", [][]byte{last, first}, 1},
+			{"post-fragment headers", [][]byte{extFragment(32, false, withExtensions[32:]), extFragment(0, true, withExtensions[:32])}, 1},
+			{"UDP header in later fragment", [][]byte{extFragment(0, true, withExtensions[:24]), extFragment(24, false, withExtensions[24:])}, 0},
 			{"identical overlap", [][]byte{first, first, last}, 0},
 			{"conflicting overlap", [][]byte{first, frame(8, true, make([]byte, 8)), last}, 0},
 			{"short first header", [][]byte{frame(0, true, udp[:4]), first, last}, 0},
@@ -327,6 +338,13 @@ func TestIPv6FragmentPolicy(t *testing.T) {
 				var n int
 				if kind == "dns" {
 					r, e := c.DNS(raw)
+					found, lookupErr := c.HasDNSQuery(raw, "c2.example.com")
+					if lookupErr != nil || found != (tc.want > 0) {
+						t.Fatalf("DNS lookup = %t, %v", found, lookupErr)
+					}
+					if tc.name == "post-fragment headers" && (len(r) != 1 || r[0].FlowIndex != 0 || r[0].PacketIndex != 1 || r[0].SrcPort != src || r[0].DstPort != dst) {
+						t.Fatalf("reassembled record: %+v", r)
+					}
 					err = e
 					n = len(r)
 				} else {
