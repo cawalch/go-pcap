@@ -319,3 +319,37 @@ func TestHTTP2CaptureGapSuppressesDirectionalHeaders(t *testing.T) {
 		t.Fatalf("%+v %v", r, err)
 	}
 }
+
+func TestHTTP2RolesWithServerFirst(t *testing.T) {
+	client, server := [4]byte{192, 0, 2, 1}, [4]byte{192, 0, 2, 2}
+	settings := buildHTTP2Frame(HTTP2FrameSettings, 0, 0, nil)
+	for _, preface := range []bool{true, false} {
+		clientData := settings
+		if preface {
+			clientData = append(bytes.Clone(HTTP2ClientPreface), settings...)
+		}
+		data := buildClassicPCAP(binary.LittleEndian, false, LinkTypeEthernet, 65535, [][]byte{
+			buildEthernetIPv4TCPFrame(server, client, 80, 40000, 99, 10, TCPFlagSYN|TCPFlagACK, nil),
+			buildEthernetIPv4TCPFrame(client, server, 40000, 80, 10, 100, TCPFlagACK, clientData),
+			buildEthernetIPv4TCPFrame(server, client, 80, 40000, 100, 10, TCPFlagACK, settings),
+		})
+		c, err := New(data)
+		if err != nil {
+			t.Fatal(err)
+		}
+		direct, err := c.HTTP2(data)
+		if err != nil {
+			t.Fatal(err)
+		}
+		web, err := c.Web(data)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, records := range [][]HTTP2Record{direct, web.HTTP2} {
+			if len(records) != 2 || records[0].SrcPort != 80 || records[0].IsServer != preface ||
+				records[1].SrcPort != 40000 || records[1].IsServer == preface || records[1].Summary.HasClientPreface != preface {
+				t.Fatalf("preface %t: %+v", preface, records)
+			}
+		}
+	}
+}

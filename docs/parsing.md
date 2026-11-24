@@ -847,6 +847,11 @@ retransmissions), applies the existing stream and HTTP decoding limits, and
 returns at most `MaxHTTPMessagesPerScan` observations. Errors discard the result.
 ReaderAt also limits capture reads to `MaxReaderAtScanBytes`.
 
+For cleartext HTTP/2, `HTTP2` and `Web` use the client connection preface
+to identify the sender of each directional record. If neither direction has
+a preface, the first observed direction retains the client role. Decrypted
+streams use the roles established by TLS.
+
 ### Extract WebSocket messages
 
 Call `capture.WebSockets(data)` for HTTP/1.1 upgrades in cleartext or in
