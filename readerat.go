@@ -790,7 +790,7 @@ func scanPCAPNGReaderAt(r io.ReaderAt, size int64, cb func(PacketRecord) error, 
 				header = headerBuf[8:28]
 			}
 			var options int64
-			rec, options, packetErr = decodePacketBlockHeader(blockType, header, offset+28, bodyEnd, order, &summary)
+			options, packetErr = rec.decodePacketBlockHeader(blockType, header, offset+28, bodyEnd, order, &summary)
 			if packetErr == nil {
 				tailOffset = options
 			}
@@ -799,7 +799,7 @@ func scanPCAPNGReaderAt(r io.ReaderAt, size int64, cb func(PacketRecord) error, 
 			if err := readExactAt(r, header, offset+8, size); err != nil {
 				return scanSummary{}, err
 			}
-			rec, packetErr = decodeSPBHeader(header, offset+12, bodyEnd, order, &summary)
+			packetErr = rec.decodeSPBHeader(header, offset+12, bodyEnd, order, &summary)
 		case BlockTypeSectionHeader, BlockTypeInterfaceDesc, BlockTypeDarwinProcessEvent:
 			tailOffset = offset + 8
 		default:

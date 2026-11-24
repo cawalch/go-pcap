@@ -683,12 +683,12 @@ func scanPCAPNGBlocks(r *SafeReader, collectPackets bool, hintCount int, cb func
 			var err error
 			if kind != BlockTypeSimplePacket {
 				var options int64
-				rec, options, err = decodePacketBlockHeader(kind, body, bodyStart+20, bodyEnd, order, &summary)
+				options, err = rec.decodePacketBlockHeader(kind, body, bodyStart+20, bodyEnd, order, &summary)
 				if err == nil && options < bodyEnd {
 					err = decodePacketBlockOptions(kind, body[options-bodyStart:], order, &summary, &rec)
 				}
 			} else {
-				rec, err = decodeSPBHeader(body, bodyStart+4, bodyEnd, order, &summary)
+				err = rec.decodeSPBHeader(body, bodyStart+4, bodyEnd, order, &summary)
 			}
 			if err != nil {
 				return err
@@ -975,9 +975,9 @@ func scaleRawTimestampNs(rawTicks uint64, iface InterfaceDescriptor) int64 {
 	return int64(lo)
 }
 
-func decodePacketBlockHeader(kind uint32, header []byte, payloadOffset, bodyEnd int64, order binary.ByteOrder, summary *scanSummary) (PacketRecord, int64, error) {
+func (rec *PacketRecord) decodePacketBlockHeader(kind uint32, header []byte, payloadOffset, bodyEnd int64, order binary.ByteOrder, summary *scanSummary) (int64, error) {
 	if len(header) < 20 {
-		return PacketRecord{}, 0, fmt.Errorf("%w: PcapNG packet block body too short", ErrInvalidBlock)
+		return 0, fmt.Errorf("%w: PcapNG packet block body too short", ErrInvalidBlock)
 	}
 	ifaceID := order.Uint32(header)
 	var dropCount uint64
@@ -988,7 +988,7 @@ func decodePacketBlockHeader(kind uint32, header []byte, payloadOffset, bodyEnd 
 		}
 	}
 	if ifaceID >= uint32(len(summary.interfaces)-summary.sectionInterfaceBase) {
-		return PacketRecord{}, 0, fmt.Errorf("%w: PcapNG packet interface ID %d out of range (%d section interfaces)", ErrInvalidPacket, ifaceID, len(summary.interfaces)-summary.sectionInterfaceBase)
+		return 0, fmt.Errorf("%w: PcapNG packet interface ID %d out of range (%d section interfaces)", ErrInvalidPacket, ifaceID, len(summary.interfaces)-summary.sectionInterfaceBase)
 	}
 	iface := summary.interfaces[summary.sectionInterfaceBase+int(ifaceID)]
 
@@ -998,7 +998,7 @@ func decodePacketBlockHeader(kind uint32, header []byte, payloadOffset, bodyEnd 
 	origLen := order.Uint32(header[16:])
 
 	if capLen > MaxSnapLen {
-		return PacketRecord{}, 0, fmt.Errorf("%w: PcapNG packet capture length %d exceeds %d", ErrInvalidPacket, capLen, MaxSnapLen)
+		return 0, fmt.Errorf("%w: PcapNG packet capture length %d exceeds %d", ErrInvalidPacket, capLen, MaxSnapLen)
 	}
 	if capLen > origLen {
 		summary.anomalies.CaptureLenExceedsOriginal = true
@@ -1012,15 +1012,15 @@ func decodePacketBlockHeader(kind uint32, header []byte, payloadOffset, bodyEnd 
 		paddedCapLen += 4 - rem
 	}
 	if paddedCapLen > bodyEnd-payloadOffset {
-		return PacketRecord{}, 0, fmt.Errorf("%w: PcapNG packet capture length %d exceeds block body", ErrInvalidBlock, capLen)
+		return 0, fmt.Errorf("%w: PcapNG packet capture length %d exceeds block body", ErrInvalidBlock, capLen)
 	}
 
 	if summary.packetCount >= MaxPackets {
-		return PacketRecord{}, 0, fmt.Errorf("%w: exceeds %d", ErrPacketLimit, MaxPackets)
+		return 0, fmt.Errorf("%w: exceeds %d", ErrPacketLimit, MaxPackets)
 	}
 	summary.packetCount++
 
-	return PacketRecord{
+	*rec = PacketRecord{
 		Index:         summary.packetCount - 1,
 		InterfaceID:   iface.ID,
 		LinkType:      iface.LinkType,
@@ -1030,7 +1030,8 @@ func decodePacketBlockHeader(kind uint32, header []byte, payloadOffset, bodyEnd 
 		PayloadOffset: payloadOffset,
 		PayloadLength: int64(capLen),
 		DropCount:     dropCount,
-	}, payloadOffset + paddedCapLen, nil
+	}
+	return payloadOffset + paddedCapLen, nil
 }
 
 // These comments carry metadata for which the Darwin process block has no
@@ -1147,12 +1148,12 @@ func decodeProcessComment(raw []byte, rec *PacketRecord) error {
 	return nil
 }
 
-func decodeSPBHeader(header []byte, payloadOffset, bodyEnd int64, order binary.ByteOrder, summary *scanSummary) (PacketRecord, error) {
+func (rec *PacketRecord) decodeSPBHeader(header []byte, payloadOffset, bodyEnd int64, order binary.ByteOrder, summary *scanSummary) error {
 	if len(header) < 4 {
-		return PacketRecord{}, fmt.Errorf("%w: Simple Packet Block body too short", ErrInvalidBlock)
+		return fmt.Errorf("%w: Simple Packet Block body too short", ErrInvalidBlock)
 	}
 	if len(summary.interfaces) == summary.sectionInterfaceBase {
-		return PacketRecord{}, fmt.Errorf("%w: Simple Packet Block requires interface 0", ErrInvalidPacket)
+		return fmt.Errorf("%w: Simple Packet Block requires interface 0", ErrInvalidPacket)
 	}
 	iface := summary.interfaces[summary.sectionInterfaceBase]
 	origLen := order.Uint32(header)
@@ -1163,17 +1164,17 @@ func decodeSPBHeader(header []byte, payloadOffset, bodyEnd int64, order binary.B
 		capLen = iface.SnapLen
 	}
 	if int64(capLen) > avail {
-		return PacketRecord{}, fmt.Errorf("%w: Simple Packet Block payload exceeds block body", ErrInvalidBlock)
+		return fmt.Errorf("%w: Simple Packet Block payload exceeds block body", ErrInvalidBlock)
 	}
 	if capLen > MaxSnapLen {
-		return PacketRecord{}, fmt.Errorf("%w: SPB capture length %d exceeds %d", ErrInvalidPacket, capLen, MaxSnapLen)
+		return fmt.Errorf("%w: SPB capture length %d exceeds %d", ErrInvalidPacket, capLen, MaxSnapLen)
 	}
 	if summary.packetCount >= MaxPackets {
-		return PacketRecord{}, fmt.Errorf("%w: exceeds %d", ErrPacketLimit, MaxPackets)
+		return fmt.Errorf("%w: exceeds %d", ErrPacketLimit, MaxPackets)
 	}
 	summary.packetCount++
 
-	return PacketRecord{
+	*rec = PacketRecord{
 		Index:         summary.packetCount - 1,
 		InterfaceID:   iface.ID,
 		LinkType:      iface.LinkType,
@@ -1181,7 +1182,8 @@ func decodeSPBHeader(header []byte, payloadOffset, bodyEnd int64, order binary.B
 		OriginalLen:   origLen,
 		PayloadOffset: payloadOffset,
 		PayloadLength: int64(capLen),
-	}, nil
+	}
+	return nil
 }
 
 func (s *scanSummary) decodeDSB(body []byte, bodyOffset int64, order binary.ByteOrder, totalSecretBytes *int64) error {
