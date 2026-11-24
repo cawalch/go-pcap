@@ -27,6 +27,7 @@ type LiveCapture struct {
 	snapLen   uint32
 	timeout   time.Duration
 	buf       []byte
+	oob       []byte
 	pktIndex  int
 }
 
@@ -66,11 +67,31 @@ func OpenLive(ifaceName string, opts LiveOptions) (*LiveCapture, error) {
 		return nil, err
 	}
 
+	if normOpts.Promiscuous {
+		// Linux packet_mreq contains the interface index, membership type,
+		// address length, and eight address bytes in native byte order.
+		var membership [16]byte
+		binary.NativeEndian.PutUint32(membership[:4], uint32(iface.Index))
+		binary.NativeEndian.PutUint16(membership[4:6], syscall.PACKET_MR_PROMISC)
+		if err := syscall.SetsockoptString(fd, syscall.SOL_PACKET, syscall.PACKET_ADD_MEMBERSHIP, string(membership[:])); err != nil {
+			_ = syscall.Close(fd)
+			return nil, fmt.Errorf("PACKET_ADD_MEMBERSHIP: %w", err)
+		}
+	}
+
 	if normOpts.BufferSize > 0 {
 		_ = syscall.SetsockoptInt(fd, syscall.SOL_SOCKET, syscall.SO_RCVBUF, normOpts.BufferSize)
 	}
 
+	var oob []byte
 	if len(normOpts.BPFFilter) > 0 {
+		// A filter can shorten the packet before recvmsg sees it. AUXDATA
+		// supplies the length recorded before filtering in tpacket_auxdata.
+		if err := syscall.SetsockoptInt(fd, syscall.SOL_PACKET, syscall.PACKET_AUXDATA, 1); err != nil {
+			_ = syscall.Close(fd)
+			return nil, fmt.Errorf("PACKET_AUXDATA: %w", err)
+		}
+		oob = make([]byte, syscall.CmsgSpace(20))
 		insns := make([]syscall.SockFilter, len(normOpts.BPFFilter))
 		for i, insn := range normOpts.BPFFilter {
 			insns[i] = syscall.SockFilter{
@@ -99,6 +120,7 @@ func OpenLive(ifaceName string, opts LiveOptions) (*LiveCapture, error) {
 		snapLen:   normOpts.SnapLen,
 		timeout:   normOpts.Timeout,
 		buf:       make([]byte, normOpts.SnapLen),
+		oob:       oob,
 	}, nil
 }
 
@@ -136,9 +158,38 @@ func (lc *LiveCapture) ReadPacket() (PacketRecord, []byte, error) {
 			return PacketRecord{}, nil, err
 		}
 	}
-	n, err := lc.file.Read(lc.buf)
+	raw, err := lc.file.SyscallConn()
 	if err != nil {
 		return PacketRecord{}, nil, err
+	}
+	var n, controlLen int
+	var recvErr error
+	err = raw.Read(func(fd uintptr) bool {
+		for {
+			n, controlLen, _, _, recvErr = syscall.Recvmsg(int(fd), lc.buf, lc.oob, syscall.MSG_TRUNC)
+			if recvErr != syscall.EINTR {
+				return recvErr != syscall.EAGAIN
+			}
+		}
+	})
+	if err != nil {
+		return PacketRecord{}, nil, err
+	}
+	if recvErr != nil {
+		return PacketRecord{}, nil, recvErr
+	}
+	wireLen := uint32(n)
+	if controlLen > 0 {
+		messages, err := syscall.ParseSocketControlMessage(lc.oob[:controlLen])
+		if err != nil {
+			return PacketRecord{}, nil, err
+		}
+		for _, msg := range messages {
+			if msg.Header.Level == syscall.SOL_PACKET && msg.Header.Type == syscall.PACKET_AUXDATA && len(msg.Data) >= 8 {
+				wireLen = binary.NativeEndian.Uint32(msg.Data[4:8])
+				break
+			}
+		}
 	}
 	capLen := uint32(n)
 	if capLen > lc.snapLen {
@@ -149,7 +200,7 @@ func (lc *LiveCapture) ReadPacket() (PacketRecord, []byte, error) {
 		LinkType:      lc.linkType,
 		TimestampNs:   time.Now().UnixNano(),
 		CaptureLen:    capLen,
-		OriginalLen:   uint32(n),
+		OriginalLen:   wireLen,
 		PayloadOffset: 0,
 		PayloadLength: int64(capLen),
 	}
