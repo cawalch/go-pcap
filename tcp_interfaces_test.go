@@ -121,6 +121,19 @@ func TestTCPInterfaceObservations(t *testing.T) {
 				if err != nil || !reflect.DeepEqual(got, observations) {
 					t.Fatalf("separate=%t ReaderAt requests=%+v err=%v", separate, got, err)
 				}
+				evidence, err := c.HTTP1RequestEvidence(data)
+				if err != nil || len(evidence) != len(observations) {
+					t.Fatalf("separate=%t HTTP/1 evidence=%+v err=%v", separate, evidence, err)
+				}
+				for i, r := range evidence {
+					if r.Target != observations[i].Path || r.FlowIndex != observations[i].FlowIndex || r.PacketIndex != observations[i].PacketIndex || r.PacketPayloadOffset != 0 {
+						t.Fatalf("separate=%t HTTP/1 evidence[%d]=%+v", separate, i, r)
+					}
+				}
+				readerEvidence, err := cr.HTTP1RequestEvidenceFromReaderAt(reader)
+				if err != nil || !reflect.DeepEqual(readerEvidence, evidence) {
+					t.Fatalf("separate=%t ReaderAt HTTP/1 evidence=%+v err=%v", separate, readerEvidence, err)
+				}
 			}
 		})
 	}
@@ -146,6 +159,12 @@ func TestTCPInterfaceObservationsShareTupleSegmentLimit(t *testing.T) {
 	}
 	if _, err := c.HTTPRequests(data); !errors.Is(err, ErrReassemblyLimit) {
 		t.Fatalf("HTTPRequests error = %v", err)
+	}
+	if rows, err := c.HTTP1RequestEvidence(data); rows != nil || !errors.Is(err, ErrReassemblyLimit) {
+		t.Fatalf("HTTP1RequestEvidence = %d rows, %v", len(rows), err)
+	}
+	if rows, err := c.HTTP1RequestEvidenceFromReaderAt(bytes.NewReader(data)); rows != nil || !errors.Is(err, ErrReassemblyLimit) {
+		t.Fatalf("HTTP1RequestEvidenceFromReaderAt = %d rows, %v", len(rows), err)
 	}
 }
 

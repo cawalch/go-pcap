@@ -15,7 +15,7 @@ import (
 	"strings"
 )
 
-// HTTPHeader represents a single name-value HTTP header line in wire order.
+// HTTPHeader represents a name-value HTTP header field in wire order.
 type HTTPHeader struct {
 	Name  string
 	Value string
@@ -140,7 +140,7 @@ func parseHTTPRequest(stream []byte, decodedBudget *httpDecodeBudget) (HTTPReque
 		return HTTPRequest{}, 0, err
 	}
 
-	headers, bodyStart, framing, err := parseHTTPHeaders(stream, lineEnd+2)
+	headers, bodyStart, framing, err := parseHTTPHeaders(stream, lineEnd+2, false)
 	if err != nil {
 		return HTTPRequest{}, 0, err
 	}
@@ -182,15 +182,15 @@ func parseHTTPRequest(stream []byte, decodedBudget *httpDecodeBudget) (HTTPReque
 	req.CookieCount = len(cookieNames)
 	req.JA4H = computeJA4H(&req, hasCookie, hasReferer, acceptLang, cookieNames, cookiePairs)
 
-	body, consumed, truncated := framing.body(stream, bodyStart, true)
-	req.Anomalies.TruncatedBody = truncated
-	req.Body, req.IsDecompressed, err = decodeHTTPContent(body, framing.encoding, framing.chunked, decodedBudget, &req.Anomalies)
+	body := framing.body(stream, bodyStart, true)
+	req.Anomalies.TruncatedBody = body.truncated
+	req.Body, req.IsDecompressed, err = decodeHTTPContent(body.data, framing.encoding, framing.chunked, decodedBudget, &req.Anomalies)
 	if err != nil {
 		return HTTPRequest{}, 0, err
 	}
 	req.BodyOffset = bodyStart
 	req.BodyLength = len(req.Body)
-	return req, consumed, nil
+	return req, body.consumed, nil
 }
 
 // ParseHTTPResponse parses one HTTP/1.x response from stream and carves its body.
@@ -221,7 +221,7 @@ func parseHTTPResponse(stream []byte, method string, decodedBudget *httpDecodeBu
 		statusText = statusLine[13:]
 	}
 
-	headers, bodyStart, framing, err := parseHTTPHeaders(stream, lineEnd+2)
+	headers, bodyStart, framing, err := parseHTTPHeaders(stream, lineEnd+2, false)
 	if err != nil {
 		return HTTPResponse{}, 0, err
 	}
@@ -252,15 +252,15 @@ func parseHTTPResponse(stream []byte, method string, decodedBudget *httpDecodeBu
 		return resp, bodyStart, nil
 	}
 
-	body, consumed, truncated := framing.body(stream, bodyStart, false)
-	resp.Anomalies.TruncatedBody = truncated
-	resp.Body, resp.IsDecompressed, err = decodeHTTPContent(body, framing.encoding, framing.chunked, decodedBudget, &resp.Anomalies)
+	body := framing.body(stream, bodyStart, false)
+	resp.Anomalies.TruncatedBody = body.truncated
+	resp.Body, resp.IsDecompressed, err = decodeHTTPContent(body.data, framing.encoding, framing.chunked, decodedBudget, &resp.Anomalies)
 	if err != nil {
 		return HTTPResponse{}, 0, err
 	}
 	resp.BodyOffset = bodyStart
 	resp.BodyLength = len(resp.Body)
-	return resp, consumed, nil
+	return resp, body.consumed, nil
 }
 
 func isStandardHTTPMethod(m string) bool {
@@ -273,15 +273,17 @@ func isStandardHTTPMethod(m string) bool {
 }
 
 type httpFraming struct {
-	length                              int64
-	chunked, hasTransfer, invalidLength bool
-	encoding                            string
-	anomalies                           HTTPAnomalies
+	length                                 int64
+	chunked, hasTransfer, invalidLength    bool
+	strict, malformed, unsupportedTransfer bool
+	encoding                               string
+	anomalies                              HTTPAnomalies
 }
 
-func parseHTTPHeaders(stream []byte, start int) (headers []HTTPHeader, bodyStart int, f httpFraming, err error) {
+func parseHTTPHeaders(stream []byte, start int, raw bool) (headers []HTTPHeader, bodyStart int, f httpFraming, err error) {
 	offset := start
 	f.length = -1
+	f.strict = raw
 	var encodings strings.Builder
 	var encodingSeen, lengthSeen bool
 	lines := 0
@@ -310,8 +312,15 @@ func parseHTTPHeaders(stream []byte, start int) (headers []HTTPHeader, bodyStart
 		if colon <= 0 || line[0] == ' ' || line[0] == '\t' {
 			return nil, 0, f, fmt.Errorf("%w: malformed HTTP header line", ErrInvalidHTTP)
 		}
-		name := strings.TrimSpace(string(line[:colon]))
-		val := strings.TrimSpace(string(line[colon+1:]))
+		rawName, rawValue := string(line[:colon]), string(line[colon+1:])
+		name, val := rawName, rawValue
+		if raw {
+			f.malformed = f.malformed || !validHTTPFieldName(line[:colon]) || !validHTTPFieldValue(line[colon+1:])
+			val = strings.Trim(val, " \t")
+		} else {
+			name, val = strings.TrimSpace(name), strings.TrimSpace(val)
+		}
+		valueStart := offset + colon + 1
 		offset += relEnd + 2
 		var unfolded strings.Builder
 		for offset < len(stream) && (stream[offset] == ' ' || stream[offset] == '\t') {
@@ -328,6 +337,9 @@ func parseHTTPHeaders(stream []byte, start int) (headers []HTTPHeader, bodyStart
 			}
 			f.anomalies.ObsFoldHeader = true
 			part := bytes.Trim(stream[offset:offset+end], " \t")
+			if raw && !validHTTPFieldValue(part) {
+				f.malformed = true
+			}
 			if len(name)+1+unfolded.Len()+1+len(part) > MaxHTTPHeaderLineBytes {
 				return nil, 0, f, fmt.Errorf("%w: unfolded HTTP header exceeds limit", ErrHTTPLimit)
 			}
@@ -337,8 +349,15 @@ func parseHTTPHeaders(stream []byte, start int) (headers []HTTPHeader, bodyStart
 		}
 		if unfolded.Len() != 0 {
 			val = unfolded.String()
+			if raw {
+				rawValue = string(stream[valueStart : offset-2])
+			}
 		}
-		headers = append(headers, HTTPHeader{Name: name, Value: val})
+		if raw {
+			headers = append(headers, HTTPHeader{Name: rawName, Value: rawValue})
+		} else {
+			headers = append(headers, HTTPHeader{Name: name, Value: val})
+		}
 
 		if strings.EqualFold(name, "Content-Length") {
 			lengthSeen = true
@@ -354,10 +373,16 @@ func parseHTTPHeaders(stream []byte, start int) (headers []HTTPHeader, bodyStart
 				}
 			}
 		} else if strings.EqualFold(name, "Transfer-Encoding") {
+			last := strings.Trim(val[strings.LastIndexByte(val, ',')+1:], " \t")
+			f.chunked = strings.EqualFold(last, "chunked")
+			if raw {
+				f.malformed = f.malformed || last == ""
+				f.chunked = f.chunked && validHTTPFieldName([]byte(last))
+				f.unsupportedTransfer = f.hasTransfer || last != val || !f.chunked
+			}
 			f.hasTransfer = true
-			last := val[strings.LastIndexByte(val, ',')+1:]
-			f.chunked = strings.EqualFold(strings.Trim(last, " \t"), "chunked")
 		} else if strings.EqualFold(name, "Content-Encoding") {
+			f.malformed = f.malformed || raw && val == ""
 			if !encodingSeen {
 				f.encoding = val
 				encodingSeen = true
@@ -373,20 +398,52 @@ func parseHTTPHeaders(stream []byte, start int) (headers []HTTPHeader, bodyStart
 	return nil, 0, f, fmt.Errorf("%w: missing end of HTTP headers", ErrInvalidHTTP)
 }
 
+func validHTTPFieldName(name []byte) bool {
+	if len(name) == 0 {
+		return false
+	}
+	for _, b := range name {
+		if b >= 'a' && b <= 'z' || b >= 'A' && b <= 'Z' || b >= '0' && b <= '9' || strings.IndexByte("!#$%&'*+-.^_`|~", b) >= 0 {
+			continue
+		}
+		return false
+	}
+	return true
+}
+
+func validHTTPFieldValue(value []byte) bool {
+	for _, b := range value {
+		if b < ' ' && b != '\t' || b == 0x7f {
+			return false
+		}
+	}
+	return true
+}
+
+type httpFramedBody struct {
+	data                         []byte
+	consumed                     int
+	truncated, capped, malformed bool
+}
+
 // body consumes the remaining input when framing cannot identify the next message.
-func (f httpFraming) body(stream []byte, start int, request bool) ([]byte, int, bool) {
+func (f httpFraming) body(stream []byte, start int, request bool) httpFramedBody {
 	avail := len(stream) - start
+	if f.malformed {
+		return httpFramedBody{consumed: len(stream), malformed: true}
+	}
 	if f.chunked {
-		decoded, consumed, complete := decodeChunkedBody(stream[start:])
-		return decoded, start + consumed, !complete
+		body := decodeChunkedBody(stream[start:], f.strict)
+		body.consumed += start
+		return body
 	}
 	if f.hasTransfer {
 		if request {
-			return nil, len(stream), false
+			return httpFramedBody{consumed: len(stream)}
 		}
 		f.length = -1 // A response with a final non-chunked coding is close-delimited.
 	} else if f.invalidLength || f.anomalies.MultipleContentLength {
-		return nil, len(stream), false
+		return httpFramedBody{consumed: len(stream), malformed: true}
 	}
 	wireLen := avail
 	if f.length >= 0 {
@@ -394,10 +451,11 @@ func (f httpFraming) body(stream []byte, start int, request bool) ([]byte, int, 
 	} else if request {
 		wireLen = 0
 	}
-	if wireLen == 0 {
-		return nil, start, f.length > int64(avail)
+	body := httpFramedBody{consumed: start + wireLen, truncated: f.length > int64(avail), capped: wireLen > MaxHTTPBodyBytes}
+	if wireLen != 0 {
+		body.data = stream[start : start+min(wireLen, MaxHTTPBodyBytes)]
 	}
-	return stream[start : start+min(wireLen, MaxHTTPBodyBytes)], start + wireLen, f.length > int64(avail)
+	return body
 }
 
 var errHTTPDecodeBudget = fmt.Errorf("%w: HTTP content decoding exceeds %d bytes per capture", ErrHTTPLimit, MaxHTTPDecodedBodyBytesPerScan)
@@ -426,23 +484,9 @@ func decodeHTTPContent(body []byte, encoding string, chunked bool, budget *httpD
 	if encoding != "" {
 		reader, err := httpContentReader(body, encoding)
 		if reader != nil {
-			limit := MaxHTTPBodyBytes
-			if budget != nil {
-				limit = min(limit, budget.remaining)
-			}
-			decoded, readErr := budget.read(io.LimitReader(reader, int64(limit)+1))
-			if closeErr := reader.Close(); readErr == nil {
-				readErr = closeErr
-			}
-
-			if budget != nil {
-				charged := min(len(decoded), MaxHTTPBodyBytes)
-				if charged > budget.remaining {
-					return nil, false, errHTTPDecodeBudget
-				}
-				// A checksum or stream error still costs the work of inflating
-				// the bytes the reader produced before reporting the error.
-				budget.remaining -= charged
+			decoded, readErr := readHTTPContent(reader, budget)
+			if errors.Is(readErr, errHTTPDecodeBudget) {
+				return nil, false, readErr
 			}
 			if readErr == nil {
 				if len(decoded) > MaxHTTPBodyBytes {
@@ -465,6 +509,26 @@ func decodeHTTPContent(body []byte, encoding string, chunked bool, budget *httpD
 	return body, false, nil
 }
 
+func readHTTPContent(reader io.ReadCloser, budget *httpDecodeBudget) ([]byte, error) {
+	limit := MaxHTTPBodyBytes
+	if budget != nil {
+		limit = min(limit, budget.remaining)
+	}
+	decoded, err := budget.read(io.LimitReader(reader, int64(limit)+1))
+	if closeErr := reader.Close(); err == nil {
+		err = closeErr
+	}
+	if budget != nil {
+		// Failed decoding attempts still consume the work budget.
+		charged := min(len(decoded), MaxHTTPBodyBytes)
+		if charged > budget.remaining {
+			return nil, errHTTPDecodeBudget
+		}
+		budget.remaining -= charged
+	}
+	return decoded, err
+}
+
 func httpContentReader(body []byte, encoding string) (io.ReadCloser, error) {
 	switch {
 	case strings.EqualFold(encoding, "gzip"), strings.EqualFold(encoding, "x-gzip"):
@@ -485,33 +549,53 @@ func httpContentReader(body []byte, encoding string) (io.ReadCloser, error) {
 	return nil, nil
 }
 
-func decodeChunkedBody(raw []byte) ([]byte, int, bool) {
+func decodeChunkedBody(raw []byte, strict bool) httpFramedBody {
 	var out bytes.Buffer
+	body := httpFramedBody{consumed: len(raw), truncated: true}
 	offset := 0
 	for offset < len(raw) {
 		lineEnd := bytes.Index(raw[offset:], []byte("\r\n"))
 		if lineEnd <= 0 || lineEnd > MaxHTTPHeaderLineBytes {
+			body.malformed = lineEnd >= 0 || len(raw)-offset > MaxHTTPHeaderLineBytes+1
 			break
 		}
-		sizeHex := strings.TrimSpace(string(raw[offset : offset+lineEnd]))
-		if semi := strings.IndexByte(sizeHex, ';'); semi >= 0 {
-			sizeHex = sizeHex[:semi]
+		line := raw[offset : offset+lineEnd]
+		sizeHex := string(line)
+		if !strict {
+			sizeHex = strings.TrimSpace(sizeHex)
+		}
+		if size, _, ok := strings.Cut(sizeHex, ";"); ok {
+			sizeHex = size
+			if strict {
+				sizeHex = strings.TrimRight(sizeHex, " \t")
+			}
+		}
+		if strict && (len(sizeHex) == 0 || sizeHex[0] == '+' || sizeHex[0] == '-' || !validHTTPFieldValue(line)) {
+			body.malformed = true
+			break
 		}
 		chunkSize, err := strconv.ParseInt(sizeHex, 16, 32)
 		if err != nil || chunkSize < 0 {
+			body.malformed = true
 			break
 		}
 		offset += lineEnd + 2
 		if chunkSize == 0 {
 			// Consume optional HTTP trailers up to the terminating empty line "\r\n".
-			for range MaxHTTPHeaders + 1 {
+			for i := range MaxHTTPHeaders + 1 {
 				trEnd := bytes.Index(raw[offset:], []byte("\r\n"))
 				if trEnd < 0 || trEnd > MaxHTTPHeaderLineBytes {
+					body.malformed = body.malformed || trEnd >= 0 || len(raw)-offset > MaxHTTPHeaderLineBytes+1
 					break
+				}
+				if strict && trEnd != 0 {
+					name, value, found := bytes.Cut(raw[offset:offset+trEnd], []byte{':'})
+					body.malformed = body.malformed || i == MaxHTTPHeaders || !found || !validHTTPFieldName(name) || !validHTTPFieldValue(value)
 				}
 				offset += trEnd + 2
 				if trEnd == 0 {
-					return out.Bytes(), offset, true
+					body.data, body.consumed, body.truncated = out.Bytes(), offset, false
+					return body
 				}
 			}
 			break
@@ -519,6 +603,7 @@ func decodeChunkedBody(raw []byte) ([]byte, int, bool) {
 		rem := len(raw) - offset
 		if chunkSize > int64(rem) {
 			take := min(rem, MaxHTTPBodyBytes-out.Len())
+			body.capped = body.capped || take < rem
 			if take > 0 {
 				out.Write(raw[offset : offset+take])
 			}
@@ -526,16 +611,19 @@ func decodeChunkedBody(raw []byte) ([]byte, int, bool) {
 		}
 		chunkLen := int(chunkSize)
 		take := min(chunkLen, MaxHTTPBodyBytes-out.Len())
+		body.capped = body.capped || take < chunkLen
 		if take > 0 {
 			out.Write(raw[offset : offset+take])
 		}
 		offset += chunkLen
 		if len(raw)-offset < 2 || raw[offset] != '\r' || raw[offset+1] != '\n' {
+			body.malformed = offset < len(raw) && raw[offset] != '\r' || len(raw)-offset >= 2
 			break
 		}
 		offset += 2
 	}
-	return out.Bytes(), len(raw), false
+	body.data = out.Bytes()
+	return body
 }
 
 func parseCookiesForJA4H(val string, names *[]string, pairs *[]string) {
@@ -848,7 +936,7 @@ func matchesHTTPResponse(wire [2]tcpWireDirection, data []byte, requestOffset, r
 	if status[0] == '1' || status == "204" || status == "304" {
 		return true
 	}
-	_, start, framing, err := parseHTTPHeaders(data, httpStartLineEnd(data)+2)
+	_, start, framing, err := parseHTTPHeaders(data, httpStartLineEnd(data)+2, false)
 	if err != nil || framing.hasTransfer || framing.invalidLength || framing.anomalies.MultipleContentLength ||
 		framing.length <= 0 || framing.length > int64(len(data)-start) || hasHTTPResponseStart(data[start:]) {
 		return true

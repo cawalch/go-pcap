@@ -34,7 +34,7 @@ func (c *Capture) HTTPRequestsFromReaderAt(r io.ReaderAt) ([]HTTPRequestObservat
 	return scanHTTPRequests(ipFrameSource{capture: c, reader: r, needsPayload: func(f Frame, _ []byte) bool { return f.IPProtocol == IPProtoTCP }})
 }
 
-func scanHTTPRequests(source ipFrameSource) ([]HTTPRequestObservation, error) {
+func collectHTTPRequestStreams(source ipFrameSource) (tcpMessageCollector, error) {
 	var table flowIndexTable
 	collector := tcpMessageCollector{separateInterfaces: source.capture != nil && source.capture.SeparateTCPInterfaces}
 	remaining := MaxTotalStreamBytes
@@ -50,13 +50,18 @@ func scanHTTPRequests(source ipFrameSource) ([]HTTPRequestObservation, error) {
 		remaining -= len(payload)
 		return collector.add(pkt, f, flow, payload)
 	})
+	return collector, err
+}
+
+func scanHTTPRequests(source ipFrameSource) ([]HTTPRequestObservation, error) {
+	collector, err := collectHTTPRequestStreams(source)
 	if err != nil {
 		return nil, err
 	}
 	var rows []HTTPRequestObservation
 	bodyBudget := httpDecodeBudget{remaining: MaxHTTPDecodedBodyBytesPerScan}
 	headerBudget := MaxHTTP2DecodedHeaderBytes
-	err = collector.walkContiguous(func(dir *tcpMessageDirection, data []byte, spans []packetSpan) error {
+	err = collector.walkContiguous(func(dir *tcpMessageDirection, data []byte, spans []packetSpan, _ StreamAnomalies) error {
 		i := 0
 		add := func(off int, stream uint32, method, authority, path string) error {
 			if len(rows) >= MaxHTTPMessagesPerScan {

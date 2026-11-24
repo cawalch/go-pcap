@@ -115,8 +115,9 @@ The following limits bound parsing work and memory allocation on each call:
 | `MaxQUICFlowsPerScan` | 16,384 exchanges | Bounds QUIC Initial exchanges tracked per capture scan |
 | `MaxHTTPHeaders` | 128 headers | Bounds HTTP header lines per request or response |
 | `MaxHTTPBodyBytes` | 4 MiB | Bounds each carved HTTP body before and after content decoding |
-| `MaxHTTPDecodedBodyBytesPerScan` | 64 MiB | Bounds cumulative HTTP/1.x content decoding per `Capture.HTTP` call, including failed attempts |
+| `MaxHTTPDecodedBodyBytesPerScan` | 64 MiB | Bounds cumulative HTTP/1.x content decoding per capture scan, including failed attempts |
 | `MaxHTTPMessagesPerScan` | 16,384 messages | Bounds HTTP/1.x and HTTP/2 records returned per capture scan |
+| `MaxHTTP1RequestEvidenceBytesPerScan` | 64 MiB | Bounds combined request-line, wire-header, and retained body bytes per HTTP/1 request evidence scan |
 | `MaxSSHKexPacketBytes` | 32 KiB | Bounds SSH `SSH_MSG_KEXINIT` packet length |
 | `MaxSSHHandshakesPerScan` | 16,384 handshakes | Bounds SSH handshakes returned per capture scan |
 | `MaxSMB2PacketBytes` | 64 KiB | Bounds NetBIOS-framed SMB2/3 message length |
@@ -888,6 +889,57 @@ For cleartext HTTP/2, `HTTP2` and `Web` use the client connection preface
 to identify the sender of each directional record. If neither direction has
 a preface, the first observed direction retains the client role. Decrypted
 streams use the roles established by TLS.
+
+### Inspect cleartext HTTP/1 request evidence
+
+Use `capture.HTTP1RequestEvidence(data)` or
+`capture.HTTP1RequestEvidenceFromReaderAt(file)` to inspect requests with
+complete headers on cleartext HTTP/1 connections. This scan covers requests
+on the plaintext leg of a proxy. Use `HTTPRequests` for a timeline that also
+includes cleartext HTTP/2, and `Web` to inspect responses or keyed TLS traffic.
+
+Each request starts at a unique `(PacketIndex, PacketPayloadOffset)` in the
+capture. The offset counts bytes from the start of that packet's TCP payload.
+Multiple requests in a packet have distinct offsets. For a split request,
+both fields refer to the packet that supplied the first byte of the request
+line. Reassembly uses the first captured copy of overlapping bytes. Results
+follow packet order, then payload offset. `FlowIndex` matches `Flows`, even
+when TCP connections reuse the same tuple. `Source`, `Destination`, and
+`TimestampNs` give direction and packet time.
+
+`Target` preserves the request target from the start line. `Authority` uses
+the authority component of a valid absolute-form target, the CONNECT target,
+or the first `Host` field value with surrounding spaces and tabs removed.
+Header names and values preserve wire bytes on either side of the colon,
+excluding the final CRLF. Values include any folded continuation. Header
+order and duplicates are preserved. `Headers` excludes chunk trailers.
+
+`Body` contains entity bytes after removing chunk framing and decoding a
+single `gzip`, `x-gzip`, or `deflate` content coding. No content coding and
+`identity` both use the entity bytes directly. Inspect `BodyState` before
+using the bytes.
+
+| State | Meaning |
+| --- | --- |
+| `HTTPBodyComplete` | The full entity is present. An empty complete body contains zero bytes. |
+| `HTTPBodyPartial` | Only a prefix is available, possibly empty. A missing chunk terminator or compressed footer can also leave a partial body. |
+| `HTTPBodyUnknown` | Malformed framing or invalid compressed content prevents recovery of reliable entity bytes. |
+| `HTTPBodyUnsupported` | An unsupported or stacked transfer or content coding prevents entity decoding. |
+
+Use `Anomalies` to inspect HTTP framing and decoding. `BodyLimitExceeded`
+indicates that a per-message body limit cut the entity. `TCPAnomalies` applies
+to the whole reassembled direction. A request can have a complete body even
+when a later part of that direction has a gap or hits a reassembly limit.
+The parser stops at the first known TCP gap, an unknown next-message boundary,
+or a CONNECT or Upgrade request. Incomplete request headers produce no row.
+
+The caller owns the returned headers and body. Body length counts the
+retained bytes. Entity bytes may span packets or come from decompression, so
+the result provides packet attribution only for the request start. The scan
+caps request-line, wire-header, and body bytes at
+`MaxHTTP1RequestEvidenceBytesPerScan`, and bounds metadata by
+`MaxHTTPHeaders` and `MaxHTTPMessagesPerScan`. The existing TCP reassembly,
+HTTP decoding, and ReaderAt read budgets apply. Errors discard all evidence.
 
 ### Extract WebSocket messages
 
