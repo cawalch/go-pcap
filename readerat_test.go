@@ -151,15 +151,6 @@ func TestPCAPNGNRBISBAndProcessExtensionsRoundTrip(t *testing.T) {
 		t.Fatalf("WriteInterfaceStats() error = %v", err)
 	}
 
-	// Also append a Darwin Process Event Block (DPEB) and an EPB referencing DPEB index 0.
-	var dpebBody bytes.Buffer
-	var pidBytes [4]byte
-	binary.LittleEndian.PutUint32(pidBytes[:], 8888)
-	dpebBody.Write(pidBytes[:])
-	writePCAPNGOptionLE(&dpebBody, optDPEBProcessName, []byte("safari\x00"))
-	writePCAPNGOptionLE(&dpebBody, optEndOfOpt, nil)
-	writePCAPNGBlockLE(&out, BlockTypeDarwinProcessEvent, dpebBody.Bytes())
-
 	raw := out.Bytes()
 	cap, err := New(raw)
 	if err != nil {
@@ -171,7 +162,7 @@ func TestPCAPNGNRBISBAndProcessExtensionsRoundTrip(t *testing.T) {
 	if len(cap.InterfaceStats) != 1 || cap.InterfaceStats[0].PacketsReceived != 100 || cap.InterfaceStats[0].PacketsDropped != 2 {
 		t.Fatalf("InterfaceStats = %+v", cap.InterfaceStats)
 	}
-	if len(cap.Processes) != 1 || cap.Processes[0].ProcessID != 8888 || cap.Processes[0].ProcessName != "safari" {
+	if len(cap.Processes) != 1 || cap.Processes[0].ProcessID != 9001 || cap.Processes[0].ProcessName != "curl" {
 		t.Fatalf("Processes = %+v", cap.Processes)
 	}
 

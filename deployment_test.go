@@ -3,6 +3,7 @@ package pcap
 import (
 	"bytes"
 	"encoding/hex"
+	"math"
 	"net/netip"
 	"os"
 	"slices"
@@ -262,5 +263,57 @@ func TestDeploymentCaptures(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+// Apple tcpdump wrote this PcapNG from the synthetic PKTAP input documented
+// in testdata/deployments/README.md.
+func TestDarwinPKTAPProcessAttribution(t *testing.T) {
+	raw, err := os.ReadFile("testdata/deployments/darwin-pktap.pcapng")
+	if err != nil {
+		t.Fatal(err)
+	}
+	wantProcesses := []ProcessEvent{{16232, "fixture-proxy"}, {7447, "fixture-client"}, {math.MaxUint32, "fixture-name"}}
+	for pass := range 2 {
+		r := bytes.NewReader(raw)
+		c, err := New(raw)
+		if err != nil {
+			t.Fatal(err)
+		}
+		cr, err := NewFromReaderAt(r, r.Size())
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !slices.Equal(c.Processes, wantProcesses) || !slices.Equal(cr.Processes, wantProcesses) {
+			t.Fatalf("pass %d process entries: %+v / %+v", pass, c.Processes, cr.Processes)
+		}
+		packets := checkReaderParity(t, raw, c.Packets, cr.PacketsFromReaderAt)
+		wantPacketProcesses := []ProcessEvent{{16232, "fixture-proxy"}, {16232, "fixture-proxy"}, {}, {0, "fixture-name"}}
+		if len(packets) != len(wantPacketProcesses) {
+			t.Fatalf("pass %d packet count: %d", pass, len(packets))
+		}
+		for i, pkt := range packets {
+			want := wantPacketProcesses[i]
+			if pkt.HasProcessID != (want.ProcessID != 0) || pkt.ProcessID != want.ProcessID || pkt.ProcessName != want.ProcessName {
+				t.Errorf("packet %d process: %+v", i, pkt)
+			}
+			if pkt.HasThreadID || pkt.HasUserID || pkt.ProcessArgs != "" || pkt.ContainerID != "" {
+				t.Errorf("packet %d mistaken Apple options: %+v", i, pkt)
+			}
+		}
+		flows := checkReaderParity(t, raw, c.Flows, cr.FlowsFromReaderAt)
+		if len(flows) != 1 || !flows[0].HasProcessID || flows[0].ProcessID != 16232 || flows[0].ProcessName != "fixture-proxy" {
+			t.Fatalf("pass %d flows: %+v", pass, flows)
+		}
+		if pass == 0 {
+			var out, outReader bytes.Buffer
+			if err := c.ExtractFlowPCAPNG(raw, &out, 0); err != nil {
+				t.Fatal(err)
+			}
+			if err := cr.ExtractFlowPCAPNGFromReaderAt(r, &outReader, 0); err != nil || !bytes.Equal(out.Bytes(), outReader.Bytes()) {
+				t.Fatalf("native export parity: %v", err)
+			}
+			raw = out.Bytes()
+		}
 	}
 }

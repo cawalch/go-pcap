@@ -161,7 +161,7 @@ def proxy():
                        for i, leg in enumerate((front, back)))
 
     event = block(0x80000001, pack("<I", 4242) + option(2, b"fixture-proxy\0") + option(0, b""))
-    process = option(0x8000, pack("<I", 0))
+    process = option(0x8001, pack("<I", 0))
     packets.extend([
         (0, front.send(False, PSH | ACK, hello("app.example", "h2", 0x1301, 5)), None, b""),
         (1, back.send(False, PSH | ACK, hello("origin.example", "http/1.1", 0x1302, 7)), None, process),
@@ -224,8 +224,33 @@ def dns_transactions():
     (OUT / "dns-transactions.pcap").write_bytes(trace)
 
 
+def darwin_pktap():
+    # Apple uses link type 149 for PKTAP in classic PCAP. Convert this
+    # synthetic input with native tcpdump to obtain its PcapNG extensions.
+    trace = bytearray(pack("<IHHIIII", 0xa1b2c3d4, 2, 4, 0, 0, 262144, 149))
+    data = udp("192.0.2.2", "198.51.100.2", 5000, 6000, b"test")
+    for i, (pid, name, effective_pid, effective_name) in enumerate([
+        (16232, b"fixture-proxy", 7447, b"fixture-client"),
+        (16232, b"fixture-proxy", -1, b""),
+        (-1, b"", -1, b""),
+        (-1, b"fixture-name", -1, b""),
+    ]):
+        # Outbound, delegated, new socket flow. Service class 7, flow ID
+        # 101 and trace tag 42 are present even on the packet without a PID.
+        pktap = pack("<III24sIIIIi17sBHIHHi17sBHIIii16s16s",
+                     156, 1, 1, b"en0", 0x24006, 2, 14, 0, pid, name,
+                     17, 42, 7, 6, 0, effective_pid, effective_name,
+                     0, 0, 101, 0, 0, 0, bytes(16), bytes(16))
+        size = len(pktap) + len(data)
+        trace.extend(pack("<4I", 1700000000 + i, 12345, size, size))
+        trace.extend(pktap)
+        trace.extend(data)
+    (OUT / "darwin-pktap.pcap").write_bytes(trace)
+
+
 if __name__ == "__main__":
     client()
     proxy()
     iot()
     dns_transactions()
+    darwin_pktap()

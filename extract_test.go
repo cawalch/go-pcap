@@ -27,11 +27,12 @@ func TestExtractFlowPCAPNG(t *testing.T) {
 	if err = w.WritePacket(PacketRecord{InterfaceID: 0}, other); err != nil {
 		t.Fatal(err)
 	}
-	epbStart := input.Len()
 	if err = w.WritePacket(PacketRecord{InterfaceID: id, TimestampNs: 123456789, ProcessName: "sample", HasUserID: true, UserID: 7, OriginalLen: 99}, request); err != nil {
 		t.Fatal(err)
 	}
 	// Insert an unrecognized option before the selected EPB's option terminator.
+	epbLength := int(binary.LittleEndian.Uint32(input.Bytes()[input.Len()-4:]))
+	epbStart := input.Len() - epbLength
 	input.Truncate(input.Len() - 8)
 	appendPCAPNGOption(&input, binary.LittleEndian, 21111, []byte("retained-option"))
 	appendPCAPNGOption(&input, binary.LittleEndian, optEndOfOpt, nil)
@@ -70,7 +71,8 @@ func TestExtractFlowPCAPNG(t *testing.T) {
 		t.Fatalf("source reader parity: %v", err)
 	}
 	got, pkts := readWrittenPackets(t, result.Bytes())
-	if len(pkts) != 2 || len(got.Interfaces) != 2 || len(got.Secrets) != 2 || !reflect.DeepEqual(got.NameRecords, c.NameRecords) {
+	if len(pkts) != 2 || len(got.Interfaces) != 2 || len(got.Secrets) != 2 ||
+		!reflect.DeepEqual(got.NameRecords, c.NameRecords) || !reflect.DeepEqual(got.Processes, c.Processes) {
 		t.Fatal(got)
 	}
 	for i, n := range []int{1, 3} {

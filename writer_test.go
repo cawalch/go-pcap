@@ -262,3 +262,82 @@ func TestPCAPNGWriterBoundsAndSnapLen(t *testing.T) {
 		t.Fatalf("nullPkts = %+v, want LinkTypeNull", nullPkts)
 	}
 }
+
+func TestPCAPNGWriterProcessEvents(t *testing.T) {
+	var out bytes.Buffer
+	w, err := NewPCAPNGWriter(&out, PCAPNGWriterOptions{UserApplication: "go-pcap"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	// The args split at a UTF-8 boundary, and all original option values fit.
+	args := strings.Repeat("x", MaxOptionStringBytes-len(processCommentArgs)-1) + "世" +
+		strings.Repeat("y", len(processCommentArgs)-2)
+	attributed := PacketRecord{
+		HasProcessID: true,
+		ProcessName:  "kernel",
+		HasThreadID:  true,
+		HasUserID:    true,
+		UserID:       math.MaxUint32,
+		ProcessArgs:  args,
+		ContainerID:  strings.Repeat("c", MaxOptionStringBytes),
+	}
+	nameOnly := PacketRecord{ProcessName: strings.Repeat("n", MaxOptionStringBytes)}
+	renamed := PacketRecord{HasProcessID: true, ProcessName: "renamed"}
+	want := []PacketRecord{attributed, attributed, renamed, nameOnly}
+	for _, pkt := range want {
+		if err := w.WritePacket(pkt, nil); err != nil {
+			t.Fatal(err)
+		}
+	}
+	raw := out.Bytes()
+	c, err := New(raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(c.Processes) != 3 || c.Processes[0].ProcessName != "kernel" || c.Processes[1].ProcessName != "renamed" ||
+		c.Processes[2].ProcessID != math.MaxUint32 || c.Processes[2].ProcessName != nameOnly.ProcessName {
+		t.Fatal("wrong deduplicated process entries")
+	}
+	packets := checkReaderParity(t, raw, c.Packets, c.PacketsFromReaderAt)
+	if len(packets) != len(want) {
+		t.Fatalf("packets: %d, want %d", len(packets), len(want))
+	}
+	for i, pkt := range packets {
+		expect := want[i]
+		if pkt.HasProcessID != expect.HasProcessID || pkt.ProcessID != expect.ProcessID || pkt.ProcessName != expect.ProcessName ||
+			pkt.HasThreadID != expect.HasThreadID || pkt.ThreadID != expect.ThreadID ||
+			pkt.HasUserID != expect.HasUserID || pkt.UserID != expect.UserID ||
+			pkt.ProcessArgs != expect.ProcessArgs || pkt.ContainerID != expect.ContainerID {
+			t.Errorf("packet %d attribution fields did not round trip", i)
+		}
+	}
+}
+
+func TestPCAPNGWriterProcessEventLimit(t *testing.T) {
+	var out bytes.Buffer
+	w, err := NewPCAPNGWriter(&out, PCAPNGWriterOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for id := range MaxProcessEvents {
+		if err := w.WritePacket(PacketRecord{ProcessID: uint32(id), HasProcessID: true}, nil); err != nil {
+			t.Fatalf("entry %d: %v", id, err)
+		}
+	}
+	before := out.Len()
+	err = w.WritePacket(PacketRecord{ProcessID: math.MaxUint32, HasProcessID: true}, nil)
+	if !errors.Is(err, ErrInvalidPacket) || out.Len() != before {
+		t.Fatalf("reserved process ID: %v, output changed: %t", err, out.Len() != before)
+	}
+	err = w.WritePacket(PacketRecord{ProcessID: MaxProcessEvents, HasProcessID: true}, nil)
+	if !errors.Is(err, ErrOptionLimit) || out.Len() != before {
+		t.Fatalf("over limit: %v, output changed: %t", err, out.Len() != before)
+	}
+	if err := w.WritePacket(PacketRecord{HasProcessID: true}, nil); err != nil {
+		t.Fatal(err)
+	}
+	c, err := New(out.Bytes())
+	if err != nil || len(c.Processes) != MaxProcessEvents || c.PacketCount != MaxProcessEvents+1 {
+		t.Fatalf("open capture at process limit: %v", err)
+	}
+}

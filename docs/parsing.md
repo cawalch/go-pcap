@@ -199,8 +199,25 @@ If you need a slice of all packet records, call `capture.Packets(data)` (or
   bounds-checked zero-copy slice into `data`.
 - `ProcessID`, `ThreadID`, `UserID`, `ProcessName`, `ProcessArgs`,
   `ContainerID`, `Flags`, and `DropCount`: Process attribution and packet
-  metadata decoded from PcapNG Enhanced Packet Block options and Darwin Process
-  Event Blocks (`DPEB`). A packet references process entries in its own section.
+  metadata decoded from PcapNG Enhanced Packet Block (EPB) options.
+
+Apple PcapNG captures store process IDs and names in Process Information Blocks,
+also called Darwin Process Event Blocks (DPEB). An EPB's Apple primary process
+option (`0x8001`) indexes the preceding process blocks in its own section,
+starting at zero. `PacketRecord` exposes the primary process when the index
+resolves. Apple uses process ID `0xffffffff` for a name without a PID. The
+reader sets `ProcessName` for these entries and leaves `HasProcessID` false.
+Effective process references, service classes, packet metadata
+flags, flow IDs, and trace tags use their own Apple options. The reader leaves
+the process fields unset when only the effective process is available.
+[Apple PcapNG definitions](https://github.com/apple-oss-distributions/libpcap/blob/aa560f1fd969af63ebfb182fa33373d1d2549de5/libpcap/pcap/pcap-ng.h#L315-L350)
+
+The reader also accepts a resolvable legacy go-pcap process reference
+(`0x8000`) when the native reference is absent. Earlier go-pcap writers put
+inline attribution in the Apple option range. The reader decodes those inline
+fields only for a section whose application is explicitly `go-pcap` and which
+has yet to declare a process block. An earlier file without that application
+marker may lose inline attribution on read.
 
 ## Decode L2–L4 frames and tunnels
 
@@ -927,12 +944,19 @@ retain its wire length even if the destination snaplen truncates it further.
 
 Use `NewPCAPNGWriter(w, opts)` to stream PcapNG `SHB`, `IDB` (nanosecond
 resolution), `NRB` (`WriteNameResolution`), `ISB` (`WriteInterfaceStats`),
-`DSB` (`WriteDecryptionSecrets`), and process-attributed `EPB` (`WritePacket`)
-blocks to any `io.Writer`. Interface 0 is ready immediately; set `LinkTypeSet: true`
+`DSB` (`WriteDecryptionSecrets`), and `EPB` (`WritePacket`) blocks to any
+`io.Writer`. Interface 0 is ready immediately. Set `LinkTypeSet: true`
 to select `LinkTypeNull` explicitly on interface 0 for any interface name. Call
 `AddInterface` for each additional interface and use its returned ID in
 `PacketRecord` and `InterfaceStatistics`. Each interface has its own link type
 and snaplen. After an output error, start a new capture stream.
+
+When a process ID or name is present, `WritePacket` emits the Apple process
+index and shares a process block across packets with the same attribution.
+Process ID `0xffffffff` is reserved for a name-only entry. Passing that ID
+with `HasProcessID` set returns `ErrInvalidPacket`. A new entry that would
+exceed `MaxProcessEvents` returns `ErrOptionLimit`. The writer stores the
+thread ID, user ID, command line, and container ID in go-pcap packet comments.
 
 Call `capture.ExtractFlowPCAPNG(data, w, flowIndex)` to write one bidirectional
 flow. Pass the original capture bytes and the zero-based index from `Flows`.

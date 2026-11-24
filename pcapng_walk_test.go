@@ -199,7 +199,7 @@ func TestPCAPNGSectionProcessReferences(t *testing.T) {
 		epb.Write(fixed)
 		epb.Write(frame)
 		epb.Write(make([]byte, -len(frame)&3))
-		appendPCAPNGOption(&epb, order, optEPBDarwinDPEB, make([]byte, 4))
+		appendPCAPNGOption(&epb, order, optEPBDarwinProcessIndex, make([]byte, 4))
 		appendPCAPNGBlock(&out, order, BlockTypeEnhancedPacket, epb.Bytes())
 	}
 	raw := out.Bytes()
@@ -397,5 +397,64 @@ func TestReaderAtPaddedMetadataAndOptionErrors(t *testing.T) {
 				}
 			}
 		}
+	}
+}
+
+func TestPCAPNGProcessOptionDisambiguation(t *testing.T) {
+	order := binary.LittleEndian
+	processes := []ProcessEvent{{100, "from-prior-section"}, {212, "current"}}
+	type option struct {
+		code uint16
+		data []byte
+	}
+	for _, tc := range []struct {
+		name     string
+		base     int
+		options  []option
+		wantID   uint32
+		wantName string
+	}{
+		{
+			name:     "legacy-reference",
+			base:     1,
+			options:  []option{{0x8000, order.AppendUint32(nil, 0)}},
+			wantID:   212,
+			wantName: "current",
+		},
+		{
+			name:     "native-precedes-legacy",
+			options:  []option{{0x8001, order.AppendUint32(nil, 0)}, {0x8000, order.AppendUint32(nil, 1)}},
+			wantID:   100,
+			wantName: "from-prior-section",
+		},
+		{
+			name:    "unresolved-index",
+			base:    1,
+			options: []option{{0x8001, order.AppendUint32(nil, 1)}},
+		},
+		{
+			name:    "malformed-native-index",
+			options: []option{{0x8001, []byte{0}}, {0x8000, order.AppendUint32(nil, 1)}},
+		},
+		{
+			name:    "effective-only-and-unrelated-comments",
+			options: []option{{0x8003, order.AppendUint32(nil, 1)}, {optComment, []byte("PID: 9\nCmd: unrelated\nArgs: sample")}},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var raw bytes.Buffer
+			for _, opt := range tc.options {
+				appendPCAPNGOption(&raw, order, opt.code, opt.data)
+			}
+			var packet PacketRecord
+			summary := scanSummary{processes: processes, sectionProcessBase: tc.base}
+			if err := decodeEPBOptions(raw.Bytes(), order, &summary, &packet); err != nil {
+				t.Fatal(err)
+			}
+			if packet.HasProcessID != (tc.wantID != 0) || packet.ProcessID != tc.wantID || packet.ProcessName != tc.wantName ||
+				packet.HasThreadID || packet.HasUserID || packet.ProcessArgs != "" || packet.ContainerID != "" {
+				t.Fatalf("packet attribution: %+v", packet)
+			}
+		})
 	}
 }

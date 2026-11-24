@@ -6,7 +6,9 @@ import (
 	"fmt"
 	"io"
 	"math"
+	"strconv"
 	"strings"
+	"unicode/utf8"
 )
 
 // PCAPNGWriterOptions configures container and interface metadata written by
@@ -24,11 +26,11 @@ type PCAPNGWriterOptions struct {
 	UserApplication      string
 }
 
-// PCAPNGWriter writes PcapNG Section Header, Interface Description, Decryption
-// Secrets, and Enhanced Packet blocks to an [io.Writer].
+// PCAPNGWriter writes PcapNG blocks to an [io.Writer].
 type PCAPNGWriter struct {
 	captureOutput
 	interfaceSnapLens []uint32
+	processIndices    map[ProcessEvent]uint32
 }
 
 // NewPCAPNGWriter writes a PcapNG Section Header Block (SHB) and Interface
@@ -170,7 +172,11 @@ func (pw *PCAPNGWriter) WriteDecryptionSecrets(secretsType uint32, secretData []
 }
 
 // WritePacket writes an Enhanced Packet Block (EPB) with nanosecond timestamp
-// resolution and any process/thread attribution present on pkt.
+// resolution. A process ID or name uses a Darwin Process Event Block shared
+// by packets with the same attribution. ID 0xffffffff is reserved for entries
+// with no process ID. Other attribution fields use go-pcap packet comments.
+// More than [MaxProcessEvents] distinct process entries returns [ErrOptionLimit]
+// before writing the packet.
 func (pw *PCAPNGWriter) WritePacket(pkt PacketRecord, payload []byte) error {
 	if pw == nil || pw.w == nil {
 		return ErrInvalidHeader
@@ -186,6 +192,9 @@ func (pw *PCAPNGWriter) WritePacket(pkt PacketRecord, payload []byte) error {
 	}
 	if len(pkt.ProcessName) > MaxOptionStringBytes || len(pkt.ProcessArgs) > MaxOptionStringBytes || len(pkt.ContainerID) > MaxOptionStringBytes {
 		return ErrOptionLimit
+	}
+	if pkt.HasProcessID && pkt.ProcessID == math.MaxUint32 {
+		return fmt.Errorf("%w: process ID %#x is reserved", ErrInvalidPacket, pkt.ProcessID)
 	}
 	origLen := pkt.OriginalLen
 	if origLen < uint32(len(payload)) {
@@ -224,43 +233,82 @@ func (pw *PCAPNGWriter) WritePacket(pkt PacketRecord, payload []byte) error {
 		writePCAPNGOptionLE(&body, optEPBDropCount, b[:])
 		hasOpts = true
 	}
-	if pkt.HasProcessID {
-		var b [4]byte
-		binary.LittleEndian.PutUint32(b[:], pkt.ProcessID)
-		writePCAPNGOptionLE(&body, optEPBProcessID, b[:])
+	var block bytes.Buffer
+	var process ProcessEvent
+	var processIndex uint32
+	var newProcess bool
+	if pkt.HasProcessID || pkt.ProcessName != "" {
+		process = ProcessEvent{ProcessID: pkt.ProcessID, ProcessName: pkt.ProcessName}
+		if !pkt.HasProcessID {
+			process.ProcessID = math.MaxUint32
+		}
+		var exists bool
+		processIndex, exists = pw.processIndices[process]
+		if !exists {
+			processIndex = uint32(len(pw.processIndices))
+			if processIndex >= MaxProcessEvents {
+				return fmt.Errorf("%w: DPEB count exceeds %d", ErrOptionLimit, MaxProcessEvents)
+			}
+			var processBody bytes.Buffer
+			var id [4]byte
+			binary.LittleEndian.PutUint32(id[:], process.ProcessID)
+			processBody.Write(id[:])
+			if process.ProcessName != "" {
+				writePCAPNGOptionLE(&processBody, optDPEBProcessName, []byte(process.ProcessName))
+				writePCAPNGOptionLE(&processBody, optEndOfOpt, nil)
+			}
+			writePCAPNGBlockLE(&block, BlockTypeDarwinProcessEvent, processBody.Bytes())
+			newProcess = true
+		}
+		var index [4]byte
+		binary.LittleEndian.PutUint32(index[:], processIndex)
+		writePCAPNGOptionLE(&body, optEPBDarwinProcessIndex, index[:])
 		hasOpts = true
 	}
 	if pkt.HasThreadID {
-		var b [4]byte
-		binary.LittleEndian.PutUint32(b[:], pkt.ThreadID)
-		writePCAPNGOptionLE(&body, optEPBThreadID, b[:])
-		hasOpts = true
-	}
-	if pkt.ProcessName != "" {
-		writePCAPNGOptionLE(&body, optEPBProcessName, []byte(pkt.ProcessName))
+		writeProcessCommentLE(&body, processCommentThread, strconv.FormatUint(uint64(pkt.ThreadID), 10))
 		hasOpts = true
 	}
 	if pkt.ProcessArgs != "" {
-		writePCAPNGOptionLE(&body, optEPBProcessArgs, []byte(pkt.ProcessArgs))
+		writeProcessCommentLE(&body, processCommentArgs, pkt.ProcessArgs)
 		hasOpts = true
 	}
 	if pkt.HasUserID {
-		var b [4]byte
-		binary.LittleEndian.PutUint32(b[:], pkt.UserID)
-		writePCAPNGOptionLE(&body, optEPBUserID, b[:])
+		writeProcessCommentLE(&body, processCommentUser, strconv.FormatUint(uint64(pkt.UserID), 10))
 		hasOpts = true
 	}
 	if pkt.ContainerID != "" {
-		writePCAPNGOptionLE(&body, optEPBContainerID, []byte(pkt.ContainerID))
+		writeProcessCommentLE(&body, processCommentContainer, pkt.ContainerID)
 		hasOpts = true
 	}
 	if hasOpts {
 		writePCAPNGOptionLE(&body, optEndOfOpt, nil)
 	}
 
-	var block bytes.Buffer
 	writePCAPNGBlockLE(&block, BlockTypeEnhancedPacket, body.Bytes())
-	return pw.write(block.Bytes())
+	if err := pw.write(block.Bytes()); err != nil {
+		return err
+	}
+	if newProcess {
+		if pw.processIndices == nil {
+			pw.processIndices = make(map[ProcessEvent]uint32)
+		}
+		pw.processIndices[process] = processIndex
+	}
+	return nil
+}
+
+func writeProcessCommentLE(body *bytes.Buffer, prefix, value string) {
+	// When a value fills the option budget itself, retain it across two
+	// consecutive comments without splitting a UTF-8 code point.
+	n := MaxOptionStringBytes - len(prefix)
+	if len(value) > n {
+		for limit := n - utf8.UTFMax + 1; n > limit && !utf8.RuneStart(value[n]); n-- {
+		}
+		writePCAPNGOptionLE(body, optComment, []byte(prefix+value[:n]))
+		value = value[n:]
+	}
+	writePCAPNGOptionLE(body, optComment, []byte(prefix+value))
 }
 
 // WriteNameResolution writes a PcapNG Name Resolution Block (NRB) containing
