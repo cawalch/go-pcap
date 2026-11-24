@@ -17,8 +17,6 @@ import (
 	"unsafe"
 )
 
-const LinkTypeUnknown LinkType = 0xffff
-
 const (
 	packetVersion           = 10 // PACKET_VERSION is absent from syscall on some architectures.
 	tpacketV3               = 2
@@ -208,30 +206,6 @@ func openLinuxPacketRing(fd int, opts LiveOptions, defaultBuffer bool) (linuxPac
 		return linuxPacketRing{}, fmt.Errorf("mmap PACKET_RX_RING: %w", err)
 	}
 	return linuxPacketRing{data: data, blockSize: blockSize}, nil
-}
-
-// InterfaceName returns the bound network interface name.
-func (lc *LiveCapture) InterfaceName() string {
-	if lc == nil {
-		return ""
-	}
-	return lc.ifaceName
-}
-
-// LinkType returns the link-layer encapsulation type reported by the interface.
-func (lc *LiveCapture) LinkType() LinkType {
-	if lc == nil {
-		return LinkTypeUnknown
-	}
-	return lc.linkType
-}
-
-// SnapLen returns the configured snapshot length.
-func (lc *LiveCapture) SnapLen() uint32 {
-	if lc == nil {
-		return 0
-	}
-	return lc.snapLen
 }
 
 // ReadPacket reads the next live packet with the kernel capture timestamp.

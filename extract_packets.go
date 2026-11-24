@@ -50,7 +50,7 @@ func (w *packetOnlyFlowWriter) writeSourceInterface(source *flowExportSource, st
 	var offset [8]byte
 	var fcsLen []byte
 	resolution := byte(6)
-	err = walkPCAPNGOptions(&body, 8, body.size, w.order, func(code uint16, val []byte) error {
+	err = walkPCAPNGOptions(body[8:], w.order, func(code uint16, val []byte) error {
 		switch code {
 		case optIDBTsResol:
 			if len(val) == 1 {
@@ -70,7 +70,7 @@ func (w *packetOnlyFlowWriter) writeSourceInterface(source *flowExportSource, st
 	if err != nil {
 		return 0, err
 	}
-	link, snapLen := w.order.Uint16(body.data), w.order.Uint32(body.data[4:])
+	link, snapLen := w.order.Uint16(body[:2]), w.order.Uint32(body[4:8])
 	return snapLen, w.writeInterface(uint32(link), snapLen, resolution, offset, fcsLen)
 }
 
@@ -87,7 +87,7 @@ func (w *packetOnlyFlowWriter) writeSourcePacket(source *flowExportSource, kind 
 			return err
 		}
 		var flags uint32
-		err = walkPCAPNGOptions(&body, 0, body.size, w.order, func(code uint16, val []byte) error {
+		err = walkPCAPNGOptions(body, w.order, func(code uint16, val []byte) error {
 			if code == optEPBFlags && len(val) == 4 {
 				const fcsLenMask = 0xf << 5 // FCS length in octets (bits 5–8).
 				flags = w.order.Uint32(val) & fcsLenMask
@@ -107,17 +107,13 @@ func (w *packetOnlyFlowWriter) writeSourcePacket(source *flowExportSource, kind 
 	return w.writeBlock(source, kind, fixed, options.Bytes(), nil, payloadOffset, payloadLength)
 }
 
-func (s *flowExportSource) readMetadata(order binary.ByteOrder, kind uint32, start, end int64) (SafeReader, error) {
-	var body []byte
-	var err error
+func (s *flowExportSource) readMetadata(order binary.ByteOrder, kind uint32, start, end int64) ([]byte, error) {
 	if s.budget != nil && end-start > metadataWindowSize {
 		// Read only bounded options before the end marker, even when the
 		// input block has a large padding region after it.
-		body, err = readLargeMetadata(s.budget, start, end, kind, order, nil, 0)
-	} else {
-		body, err = s.read(start, end-start)
+		return readLargeMetadata(s.budget, start, end, kind, order, nil, 0)
 	}
-	return SafeReader{data: body, size: int64(len(body))}, err
+	return s.read(start, end-start)
 }
 
 func (w *packetOnlyFlowWriter) writeClassicPacket(source *flowExportSource, c *Capture, pkt *PacketRecord, payload []byte, first bool) error {

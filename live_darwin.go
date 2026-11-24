@@ -55,9 +55,6 @@ func OpenLive(ifaceName string, opts LiveOptions) (*LiveCapture, error) {
 	for i := range 256 {
 		dev = fmt.Sprintf("/dev/bpf%d", i)
 		fd, openErr = syscall.Open(dev, syscall.O_RDONLY|syscall.O_CLOEXEC, 0)
-		if openErr == nil {
-			break
-		}
 		if openErr != syscall.EBUSY {
 			break
 		}
@@ -186,32 +183,6 @@ func darwinBPFLinkType(dlt uint32) (LinkType, error) {
 	default:
 		return LinkTypeUnknown, fmt.Errorf("unsupported Darwin BPF datalink type %d", dlt)
 	}
-}
-
-// InterfaceName returns the bound network interface name.
-func (lc *LiveCapture) InterfaceName() string {
-	if lc == nil {
-		return ""
-	}
-	return lc.ifaceName
-}
-
-// LinkType returns the capture-file link type for the interface's encapsulation.
-func (lc *LiveCapture) LinkType() LinkType {
-	if lc == nil {
-		return LinkTypeUnknown
-	}
-	return lc.linkType
-}
-
-const LinkTypeUnknown LinkType = 0xffff
-
-// SnapLen returns the configured snapshot length.
-func (lc *LiveCapture) SnapLen() uint32 {
-	if lc == nil {
-		return 0
-	}
-	return lc.snapLen
 }
 
 // ReadPacket reads the next live packet from the kernel BPF buffer using the

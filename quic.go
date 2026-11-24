@@ -712,9 +712,8 @@ func scanQUIC(source ipFrameSource) ([]QUICRecord, error) {
 			return err
 		}
 		if frame.mayContainUDPFragment() {
-			var ok bool
-			udpPayload, frame.SrcPort, frame.DstPort, ok = defrag.addUDPFragment(&frame, udpPayload)
-			if !ok {
+			udpPayload = defrag.addUDPFragment(&frame, udpPayload)
+			if udpPayload == nil {
 				return nil
 			}
 		} else if frame.IPProtocol != IPProtoUDP {

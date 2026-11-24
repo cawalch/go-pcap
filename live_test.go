@@ -5,6 +5,7 @@ import (
 	"encoding/binary"
 	"errors"
 	"net/netip"
+	"runtime"
 	"testing"
 )
 
@@ -28,6 +29,8 @@ func TestParseBPFBufferBatch(t *testing.T) {
 		}
 	}
 
+	// A complete final packet remains readable without its alignment padding.
+	bpfBuf.Truncate(bpfBuf.Len() - (BPFWordAlign(18+len(f2)) - (18 + len(f2))))
 	records, err := ParseBPFBuffer(bpfBuf.Bytes(), LinkTypeEthernet)
 	if err != nil || len(records) != 2 {
 		t.Fatalf("ParseBPFBuffer() = (%d, %v), want 2", len(records), err)
@@ -58,8 +61,13 @@ func TestLiveCaptureBounds(t *testing.T) {
 	}
 	// Zero-value LiveCapture must reject ReadPacket and no-op Close without touching fd 0.
 	var zero LiveCapture
-	if _, _, err := zero.ReadPacket(); !errors.Is(err, ErrInvalidHeader) {
-		t.Fatalf("zero LiveCapture.ReadPacket() err = %v, want ErrInvalidHeader", err)
+	want := ErrLiveCaptureUnsupported
+	switch runtime.GOOS {
+	case "darwin", "ios", "linux", "android", "windows":
+		want = ErrInvalidHeader
+	}
+	if _, _, err := zero.ReadPacket(); !errors.Is(err, want) {
+		t.Fatalf("zero LiveCapture.ReadPacket() err = %v, want %v", err, want)
 	}
 	if err := zero.Close(); err != nil {
 		t.Fatalf("zero LiveCapture.Close() err = %v, want nil", err)

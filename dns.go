@@ -514,12 +514,10 @@ func scanDNS(source ipFrameSource) ([]DNSRecord, error) {
 		}
 
 		if frame.mayContainUDPFragment() {
-			var ok bool
-			l4, frame.SrcPort, frame.DstPort, ok = defrag.addUDPFragment(&frame, l4)
-			if !ok {
+			l4 = defrag.addUDPFragment(&frame, l4)
+			if l4 == nil {
 				return nil
 			}
-			frame.IPProtocol = IPProtoUDP
 		}
 
 		if !isDNSPort(frame.SrcPort) && !isDNSPort(frame.DstPort) {
@@ -602,16 +600,12 @@ func (c *Capture) HasDNSQuery(data []byte, qname string) (bool, error) {
 		if err != nil || frame.IPVersion == 0 {
 			return nil
 		}
+		var l4 []byte
 		if frame.mayContainUDPFragment() {
-			udpPayload, srcPort, dstPort, ok := defrag.addUDPFragment(&frame, payload[frame.PayloadOffset:frame.PayloadOffset+frame.PayloadLength])
-			if !ok || (!isDNSPort(srcPort) && !isDNSPort(dstPort)) {
+			l4 = defrag.addUDPFragment(&frame, payload[frame.PayloadOffset:frame.PayloadOffset+frame.PayloadLength])
+			if l4 == nil {
 				return nil
 			}
-			if dnsPayloadHasQuery(udpPayload, target) {
-				found = true
-				return errStopWalk
-			}
-			return nil
 		}
 		if !isDNSPort(frame.SrcPort) && !isDNSPort(frame.DstPort) {
 			return nil
@@ -622,7 +616,9 @@ func (c *Capture) HasDNSQuery(data []byte, qname string) (bool, error) {
 		if frame.IPProtocol != IPProtoUDP {
 			return nil
 		}
-		l4 := payload[frame.PayloadOffset : frame.PayloadOffset+frame.PayloadLength]
+		if l4 == nil {
+			l4 = payload[frame.PayloadOffset : frame.PayloadOffset+frame.PayloadLength]
+		}
 		if dnsPayloadHasQuery(l4, target) {
 			found = true
 			return errStopWalk

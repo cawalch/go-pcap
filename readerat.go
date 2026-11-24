@@ -130,13 +130,13 @@ func NewFromReaderAt(r io.ReaderAt, size int64) (*Capture, error) {
 	magic := binary.LittleEndian.Uint32(magicBuf[:])
 	switch magic {
 	case PCAPMagicMicroLE:
-		return parseClassicPCAPFromReaderAt(r, size, binary.LittleEndian, false)
+		return parseClassicPCAP(nil, r, size, binary.LittleEndian, false)
 	case PCAPMagicMicroBE:
-		return parseClassicPCAPFromReaderAt(r, size, binary.BigEndian, false)
+		return parseClassicPCAP(nil, r, size, binary.BigEndian, false)
 	case PCAPMagicNanoLE:
-		return parseClassicPCAPFromReaderAt(r, size, binary.LittleEndian, true)
+		return parseClassicPCAP(nil, r, size, binary.LittleEndian, true)
 	case PCAPMagicNanoBE:
-		return parseClassicPCAPFromReaderAt(r, size, binary.BigEndian, true)
+		return parseClassicPCAP(nil, r, size, binary.BigEndian, true)
 	case PCAPNGSectionHeaderMagic:
 		return parsePCAPNGFromReaderAt(r, size)
 	default:
@@ -598,48 +598,6 @@ func readExactAt(r io.ReaderAt, buf []byte, offset, totalSize int64) error {
 	return ErrOutOfBounds
 }
 
-func parseClassicPCAPFromReaderAt(r io.ReaderAt, size int64, order binary.ByteOrder, nano bool) (*Capture, error) {
-	if size < pcapGlobalHeaderSize {
-		return nil, fmt.Errorf("%w: classic PCAP header shorter than %d bytes", ErrInvalidHeader, pcapGlobalHeaderSize)
-	}
-	var hdr [pcapGlobalHeaderSize]byte
-	if err := readExactAt(r, hdr[:], 0, size); err != nil {
-		return nil, err
-	}
-	vMajor := order.Uint16(hdr[4:6])
-	vMinor := order.Uint16(hdr[6:8])
-	if vMajor != 2 || vMinor != 4 {
-		return nil, fmt.Errorf("%w: unsupported PCAP version %d.%d", ErrInvalidHeader, vMajor, vMinor)
-	}
-	snapLen := order.Uint32(hdr[16:20])
-	if snapLen > MaxSnapLen {
-		return nil, fmt.Errorf("%w: snaplen %d exceeds %d", ErrInvalidHeader, snapLen, MaxSnapLen)
-	}
-	linkType := LinkType(order.Uint32(hdr[20:24]) & 0xffff)
-
-	meta, err := scanClassicPCAPReaderAt(r, size, snapLen, linkType, order, nano, nil)
-	if err != nil {
-		return nil, err
-	}
-	if !isKnownLinkType(linkType) {
-		meta.anomalies.UnknownLinkType = true
-	}
-	return &Capture{
-		Format:         FormatPCAP,
-		BigEndian:      order == binary.BigEndian,
-		NanoTimestamp:  nano,
-		VersionMajor:   vMajor,
-		VersionMinor:   vMinor,
-		SnapLen:        snapLen,
-		LinkType:       linkType,
-		Interfaces:     []InterfaceDescriptor{classicInterface(linkType, snapLen, nano)},
-		PacketCount:    meta.packetCount,
-		fileSize:       size,
-		declaredExtent: meta.declaredExtent,
-		anomalies:      meta.anomalies,
-	}, nil
-}
-
 func scanClassicPCAPReaderAt(
 	r io.ReaderAt,
 	size int64,
@@ -718,32 +676,7 @@ func parsePCAPNGFromReaderAt(r io.ReaderAt, size int64) (*Capture, error) {
 	if err != nil {
 		return nil, err
 	}
-	var snapLen uint32
-	var linkType LinkType
-	if len(meta.interfaces) > 0 {
-		snapLen = meta.interfaces[0].SnapLen
-		linkType = meta.interfaces[0].LinkType
-	}
-	return &Capture{
-		Format:         FormatPCAPNG,
-		BigEndian:      meta.bigEndian,
-		VersionMajor:   meta.vMajor,
-		VersionMinor:   meta.vMinor,
-		SnapLen:        snapLen,
-		LinkType:       linkType,
-		Hardware:       meta.hardware,
-		OS:             meta.os,
-		UserAppl:       meta.userAppl,
-		Interfaces:     meta.interfaces,
-		Secrets:        meta.secrets,
-		NameRecords:    meta.nameRecords,
-		InterfaceStats: meta.interfaceStats,
-		Processes:      meta.processes,
-		PacketCount:    meta.packetCount,
-		fileSize:       size,
-		declaredExtent: meta.declaredExtent,
-		anomalies:      meta.anomalies,
-	}, nil
+	return meta.pcapngCapture(size), nil
 }
 
 func scanPCAPNGReaderAt(r io.ReaderAt, size int64, cb func(PacketRecord) error, rawBlock func(uint32, binary.ByteOrder, int64, int64) error) (scanSummary, error) {
@@ -913,14 +846,13 @@ func scanPCAPNGReaderAt(r io.ReaderAt, size int64, cb func(PacketRecord) error, 
 			offset = int64(blockEnd)
 			continue
 		}
-		sr := SafeReader{data: body, size: int64(len(body))}
 		switch blockType {
 		case BlockTypeSectionHeader:
-			if err := decodeSHB(&sr, 0, sr.size, order, &summary, &haveSection); err != nil {
+			if err := summary.decodeSHB(body, order, &haveSection); err != nil {
 				return scanSummary{}, err
 			}
 		case BlockTypeInterfaceDesc:
-			if err := decodeIDB(&sr, 0, sr.size, order, &summary); err != nil {
+			if err := summary.decodeIDB(body, order); err != nil {
 				return scanSummary{}, err
 			}
 		case blockTypeLegacyPacket, BlockTypeEnhancedPacket, BlockTypeSimplePacket:
@@ -934,24 +866,8 @@ func scanPCAPNGReaderAt(r io.ReaderAt, size int64, cb func(PacketRecord) error, 
 					return scanSummary{}, err
 				}
 			}
-		case BlockTypeDecryptionSecrets:
-			prevLen := len(summary.secrets)
-			if err := decodeDSB(&sr, 0, sr.size, order, &totalSecretBytes, &summary); err != nil {
-				return scanSummary{}, err
-			}
-			if len(summary.secrets) > prevLen {
-				summary.secrets[len(summary.secrets)-1].PayloadOffset += tailOffset
-			}
-		case BlockTypeNameResolution:
-			if err := decodeNRB(&sr, 0, sr.size, order, &summary); err != nil {
-				return scanSummary{}, err
-			}
-		case BlockTypeInterfaceStats:
-			if err := decodeISB(&sr, 0, sr.size, order, &summary); err != nil {
-				return scanSummary{}, err
-			}
-		case BlockTypeDarwinProcessEvent:
-			if err := decodeDPEB(&sr, 0, sr.size, order, &summary); err != nil {
+		case BlockTypeDecryptionSecrets, BlockTypeNameResolution, BlockTypeInterfaceStats, BlockTypeDarwinProcessEvent:
+			if err := summary.decodeMetadata(body, blockType, order, tailOffset, &totalSecretBytes); err != nil {
 				return scanSummary{}, err
 			}
 		}

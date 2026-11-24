@@ -117,7 +117,7 @@ func TestDefragmentIPOutOfOrderAndOverlap(t *testing.T) {
 	// Fill to capacity with incomplete groups, then churn past capacity.
 	for i := range MaxFragmentGroups * 2 {
 		f1 := Frame{IPVersion: 4, IPProtocol: IPProtoUDP, SrcAddr: src, DstAddr: dst, IPID: uint32(10000 + i), IPFragOffset: 0, IPMoreFragments: true, PayloadLength: 8}
-		if _, _, _, ok := acc.addUDPFragment(&f1, udp[:8]); ok {
+		if acc.addUDPFragment(&f1, udp[:8]) != nil {
 			t.Fatalf("incomplete iter %d unexpectedly completed", i)
 		}
 		if len(acc.groups) > MaxFragmentGroups {
@@ -129,12 +129,12 @@ func TestDefragmentIPOutOfOrderAndOverlap(t *testing.T) {
 		ipID := uint32(i % 64)
 		f1 := Frame{IPVersion: 4, IPProtocol: IPProtoUDP, SrcAddr: src, DstAddr: dst, IPID: ipID, IPFragOffset: 0, IPMoreFragments: true, PayloadLength: 8}
 		f2 := Frame{IPVersion: 4, IPProtocol: IPProtoUDP, SrcAddr: src, DstAddr: dst, IPID: ipID, IPFragOffset: 8, IPMoreFragments: false, PayloadLength: 8}
-		if _, _, _, ok := acc.addUDPFragment(&f1, udp[:8]); ok {
+		if acc.addUDPFragment(&f1, udp[:8]) != nil {
 			t.Fatalf("iter %d: first fragment unexpectedly completed", i)
 		}
-		payload, sp, dp, ok := acc.addUDPFragment(&f2, udp[8:])
-		if !ok || sp != 53 || dp != 12345 || string(payload) != "12345678" {
-			t.Fatalf("iter %d: addUDPFragment = (%q, %d, %d, %v)", i, payload, sp, dp, ok)
+		payload := acc.addUDPFragment(&f2, udp[8:])
+		if f2.SrcPort != 53 || f2.DstPort != 12345 || string(payload) != "12345678" {
+			t.Fatalf("iter %d: addUDPFragment = (%q, %d, %d)", i, payload, f2.SrcPort, f2.DstPort)
 		}
 	}
 }

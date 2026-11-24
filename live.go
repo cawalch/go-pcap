@@ -6,6 +6,33 @@ import (
 	"time"
 )
 
+// LinkTypeUnknown indicates that the capture has no known link-layer type.
+const LinkTypeUnknown LinkType = 0xffff
+
+// InterfaceName returns the bound network interface name.
+func (lc *LiveCapture) InterfaceName() string {
+	if lc == nil {
+		return ""
+	}
+	return lc.ifaceName
+}
+
+// LinkType returns the capture-file link type for the interface's encapsulation.
+func (lc *LiveCapture) LinkType() LinkType {
+	if lc == nil {
+		return LinkTypeUnknown
+	}
+	return lc.linkType
+}
+
+// SnapLen returns the configured snapshot length.
+func (lc *LiveCapture) SnapLen() uint32 {
+	if lc == nil {
+		return 0
+	}
+	return lc.snapLen
+}
+
 // BPFInstruction represents one classic Berkeley Packet Filter instruction
 // (compatible with macOS/BSD BIOCSETF and Linux SO_ATTACH_FILTER).
 type BPFInstruction struct {
@@ -62,20 +89,19 @@ func BPFWordAlign(n int) int {
 // index directly into buf.
 func ParseBPFBuffer(buf []byte, linkType LinkType) ([]PacketRecord, error) {
 	var records []PacketRecord
-	offset := 0
-	for offset+18 <= len(buf) {
-		tvSec := binary.LittleEndian.Uint32(buf[offset : offset+4])
-		tvUsec := binary.LittleEndian.Uint32(buf[offset+4 : offset+8])
-		capLen := binary.LittleEndian.Uint32(buf[offset+8 : offset+12])
-		origLen := binary.LittleEndian.Uint32(buf[offset+12 : offset+16])
-		hdrLen := int(binary.LittleEndian.Uint16(buf[offset+16 : offset+18]))
+	for offset := 0; len(buf)-offset >= 18; {
+		batch := buf[offset:]
+		tvSec := binary.LittleEndian.Uint32(batch[:4])
+		tvUsec := binary.LittleEndian.Uint32(batch[4:8])
+		capLen := binary.LittleEndian.Uint32(batch[8:12])
+		origLen := binary.LittleEndian.Uint32(batch[12:16])
+		hdrLen := int(binary.LittleEndian.Uint16(batch[16:18]))
 
 		if hdrLen < 18 || capLen > MaxSnapLen {
 			return nil, fmt.Errorf("%w: invalid BPF packet header (hdrLen=%d, capLen=%d)", ErrInvalidPacket, hdrLen, capLen)
 		}
-		payloadStart := offset + hdrLen
-		payloadEnd := payloadStart + int(capLen)
-		if payloadEnd > len(buf) {
+		recordLen := hdrLen + int(capLen) // Both fields are bounded above.
+		if recordLen > len(batch) {
 			return nil, fmt.Errorf("%w: BPF packet payload exceeds buffer", ErrInvalidPacket)
 		}
 		records = append(records, PacketRecord{
@@ -84,11 +110,11 @@ func ParseBPFBuffer(buf []byte, linkType LinkType) ([]PacketRecord, error) {
 			TimestampNs:   int64(tvSec)*1_000_000_000 + int64(tvUsec)*1_000,
 			CaptureLen:    capLen,
 			OriginalLen:   origLen,
-			PayloadOffset: int64(payloadStart),
+			PayloadOffset: int64(offset + hdrLen),
 			PayloadLength: int64(capLen),
 		})
-		step := BPFWordAlign(hdrLen + int(capLen))
-		if step <= 0 {
+		step := BPFWordAlign(recordLen)
+		if step > len(batch) { // The final record may omit alignment padding.
 			break
 		}
 		offset += step

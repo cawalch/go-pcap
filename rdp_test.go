@@ -88,6 +88,12 @@ func TestParseRDPNegotiationAndCaptureRDP(t *testing.T) {
 	if records[0].Negotiation.Cookie != "mstshash=ADMINISTRATOR" || records[1].Negotiation.SelectedProtocol != RDPProtoCredSSP {
 		t.Fatalf("RDPRecords = %+v", records)
 	}
+	if records[0].SrcPort != 53000 || records[0].DstPort != 3389 ||
+		records[1].SrcPort != 3389 || records[1].DstPort != 53000 ||
+		records[0].SrcAddr != records[1].DstAddr || records[0].DstAddr != records[1].SrcAddr ||
+		records[0].FlowIndex != records[1].FlowIndex {
+		t.Fatalf("unexpected RDP record attribution: %+v", records)
+	}
 
 	if _, err := ParseRDPNegotiation([]byte{0x02, 0x00, 0x00}); !errors.Is(err, ErrInvalidRDP) {
 		t.Fatalf("ParseRDPNegotiation(short) err = %v, want ErrInvalidRDP", err)

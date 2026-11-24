@@ -4,8 +4,6 @@ package pcap
 
 import "fmt"
 
-const LinkTypeUnknown LinkType = 0xffff
-
 // LiveCapture represents a live interface packet capture handle.
 type LiveCapture struct {
 	ifaceName string
@@ -23,30 +21,6 @@ func OpenLive(ifaceName string, opts LiveOptions) (*LiveCapture, error) {
 		return nil, err
 	}
 	return nil, ErrLiveCaptureUnsupported
-}
-
-// InterfaceName returns the bound network interface name.
-func (lc *LiveCapture) InterfaceName() string {
-	if lc == nil {
-		return ""
-	}
-	return lc.ifaceName
-}
-
-// LinkType returns the link-layer encapsulation type.
-func (lc *LiveCapture) LinkType() LinkType {
-	if lc == nil {
-		return LinkTypeUnknown
-	}
-	return lc.linkType
-}
-
-// SnapLen returns the configured snapshot length.
-func (lc *LiveCapture) SnapLen() uint32 {
-	if lc == nil {
-		return 0
-	}
-	return lc.snapLen
 }
 
 // ReadPacket returns [ErrLiveCaptureUnsupported].
