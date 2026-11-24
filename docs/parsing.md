@@ -160,8 +160,8 @@ input ends before a declared packet record or PcapNG block finishes. Call
   complete record header.
 - `UnalignedBlockLength`: A PcapNG block declared a total length that was not a
   multiple of 4 bytes.
-- `InvalidTimestampResolution`: An interface declared an invalid `if_tsresol`
-  option (such as a decimal exponent greater than 9).
+- `InvalidTimestampResolution`: An interface declared an `if_tsresol` option
+  whose value is longer or shorter than one byte.
 
 In PcapNG, each section defines its own interface table and byte order. Packet
 and statistics records expose the resolved index into `Capture.Interfaces`.
@@ -191,8 +191,10 @@ If you need a slice of all packet records, call `capture.Packets(data)` (or
 - `Index`: Zero-based packet index in file order.
 - `InterfaceID` and `LinkType`: Link-layer encapsulation type for decoding.
 - `TimestampNs`: Packet timestamp normalized to nanoseconds since the Unix
-  epoch, applying any PcapNG decimal ($10^{-N}$) or binary ($2^{-N}$)
-  `if_tsresol` scaling and `if_tsoffset` seconds offset.
+  epoch. PcapNG decimal ($10^{-N}$) and binary ($2^{-N}$) resolutions
+  round down to a whole nanosecond. The reader applies the signed
+  `if_tsoffset` in seconds before clamping the result to the signed
+  64-bit nanosecond range. Interface statistics use the same conversion.
 - `CaptureLen` and `OriginalLen`: Captured and on-wire byte counts.
 - `PayloadOffset` and `PayloadLength`: Byte range of the captured frame inside
   `data`. Pass `pkt` to `capture.PacketPayload(data, pkt)` to obtain a

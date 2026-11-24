@@ -39,7 +39,7 @@ type InterfaceDescriptor struct {
 	OS          string
 	// TimestampScaleNs is the multiplier in nanoseconds per raw timestamp tick
 	// when TimestampBinary is false (default 1,000 for microsecond resolution,
-	// 1 for nanosecond resolution).
+	// 1 for nanosecond resolution). It is zero for finer decimal resolutions.
 	TimestampScaleNs uint64
 	// TimestampBinary reports whether if_tsresol uses a binary power-of-two
 	// resolution (2^-TimestampExponent seconds per tick).
@@ -918,7 +918,7 @@ func decodeIDB(
 			iface.OS = string(val)
 		case optIDBTsResol:
 			if len(val) == 1 {
-				applyTimestampResolution(val[0], &iface, &summary.anomalies)
+				applyTimestampResolution(val[0], &iface)
 			} else {
 				summary.anomalies.InvalidTimestampResolution = true
 			}
@@ -937,79 +937,70 @@ func decodeIDB(
 	return nil
 }
 
-func applyTimestampResolution(resol uint8, iface *InterfaceDescriptor, anomalies *CaptureAnomalies) {
+func applyTimestampResolution(resol uint8, iface *InterfaceDescriptor) {
 	exp := resol & 0x7f
-	if resol&0x80 != 0 {
-		if exp > 63 {
-			anomalies.InvalidTimestampResolution = true
-			return
-		}
-		iface.TimestampBinary = true
-		iface.TimestampExponent = exp
-		return
-	}
-	if exp > 9 {
-		anomalies.InvalidTimestampResolution = true
-		return
-	}
-	scale := uint64(1)
-	for range 9 - exp {
-		scale *= 10
-	}
-	iface.TimestampBinary = false
 	iface.TimestampExponent = exp
+	iface.TimestampBinary = resol&0x80 != 0
+	if iface.TimestampBinary {
+		return
+	}
+	var scale uint64
+	if exp <= 9 {
+		scale = 1
+		for range 9 - exp {
+			scale *= 10
+		}
+	}
 	iface.TimestampScaleNs = scale
 }
 
 func scaleRawTimestampNs(rawTicks uint64, iface InterfaceDescriptor) int64 {
-	var ns uint64
-	var overflow bool
-	if iface.TimestampBinary {
-		exp := iface.TimestampExponent
-		// ns = floor(rawTicks * 10^9 / 2^exp) using 128-bit unsigned arithmetic.
-		hi, lo := bits.Mul64(rawTicks, 1_000_000_000)
-		if exp == 0 {
-			ns = lo
-			overflow = hi != 0
-		} else if exp <= 63 {
-			ns = (lo >> exp) | (hi << (64 - exp))
-			overflow = (hi >> exp) != 0
+	const nsPerSecond = 1_000_000_000
+	var hi, lo uint64
+	exp := iface.TimestampExponent
+	switch {
+	case iface.TimestampBinary:
+		hi, lo = bits.Mul64(rawTicks, nsPerSecond)
+		switch {
+		case exp >= 64:
+			hi, lo = 0, hi>>(exp-64)
+		case exp > 0:
+			hi, lo = hi>>exp, hi<<(64-exp)|lo>>exp
 		}
-	} else {
-		scale := iface.TimestampScaleNs
-		if scale == 0 {
-			scale = defaultTimestampResolN
+	case exp <= 9:
+		hi, lo = bits.Mul64(rawTicks, iface.TimestampScaleNs)
+	case exp < 29:
+		for range exp - 9 {
+			rawTicks /= 10
 		}
-		hi, lo := bits.Mul64(rawTicks, scale)
-		ns = lo
-		overflow = hi != 0
+		lo = rawTicks
+		// At exp >= 29 the divisor is at least 10^20, so all ticks round to zero.
 	}
 
-	if overflow || ns > uint64(math.MaxInt64) {
+	// Keep the rounded tick count and the signed offset wide until after
+	// adding them. A negative offset can cancel even a large positive count.
+	offset := iface.TimestampOffsetSec
+	if offset > 0 {
+		offHi, offLo := bits.Mul64(uint64(offset), nsPerSecond)
+		var carry uint64
+		lo, carry = bits.Add64(lo, offLo, 0)
+		hi, _ = bits.Add64(hi, offHi, carry)
+	} else if offset < 0 {
+		offHi, offLo := bits.Mul64(-uint64(offset), nsPerSecond)
+		var borrow uint64
+		lo, borrow = bits.Sub64(lo, offLo, 0)
+		hi, borrow = bits.Sub64(hi, offHi, borrow)
+		if borrow != 0 {
+			if hi != math.MaxUint64 || lo < 1<<63 {
+				return math.MinInt64
+			}
+			return int64(lo)
+		}
+	}
+	if hi != 0 || lo > math.MaxInt64 {
 		return math.MaxInt64
 	}
-	baseNs := int64(ns)
-	if iface.TimestampOffsetSec == 0 {
-		return baseNs
-	}
-	if iface.TimestampOffsetSec > 0 {
-		if iface.TimestampOffsetSec > math.MaxInt64/1_000_000_000 {
-			return math.MaxInt64
-		}
-		offNs := iface.TimestampOffsetSec * 1_000_000_000
-		if baseNs > math.MaxInt64-offNs {
-			return math.MaxInt64
-		}
-		return baseNs + offNs
-	}
-	if iface.TimestampOffsetSec < math.MinInt64/1_000_000_000 {
-		return math.MinInt64
-	}
-	offNs := iface.TimestampOffsetSec * 1_000_000_000
-	if baseNs < math.MinInt64-offNs {
-		return math.MinInt64
-	}
-	return baseNs + offNs
+	return int64(lo)
 }
 
 func decodeEPBHeader(header []byte, payloadOffset, bodyEnd int64, order binary.ByteOrder, summary *scanSummary) (PacketRecord, int64, error) {
