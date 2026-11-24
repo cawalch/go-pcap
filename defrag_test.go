@@ -188,6 +188,82 @@ func TestFragmentedUDPDNSAndQUIC(t *testing.T) {
 	}
 }
 
+func TestUDPFragmentRecordFlowIndices(t *testing.T) {
+	client, server := [4]byte{192, 0, 2, 1}, [4]byte{192, 0, 2, 2}
+	dns := buildEthernetIPv4UDPFrame(client, server, 12345, 53, buildDNSQueryResponsePacket())
+	hello := buildTLS13ClientHelloRecord("fragments.example", "h3")[5:]
+	initial := buildEncryptedQUICInitialDatagram(t, QUICVersion1, []byte("dest"), []byte("source"), nil, 1, 0, hello)
+	quic := buildEthernetIPv4UDPFrame(client, server, 54321, 443, initial)
+	fragment := func(id uint16, udp []byte) ([]byte, []byte) {
+		return buildEthernetIPv4FragmentFrame(client, server, IPProtoUDP, id, 0, true, udp[:16]),
+			buildEthernetIPv4FragmentFrame(client, server, IPProtoUDP, id, 16, false, udp[16:])
+	}
+	dnsFirst, dnsLast := fragment(1, dns[34:])
+	quicFirst, quicLast := fragment(2, quic[34:])
+	unrelated := buildEthernetIPv4UDPFrame(client, server, 65535, 42, []byte{1})
+	for _, tc := range []struct {
+		name                  string
+		frames                [][]byte
+		dnsFlow, dnsPkt       int
+		quicFlow              int
+		dnsExport, quicExport [][]byte
+	}{
+		{"incomplete", [][]byte{dnsFirst, dns, quic}, 1, 1, 2, [][]byte{dns}, [][]byte{quic}},
+		{"complete", [][]byte{dnsFirst, dnsLast, quic}, 0, 1, 1, [][]byte{dnsFirst, dnsLast}, [][]byte{quic}},
+		{"interleaved", [][]byte{dnsLast, quicLast, unrelated, quicFirst, dnsFirst}, 0, 4, 0,
+			[][]byte{dnsLast, quicLast, quicFirst, dnsFirst}, [][]byte{dnsLast, quicLast, quicFirst, dnsFirst}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			raw := buildPCAPNGFixture(binary.LittleEndian, nil, tc.frames)
+			r := bytes.NewReader(raw)
+			c, err := NewFromReaderAt(r, int64(len(raw)))
+			if err != nil {
+				t.Fatal(err)
+			}
+			flows := checkReaderParity(t, raw, c.Flows, c.FlowsFromReaderAt)
+			dnsRecords := checkReaderParity(t, raw, c.DNS, c.DNSFromReaderAt)
+			if len(dnsRecords) != 1 || dnsRecords[0].FlowIndex != tc.dnsFlow || dnsRecords[0].PacketIndex != tc.dnsPkt ||
+				dnsRecords[0].SrcPort != 12345 || dnsRecords[0].DstPort != 53 || dnsRecords[0].Message.Questions[0].Name != "c2.example.com" {
+				t.Fatalf("DNS records = %+v", dnsRecords)
+			}
+			quicRecords := checkReaderParity(t, raw, c.QUIC, c.QUICFromReaderAt)
+			if len(quicRecords) != 1 || quicRecords[0].FlowIndex != tc.quicFlow || quicRecords[0].SrcPort != 54321 ||
+				quicRecords[0].DstPort != 443 || quicRecords[0].Handshake.ClientHello.SNI != "fragments.example" {
+				t.Fatalf("QUIC records = %+v", quicRecords)
+			}
+			for _, want := range []struct {
+				index  int
+				frames [][]byte
+			}{{dnsRecords[0].FlowIndex, tc.dnsExport}, {quicRecords[0].FlowIndex, tc.quicExport}} {
+				if want.index >= len(flows) || flows[want.index].PacketCount != len(want.frames) {
+					t.Fatalf("flow %d: %+v", want.index, flows)
+				}
+				var exported, exportedReader bytes.Buffer
+				if err := c.ExtractFlowPCAPNG(raw, &exported, want.index); err != nil {
+					t.Fatal(err)
+				}
+				if err := c.ExtractFlowPCAPNGFromReaderAt(r, &exportedReader, want.index); err != nil || !bytes.Equal(exported.Bytes(), exportedReader.Bytes()) {
+					t.Fatalf("ReaderAt export differs from slice (err %v)", err)
+				}
+				export, err := New(exported.Bytes())
+				if err != nil {
+					t.Fatal(err)
+				}
+				packets, err := export.Packets(exported.Bytes())
+				if err != nil || len(packets) != len(want.frames) {
+					t.Fatalf("exported %d packets, want %d (err %v)", len(packets), len(want.frames), err)
+				}
+				for i, pkt := range packets {
+					payload, err := export.PacketPayload(exported.Bytes(), pkt)
+					if err != nil || !bytes.Equal(payload, want.frames[i]) {
+						t.Fatalf("flow %d exported the wrong packet at %d (err %v)", want.index, i, err)
+					}
+				}
+			}
+		})
+	}
+}
+
 func TestIPv6FragmentPolicy(t *testing.T) {
 	for _, kind := range []string{"dns", "quic"} {
 		var payload []byte
@@ -294,5 +370,17 @@ func BenchmarkIPFragments(b *testing.B) {
 				}
 			}
 		})
+	}
+}
+
+func TestIPv4DifferentStartFirstArrival(t *testing.T) {
+	frags := []IPFragmentInput{
+		{FragmentOffset: 8, Payload: []byte("first123"), MoreFragments: true},
+		{FragmentOffset: 0, Payload: []byte("01234567later123"), MoreFragments: true},
+		{FragmentOffset: 16, Payload: []byte("end")},
+	}
+	data, a, err := DefragmentIP(frags)
+	if err != nil || !a.IPFragmentOverlapConflict || a.TruncatedLayer || string(data) != "01234567first123end" {
+		t.Fatalf("data=%q anomalies=%+v error=%v", data, a, err)
 	}
 }

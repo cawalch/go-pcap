@@ -206,3 +206,65 @@ func BenchmarkDecodeFrameWirelessAndIPsec(b *testing.B) {
 		})
 	}
 }
+
+func TestLongIKEFlowBytes(t *testing.T) {
+	for _, port := range []uint16{500, 4500} {
+		marker := 0
+		if port == 4500 {
+			marker = 4
+		}
+		body := make([]byte, 300+marker)
+		body[marker+17] = 0x20
+		binary.BigEndian.PutUint32(body[marker+24:], 300)
+		frame := buildEthernetIPv4UDPFrame([4]byte{192, 0, 2, 1}, [4]byte{192, 0, 2, 2}, 50000, port, body)
+		data := buildClassicPCAP(binary.LittleEndian, false, LinkTypeEthernet, 65535, [][]byte{frame})
+		c, err := New(data)
+		if err != nil {
+			t.Fatal(err)
+		}
+		r := &measuredReaderAt{Reader: bytes.NewReader(data)}
+		flows, err := c.FlowsFromReaderAt(r)
+		if r.bytesRead > 16+256 {
+			t.Fatalf("read %d bytes for IKE flow headers", r.bytesRead)
+		}
+		checkReaderParity(t, data, c.Flows, c.FlowsFromReaderAt)
+		if err != nil || len(flows) != 1 || flows[0].ClientBytes != 272 {
+			t.Fatalf("port %d: flows=%+v err=%v", port, flows, err)
+		}
+	}
+}
+
+func TestIKEHeaderSpanningReaderAtPrefix(t *testing.T) {
+	const extLen, ikeLen = 200, 4096
+	const udp = 40 + extLen
+	for _, port := range []uint16{500, 4500} {
+		marker := 0
+		if port == 4500 {
+			marker = 4
+		}
+		frame := make([]byte, udp+8+marker+ikeLen)
+		frame[0], frame[6], frame[7] = 0x60, IPProtoHopByHop, 64
+		binary.BigEndian.PutUint16(frame[4:], uint16(len(frame)-40))
+		frame[40], frame[41] = IPProtoUDP, extLen/8-1
+		binary.BigEndian.PutUint16(frame[udp:], 50000)
+		binary.BigEndian.PutUint16(frame[udp+2:], port)
+		binary.BigEndian.PutUint16(frame[udp+4:], uint16(len(frame)-udp))
+		ike := udp + 8 + marker
+		frame[ike+17] = 0x20
+		binary.BigEndian.PutUint32(frame[ike+24:], ikeLen)
+		raw := buildClassicPCAP(binary.LittleEndian, false, LinkTypeRaw, 65535, [][]byte{frame})
+		c, err := New(raw)
+		if err != nil {
+			t.Fatal(err)
+		}
+		r := &measuredReaderAt{Reader: bytes.NewReader(raw)}
+		flows, err := c.FlowsFromReaderAt(r)
+		if err != nil || len(flows) != 1 || flows[0].ClientBytes != ikeLen-28 {
+			t.Fatalf("port %d: %+v, %v", port, flows, err)
+		}
+		if want := int64(16 + ike + 28); r.bytesRead != want {
+			t.Fatalf("port %d: read %d bytes, want %d through IKE header", port, r.bytesRead, want)
+		}
+		checkReaderParity(t, raw, c.Flows, c.FlowsFromReaderAt)
+	}
+}

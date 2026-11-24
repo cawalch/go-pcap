@@ -10,6 +10,7 @@ import (
 	"io"
 	"net/netip"
 	"slices"
+	"sort"
 	"strconv"
 	"strings"
 )
@@ -105,8 +106,8 @@ func ParseHTTPRequest(stream []byte) (HTTPRequest, int, error) {
 	return parseHTTPRequest(stream, nil)
 }
 
-func parseHTTPRequest(stream []byte, decodedBudget *httpDecodeBudget) (HTTPRequest, int, error) {
-	lineEnd := bytes.Index(stream, []byte("\r\n"))
+func parseHTTPRequestLine(stream []byte) (HTTPRequest, int, error) {
+	lineEnd := httpStartLineEnd(stream)
 	if lineEnd <= 0 || lineEnd > MaxHTTPHeaderLineBytes {
 		return HTTPRequest{}, 0, fmt.Errorf("%w: missing or oversize HTTP request line", ErrInvalidHTTP)
 	}
@@ -126,10 +127,17 @@ func parseHTTPRequest(stream []byte, decodedBudget *httpDecodeBudget) (HTTPReque
 		return HTTPRequest{}, 0, fmt.Errorf("%w: unrecognized HTTP method %q", ErrInvalidHTTP, method)
 	}
 
-	req := HTTPRequest{
+	return HTTPRequest{
 		Method:  method,
 		Path:    path,
 		Version: protoVer[5:], // "1.1" or "1.0"
+	}, lineEnd, nil
+}
+
+func parseHTTPRequest(stream []byte, decodedBudget *httpDecodeBudget) (HTTPRequest, int, error) {
+	req, lineEnd, err := parseHTTPRequestLine(stream)
+	if err != nil {
+		return HTTPRequest{}, 0, err
 	}
 
 	headers, bodyStart, framing, err := parseHTTPHeaders(stream, lineEnd+2)
@@ -190,11 +198,11 @@ func parseHTTPRequest(stream []byte, decodedBudget *httpDecodeBudget) (HTTPReque
 // framing. See [HTTPAnomalies] for framing and decoding observations. When framing
 // cannot locate the next message, the byte count covers all input.
 func ParseHTTPResponse(stream []byte) (HTTPResponse, int, error) {
-	return parseHTTPResponse(stream, nil)
+	return parseHTTPResponse(stream, "", nil)
 }
 
-func parseHTTPResponse(stream []byte, decodedBudget *httpDecodeBudget) (HTTPResponse, int, error) {
-	lineEnd := bytes.Index(stream, []byte("\r\n"))
+func parseHTTPResponse(stream []byte, method string, decodedBudget *httpDecodeBudget) (HTTPResponse, int, error) {
+	lineEnd := httpStartLineEnd(stream)
 	if lineEnd <= 0 || lineEnd > MaxHTTPHeaderLineBytes {
 		return HTTPResponse{}, 0, fmt.Errorf("%w: missing or oversize HTTP status line", ErrInvalidHTTP)
 	}
@@ -239,7 +247,7 @@ func parseHTTPResponse(stream []byte, decodedBudget *httpDecodeBudget) (HTTPResp
 		}
 	}
 
-	if (code >= 100 && code < 200) || code == 204 || code == 304 {
+	if method == "HEAD" || method == "CONNECT" && code/100 == 2 || code/100 == 1 || code == 204 || code == 304 {
 		resp.BodyOffset = bodyStart
 		return resp, bodyStart, nil
 	}
@@ -665,43 +673,63 @@ func formatJA4HLanguage(acceptLang string) [4]byte {
 
 // HTTP extracts HTTP/1.x requests, responses, JA4H fingerprints, and carved body
 // payloads from both cleartext TCP streams and TLS streams decrypted via
-// embedded PcapNG Decryption Secrets Blocks (DSB). HTTP uses one
+// embedded PcapNG Decryption Secrets Blocks (DSB). Cleartext parsing ends at
+// the first known gap in each direction. When requests are available, their
+// methods determine response framing, including bodyless HEAD responses. HTTP uses one
 // [MaxHTTPDecodedBodyBytesPerScan] budget for content decoding across all streams.
 // It returns no records and an error wrapping [ErrHTTPLimit] if decoding exceeds
 // the budget, including bytes produced before a decoding error.
 func (c *Capture) HTTP(data []byte) ([]HTTPRecord, error) {
-	streams, err := c.Streams(data)
+	var meta []streamMetadata
+	streams, err := collectStreams(ipFrameSource{capture: c, data: data}, 0, &meta, true)
 	if err != nil {
 		return nil, err
 	}
 	keys, _ := c.TLSKeyLog(nil)
 	var records []HTTPRecord
-	if err := scanHTTPStreams(streams, keys, &records, nil, nil); err != nil {
+	if err := scanHTTPStreams(streams, meta, keys, &records, nil, nil); err != nil {
 		return nil, err
 	}
 	return records, nil
 }
 
-func appendClearHTTP(wire, inner *TCPStream, clientOffset, serverOffset int, records *[]HTTPRecord, decodedBudget *httpDecodeBudget) error {
+func appendClearHTTP(wire, inner *TCPStream, provenance [2]tcpWireDirection, clientOffset, serverOffset int, records *[]HTTPRecord, decodedBudget *httpDecodeBudget) error {
+	innerWire := provenance
+	reversed := inner.SrcAddr != wire.SrcAddr || inner.SrcPort != wire.SrcPort
+	if reversed {
+		innerWire[0], innerWire[1] = innerWire[1], innerWire[0]
+	}
 	if clientOffset != 0 {
 		client, server := wire.Client.Data, wire.Server.Data
-		if inner.SrcAddr != wire.SrcAddr || inner.SrcPort != wire.SrcPort {
+		if reversed {
 			client, server = server, client
 		}
 		if bytes.HasPrefix(client, []byte("CONNECT ")) {
+			if !matchesHTTPResponse(innerWire, server, 0, 0) {
+				return appendHTTPFromTCPStream(*wire, provenance, false, records, decodedBudget, 0, 0)
+			}
 			// A successful CONNECT ends at the blank line in each direction.
-			// Bound the outer response so its body cannot consume tunnel data.
 			outer := *inner
 			outer.Client.Data, outer.Server.Data = client[:clientOffset], server[:serverOffset]
-			if err := appendHTTPFromTCPStream(&outer, false, records, decodedBudget, 0, 0); err != nil {
+			if err := appendHTTPFromTCPStream(outer, innerWire, false, records, decodedBudget, 0, 0); err != nil {
 				return err
 			}
 		}
 	}
-	return appendHTTPFromTCPStream(inner, false, records, decodedBudget, clientOffset, serverOffset)
+	return appendHTTPFromTCPStream(*inner, innerWire, false, records, decodedBudget, clientOffset, serverOffset)
 }
 
-func appendHTTPFromTCPStream(st *TCPStream, isDecrypted bool, records *[]HTTPRecord, decodedBudget *httpDecodeBudget, clientOffset, serverOffset int) error {
+func appendHTTPFromTCPStream(st TCPStream, wire [2]tcpWireDirection, isDecrypted bool, records *[]HTTPRecord, decodedBudget *httpDecodeBudget, clientOffset, serverOffset int) error {
+	// Reassembly follows the first observed packet, which can be a response.
+	if (hasHTTPRequestStart(st.Server.Data) || hasHTTPResponseStart(st.Client.Data) && !hasHTTPResponseStart(st.Server.Data)) &&
+		!hasHTTPRequestStart(st.Client.Data) {
+		st.reverse()
+		clientOffset, serverOffset = serverOffset, clientOffset
+		wire[0], wire[1] = wire[1], wire[0]
+	}
+	firstRequest := len(*records)
+	haveWire := len(wire[0].spans) != 0 && len(wire[1].spans) != 0
+	var requestOffsets []int
 	for off := 0; off < len(st.Client.Data); {
 		req, consumed, err := parseHTTPRequest(st.Client.Data[off:], decodedBudget)
 		if errors.Is(err, errHTTPDecodeBudget) {
@@ -712,6 +740,9 @@ func appendHTTPFromTCPStream(st *TCPStream, isDecrypted bool, records *[]HTTPRec
 		}
 		if len(*records) >= MaxHTTPMessagesPerScan {
 			return fmt.Errorf("%w: exceeds %d HTTP messages", ErrHTTPLimit, MaxHTTPMessagesPerScan)
+		}
+		if haveWire {
+			requestOffsets = append(requestOffsets, off+clientOffset)
 		}
 		req.BodyOffset += off + clientOffset
 		*records = append(*records, HTTPRecord{
@@ -726,8 +757,16 @@ func appendHTTPFromTCPStream(st *TCPStream, isDecrypted bool, records *[]HTTPRec
 		})
 		off += consumed
 	}
+	nextRequest, endRequests := firstRequest, len(*records)
 	for off := 0; off < len(st.Server.Data); {
-		resp, consumed, err := parseHTTPResponse(st.Server.Data[off:], decodedBudget)
+		data := st.Server.Data[off:]
+		matched := nextRequest < endRequests &&
+			(!haveWire || matchesHTTPResponse(wire, data, requestOffsets[nextRequest-firstRequest], off+serverOffset))
+		var method string
+		if matched {
+			method = (*records)[nextRequest].Request.Method
+		}
+		resp, consumed, err := parseHTTPResponse(data, method, decodedBudget)
 		if errors.Is(err, errHTTPDecodeBudget) {
 			return err
 		}
@@ -748,7 +787,76 @@ func appendHTTPFromTCPStream(st *TCPStream, isDecrypted bool, records *[]HTTPRec
 			IsDecrypted: isDecrypted,
 			Response:    resp,
 		})
+		if resp.StatusCode == 101 || method == "CONNECT" && resp.StatusCode/100 == 2 {
+			break
+		}
+		if resp.StatusCode >= 200 && matched {
+			nextRequest++
+		}
 		off += consumed
 	}
 	return nil
+}
+
+func httpStartLineEnd(data []byte) int {
+	return bytes.Index(data[:min(MaxHTTPHeaderLineBytes+2, len(data))], []byte("\r\n"))
+}
+
+// A complete HTTP start line gives stronger direction evidence than a method
+// token that can also occur at the start of a captured body fragment.
+func hasHTTPRequestStart(data []byte) bool {
+	method, _, ok := bytes.Cut(data[:min(8, len(data))], []byte(" "))
+	if !ok || !isStandardHTTPMethod(string(method)) {
+		return false
+	}
+	_, _, err := parseHTTPRequestLine(data)
+	return err == nil
+}
+
+func hasHTTPResponseStart(data []byte) bool {
+	if len(data) < 14 || !bytes.HasPrefix(data, []byte("HTTP/1.")) || data[8] != ' ' ||
+		data[9] < '1' || data[9] > '5' || data[10] < '0' || data[10] > '9' || data[11] < '0' || data[11] > '9' {
+		return false
+	}
+	return httpStartLineEnd(data) >= 12
+}
+
+func (wire tcpWireDirection) packetAt(offset int) (tcpPacketEvidence, bool) {
+	i := sort.Search(len(wire.spans), func(i int) bool { return wire.spans[i].end > uint32(offset) })
+	if i == len(wire.spans) {
+		return tcpPacketEvidence{}, false
+	}
+	return wire.spans[i].packet, true
+}
+
+// Reject a response whose TCP ACK has yet to reach the captured request. When
+// the ACK is unavailable, require an earlier body with a valid Content-Length
+// and a following response seen after the request.
+func matchesHTTPResponse(wire [2]tcpWireDirection, data []byte, requestOffset, responseOffset int) bool {
+	request, haveRequest := wire[0].packetAt(requestOffset)
+	response, haveResponse := wire[1].packetAt(responseOffset)
+	if !haveRequest || !haveResponse {
+		return true
+	}
+	if response.ack != 0 {
+		return int32(response.ack-(wire[0].seq+uint32(requestOffset))) > 0
+	}
+	if response.index >= request.index || !hasHTTPResponseStart(data) {
+		return true
+	}
+	status := string(data[9:12])
+	if status[0] == '1' || status == "204" || status == "304" {
+		return true
+	}
+	_, start, framing, err := parseHTTPHeaders(data, httpStartLineEnd(data)+2)
+	if err != nil || framing.hasTransfer || framing.invalidLength || framing.anomalies.MultipleContentLength ||
+		framing.length <= 0 || framing.length > int64(len(data)-start) || hasHTTPResponseStart(data[start:]) {
+		return true
+	}
+	end := start + int(framing.length)
+	if !hasHTTPResponseStart(data[end:]) {
+		return true
+	}
+	next, ok := wire[1].packetAt(responseOffset + end)
+	return !ok || next.index <= request.index
 }

@@ -13,8 +13,9 @@ be added compatibly.
   repeat or move backward.
 - `Flows` and `FlowsFromReaderAt` return bidirectional flows in first-observed
   order. The first observed direction defines the source and destination.
-  `Streams` returns TCP streams in first-observed flow order. Its
-  `FlowIndex` refers to the flow list, which can also contain UDP flows.
+  `Streams` returns TCP connections in order of their first observed packet.
+  Connections that reuse a five-tuple share a `FlowIndex`. This index refers
+  to the flow list, which can also contain UDP flows.
   Reassembled bytes within a direction follow TCP sequence order. A gap sets
   `SequenceGap` and concatenates the available ranges.
 - DNS capture records follow packet-index order. DHCPv4 and neighbor records

@@ -1,7 +1,7 @@
 # Deployment capture fixtures
 
-[generate.py](generate.py) builds these capture files byte for byte from fixed,
-synthetic inputs with Python 3.13.18. It uses the Python standard library,
+[generate.py](generate.py) builds the synthetic captures and the input for
+the Apple tcpdump fixture from fixed inputs with Python 3.13.18. It uses the Python standard library,
 documentation IP addresses, `.example` names, and locally administered MAC
 addresses. The repository license covers the generator and captures.
 
@@ -45,8 +45,8 @@ tshark -n -r iot.pcapng -Y dhcp -T fields \
   -e dhcp.ip.your -e dhcp.option.dhcp_server_id -e dhcp.option.ip_address_lease_time
 tshark -n -r iot.pcapng -Y 'udp.stream == 3' -T fields \
   -e frame.number -e udp.payload
-tshark -n -X 'read_format:MIME Files Format' -r proxy.pcapng -T fields \
-  -e pcapng.darwin.process_id -e pcapng.darwin.process_name
+tshark -n -r proxy.pcapng -Y frame.darwin.process_info.pid -T fields \
+  -e frame.number -e frame.darwin.process_info.pid -e frame.darwin.process_info.pname
 ```
 
 Frame numbers here are TShark's one-based numbers. Go packet indices start at
@@ -82,6 +82,34 @@ certificate chains, and decrypted proxy streams.
 
 See the [worked troubleshooting example](../../docs/parsing.md#trace-a-client-connection-and-a-tls-proxy)
 for capture points and how to correlate the results with logs.
+
+## Apple PKTAP process fixture
+
+Apple tcpdump 4.99.1 (Apple version 161, libpcap 1.10.1) converted the generated
+`darwin-pktap.pcap` to `darwin-pktap.pcapng`. This uses offline input and
+requires no capture privileges. The generated packets, addresses, and
+process names are synthetic. Apple tcpdump records its own platform and
+application details in the section header.
+
+Run these commands from this directory on macOS to reproduce the conversion
+and inspect its attribution.
+
+```sh
+/usr/sbin/tcpdump -nn -r darwin-pktap.pcap -P -w darwin-pktap.pcapng
+/usr/sbin/tcpdump -nn -k -r darwin-pktap.pcapng
+tshark -n -r darwin-pktap.pcapng -T fields \
+  -e frame.number -e frame.darwin.process_info.pid \
+  -e frame.darwin.process_info.pname -e frame.darwin.sc \
+  -e frame.darwin.flow_id -e frame.darwin.trace_tag
+```
+
+Packets 1 and 2 have primary PID `16232` and name `fixture-proxy`. Apple
+tcpdump also shows effective PID `7447` and name `fixture-client` on packet 1.
+Packet 3 has no process. Packet 4 has the name `fixture-name` with no PID.
+Apple tcpdump omits its PID and TShark displays the raw value `4294967295`.
+All four packets carry service class 7, flow ID 101, and trace tag 42. The Go
+tests check these attribution boundaries and verify that flow export preserves
+the original process entries.
 
 ## DNS transaction fixture
 

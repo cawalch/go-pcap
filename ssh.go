@@ -176,7 +176,8 @@ func computeHASSH(kex, enc, mac, comp string) string {
 // SSH extracts SSH handshakes, HASSH / HASSHServer fingerprints, and FoxIO
 // JA4SSH session fingerprints across all TCP flows in the capture.
 func (c *Capture) SSH(data []byte) ([]SSHRecord, error) {
-	streams, err := c.Streams(data)
+	var meta []streamMetadata
+	streams, err := collectStreams(ipFrameSource{capture: c, data: data}, 0, &meta, false)
 	if err != nil {
 		return nil, err
 	}
@@ -185,7 +186,7 @@ func (c *Capture) SSH(data []byte) ([]SSHRecord, error) {
 	}
 
 	var records []SSHRecord
-	sshFlows := make(map[flowKey]int)
+	recordByStream := make([]int, len(streams))
 	for i := range streams {
 		st, _, _ := proxyStream(streams[i])
 		if !bytes.HasPrefix(st.Client.Data, []byte("SSH-")) && !bytes.HasPrefix(st.Server.Data, []byte("SSH-")) {
@@ -198,8 +199,7 @@ func (c *Capture) SSH(data []byte) ([]SSHRecord, error) {
 		if len(records) >= MaxSSHHandshakesPerScan {
 			return nil, fmt.Errorf("%w: exceeds %d SSH handshakes", ErrSSHLimit, MaxSSHHandshakesPerScan)
 		}
-		key, _ := makeCanonicalFlowKey(IPProtoTCP, st.SrcAddr, st.SrcPort, st.DstAddr, st.DstPort)
-		sshFlows[key] = len(records)
+		recordByStream[i] = len(records) + 1
 		records = append(records, SSHRecord{
 			FlowIndex: st.FlowIndex,
 			SrcAddr:   st.SrcAddr,
@@ -216,6 +216,8 @@ func (c *Capture) SSH(data []byte) ([]SSHRecord, error) {
 	// Accumulate JA4SSH statistics directly while walking packets without retaining segment slices.
 	r := SafeReader{data: data, size: int64(len(data))}
 	accByRecord := make([]ja4sshAccumulator, len(records))
+	active := make(map[flowKey]int)
+	next := 0
 	if err := c.walkPackets(&r, func(pkt PacketRecord) error {
 		payload, err := r.Slice(pkt.PayloadOffset, pkt.PayloadLength)
 		if err != nil {
@@ -226,8 +228,12 @@ func (c *Capture) SSH(data []byte) ([]SSHRecord, error) {
 			return nil
 		}
 		key, _ := makeCanonicalFlowKey(frame.IPProtocol, frame.SrcAddr, frame.SrcPort, frame.DstAddr, frame.DstPort)
-		recIdx, ok := sshFlows[key]
-		if !ok {
+		if next < len(meta) && meta[next].firstPacket == pkt.Index {
+			active[key] = recordByStream[next]
+			next++
+		}
+		recIdx := active[key] - 1
+		if recIdx < 0 {
 			return nil
 		}
 		rec := &records[recIdx]

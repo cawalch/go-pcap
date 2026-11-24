@@ -161,6 +161,16 @@ func DefragmentIP(fragments []IPFragmentInput) ([]byte, FrameAnomalies, error) {
 		}
 	}
 
+	if anomalies.IPFragmentOverlapConflict {
+		// Write the first arrival last so it owns each disputed byte.
+		// Every nonempty range was validated above; negative offsets were skipped.
+		for i := len(fragments) - 1; i >= 0; i-- {
+			f := &fragments[i]
+			if f.FragmentOffset >= 0 && len(f.Payload) > 0 {
+				copy(out[f.FragmentOffset:], f.Payload)
+			}
+		}
+	}
 	return out, anomalies, nil
 }
 

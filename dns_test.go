@@ -382,3 +382,37 @@ func TestDNSApexAndCaptureWideSourceStats(t *testing.T) {
 		t.Fatalf("time-spread stats = %+v, err = %v", spreadStats, err)
 	}
 }
+
+func TestDNSPartialSectionCapacity(t *testing.T) {
+	msg, err := ParseDNS([]byte{0, 1, 0x80, 0, 0, 0, 0, 20, 0, 0, 0, 0})
+	if err != nil || !msg.Anomalies.TruncatedSection || cap(msg.Answers) != 0 || msg.AnswerCount != 20 {
+		t.Fatalf("answers cap=%d count=%d anomalies=%+v err=%v", cap(msg.Answers), msg.AnswerCount, msg.Anomalies, err)
+	}
+}
+
+func TestDNSTCPReusedTuple(t *testing.T) {
+	a, b := [4]byte{192, 0, 2, 1}, [4]byte{192, 0, 2, 2}
+	var frames [][]byte
+	for i, label := range []string{"one", "two"} {
+		msg := []byte{0, 0, 0x01, 0, 0, 1, 0, 0, 0, 0, 0, 0, 3}
+		msg = append(msg, label...)
+		msg = append(msg, 0, 0, 1, 0, 1)
+		wire := append(binary.BigEndian.AppendUint16(nil, uint16(len(msg))), msg...)
+		seq := uint32(100 - i)
+		frames = append(frames, buildEthernetIPv4TCPFrame(a, b, 5000, 53, seq, 0, TCPFlagSYN, nil),
+			buildEthernetIPv4TCPFrame(a, b, 5000, 53, seq+1, 0, TCPFlagACK, wire))
+	}
+	raw := buildClassicPCAP(binary.LittleEndian, false, LinkTypeEthernet, 65535, frames)
+	c, err := New(raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rows, err := c.DNS(raw)
+	if err != nil || len(rows) != 2 || rows[0].PacketIndex != 1 || rows[1].PacketIndex != 3 || rows[0].FlowIndex != rows[1].FlowIndex || rows[1].Message.Questions[0].Name != "two" {
+		t.Fatalf("DNS = %+v, %v", rows, err)
+	}
+	if yes, err := c.HasDNSQuery(raw, "two"); err != nil || !yes {
+		t.Fatalf("HasDNSQuery = %t, %v", yes, err)
+	}
+	checkReaderParity(t, raw, c.DNS, c.DNSFromReaderAt)
+}

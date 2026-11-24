@@ -77,18 +77,21 @@ const (
 	optIDBOS          uint16 = 12
 	optIDBTsOffset    uint16 = 14
 
-	// Enhanced Packet Block (EPB) options (including Wireshark/ptcpdump/Darwin process extensions).
-	optEPBFlags       uint16 = 2
-	optEPBDropCount   uint16 = 4
-	optEPBPacketID    uint16 = 5
-	optEPBQueue       uint16 = 6
-	optEPBDarwinDPEB  uint16 = 0x8000 // Darwin Process Event Block index
-	optEPBProcessID   uint16 = 0x8001 // Process ID extension (uint32 LE)
-	optEPBThreadID    uint16 = 0x8002 // Thread ID extension (uint32 LE)
-	optEPBProcessName uint16 = 0x8003 // Process name / comm string
-	optEPBProcessArgs uint16 = 0x8004 // Process command-line arguments string
-	optEPBUserID      uint16 = 0x8005 // User ID (uint32 LE)
-	optEPBContainerID uint16 = 0x8006 // Container / pod ID string
+	// Enhanced Packet Block (EPB) options.
+	optEPBFlags     uint16 = 2
+	optEPBDropCount uint16 = 4
+	optEPBPacketID  uint16 = 5
+	optEPBQueue     uint16 = 6
+
+	// Apple assigns 0x8001 to the primary process block index. Early go-pcap
+	// files used 0x8000 for that index and 0x8001–0x8006 for inline metadata.
+	optEPBDarwinProcessIndex uint16 = 0x8001
+	optEPBLegacyProcessIndex uint16 = 0x8000
+	optEPBLegacyThreadID     uint16 = 0x8002
+	optEPBLegacyProcessName  uint16 = 0x8003
+	optEPBLegacyProcessArgs  uint16 = 0x8004
+	optEPBLegacyUserID       uint16 = 0x8005
+	optEPBLegacyContainerID  uint16 = 0x8006
 
 	// Name Resolution Block (NRB) record types.
 	nrbRecordEnd  uint16 = 0x0000

@@ -299,9 +299,7 @@ type webSocketScan struct {
 
 func (scan *webSocketScan) appendStream(st TCPStream, decrypted bool) error {
 	if bytes.HasPrefix(st.Client.Data, []byte("HTTP/1.")) || bytes.HasPrefix(st.Server.Data, []byte("GET ")) {
-		st.Client, st.Server = st.Server, st.Client
-		st.SrcAddr, st.DstAddr = st.DstAddr, st.SrcAddr
-		st.SrcPort, st.DstPort = st.DstPort, st.SrcPort
+		st.reverse()
 	}
 	client, server := st.Client.Data, st.Server.Data
 	if st.Client.Anomalies.SequenceGap {

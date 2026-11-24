@@ -21,11 +21,16 @@ func TestLiveStatsInvalidHandle(t *testing.T) {
 }
 
 func TestLiveCaptureConcurrentCloseUnblocksReadPacket(t *testing.T) {
-	r, w, err := os.Pipe()
+	pair, err := syscall.Socketpair(syscall.AF_UNIX, syscall.SOCK_DGRAM, 0)
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer func() { _ = w.Close() }()
+	defer func() { _ = syscall.Close(pair[1]) }()
+	if err := syscall.SetNonblock(pair[0], true); err != nil {
+		_ = syscall.Close(pair[0])
+		t.Fatal(err)
+	}
+	r := os.NewFile(uintptr(pair[0]), "capture-socket")
 
 	lc := &LiveCapture{
 		file:     r,

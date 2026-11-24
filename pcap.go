@@ -12,6 +12,7 @@ import (
 	"math/bits"
 	"net/netip"
 	"os"
+	"strconv"
 	"strings"
 )
 
@@ -104,8 +105,9 @@ type InterfaceStatistics struct {
 	HasPacketsDropped  bool
 }
 
-// ProcessEvent describes a Darwin Process Event Block (DPEB) or process entry
-// in a PcapNG capture.
+// ProcessEvent describes an Apple Process Information Block, also called a
+// Darwin Process Event Block (DPEB), in a PcapNG capture. ProcessID preserves
+// the on-disk value, including 0xffffffff when Apple recorded only a name.
 type ProcessEvent struct {
 	ProcessID   uint32
 	ProcessName string
@@ -494,6 +496,7 @@ type scanSummary struct {
 	blocks               int
 	sectionInterfaceBase int
 	sectionProcessBase   int
+	sectionLegacyProcess bool
 	nrbRecords           int
 	packetCount          int
 	declaredExtent       uint64
@@ -847,6 +850,7 @@ func decodeSHB(
 
 	summary.sectionInterfaceBase = len(summary.interfaces)
 	summary.sectionProcessBase = len(summary.processes)
+	summary.sectionLegacyProcess = false
 	if !*haveSection {
 		summary.bigEndian = order == binary.BigEndian
 		summary.vMajor = vMajor
@@ -866,6 +870,7 @@ func decodeSHB(
 				summary.os = string(val)
 			}
 		case optSHBUserAppl:
+			summary.sectionLegacyProcess = bytes.Equal(val, []byte("go-pcap"))
 			if summary.userAppl == "" {
 				summary.userAppl = string(val)
 			}
@@ -1058,9 +1063,23 @@ func decodeEPBHeader(header []byte, payloadOffset, bodyEnd int64, order binary.B
 	}, optOffset, nil
 }
 
+// These comments carry metadata for which the Darwin process block has no
+// field. Their prefix identifies the writer's metadata among ordinary comments.
+const (
+	processCommentPrefix    = "go-pcap:"
+	processCommentArgs      = processCommentPrefix + "process-args="
+	processCommentThread    = processCommentPrefix + "thread-id="
+	processCommentUser      = processCommentPrefix + "user-id="
+	processCommentContainer = processCommentPrefix + "container-id="
+)
+
 func decodeEPBOptions(options []byte, order binary.ByteOrder, summary *scanSummary, rec *PacketRecord) error {
 	r := SafeReader{data: options, size: int64(len(options))}
-	return walkPCAPNGOptions(&r, 0, r.size, order, func(code uint16, val []byte) error {
+	processes := summary.processes[summary.sectionProcessBase:]
+	legacyInline := summary.sectionLegacyProcess && len(processes) == 0
+	nativeIndex, legacyIndex := uint32(math.MaxUint32), uint32(math.MaxUint32)
+	var haveNativeIndex bool
+	err := walkPCAPNGOptions(&r, 0, r.size, order, func(code uint16, val []byte) error {
 		switch code {
 		case optEPBFlags:
 			if len(val) == 4 {
@@ -1070,44 +1089,88 @@ func decodeEPBOptions(options []byte, order binary.ByteOrder, summary *scanSumma
 			if len(val) == 8 {
 				rec.DropCount = order.Uint64(val)
 			}
-		case optEPBDarwinDPEB:
+		case optEPBDarwinProcessIndex:
+			haveNativeIndex = true
 			if len(val) == 4 {
-				idx := order.Uint32(val)
-				if idx < uint32(len(summary.processes)-summary.sectionProcessBase) {
-					pe := summary.processes[summary.sectionProcessBase+int(idx)]
-					if !rec.HasProcessID {
-						rec.ProcessID = pe.ProcessID
-						rec.HasProcessID = true
-					}
-					if rec.ProcessName == "" {
-						rec.ProcessName = pe.ProcessName
-					}
+				nativeIndex = order.Uint32(val)
+				if legacyInline {
+					rec.ProcessID, rec.HasProcessID = nativeIndex, true
 				}
 			}
-		case optEPBProcessID:
+		case optEPBLegacyProcessIndex:
 			if len(val) == 4 {
-				rec.ProcessID = order.Uint32(val)
-				rec.HasProcessID = true
+				legacyIndex = order.Uint32(val)
 			}
-		case optEPBThreadID:
-			if len(val) == 4 {
-				rec.ThreadID = order.Uint32(val)
-				rec.HasThreadID = true
+		case optEPBLegacyThreadID:
+			if legacyInline && len(val) == 4 {
+				rec.ThreadID, rec.HasThreadID = order.Uint32(val), true
 			}
-		case optEPBProcessName:
-			rec.ProcessName = string(val)
-		case optEPBProcessArgs:
-			rec.ProcessArgs = string(val)
-		case optEPBUserID:
-			if len(val) == 4 {
-				rec.UserID = order.Uint32(val)
-				rec.HasUserID = true
+		case optEPBLegacyProcessName:
+			if legacyInline {
+				rec.ProcessName = string(val)
 			}
-		case optEPBContainerID:
-			rec.ContainerID = string(val)
+		case optEPBLegacyProcessArgs:
+			if legacyInline {
+				rec.ProcessArgs = string(val)
+			}
+		case optEPBLegacyUserID:
+			if legacyInline && len(val) == 4 {
+				rec.UserID, rec.HasUserID = order.Uint32(val), true
+			}
+		case optEPBLegacyContainerID:
+			if legacyInline {
+				rec.ContainerID = string(val)
+			}
+		case optComment:
+			return decodeProcessComment(val, rec)
 		}
 		return nil
 	})
+	if err != nil {
+		return err
+	}
+	index := nativeIndex
+	if !haveNativeIndex {
+		index = legacyIndex
+	}
+	if index < uint32(len(processes)) {
+		process := processes[index]
+		if process.ProcessID != math.MaxUint32 {
+			rec.ProcessID, rec.HasProcessID = process.ProcessID, true
+		}
+		rec.ProcessName = process.ProcessName
+	}
+	return nil
+}
+
+func decodeProcessComment(raw []byte, rec *PacketRecord) error {
+	if !bytes.HasPrefix(raw, []byte(processCommentPrefix)) {
+		return nil
+	}
+	comment := string(raw)
+	var target *string
+	var value string
+	switch {
+	case strings.HasPrefix(comment, processCommentArgs):
+		target, value = &rec.ProcessArgs, comment[len(processCommentArgs):]
+	case strings.HasPrefix(comment, processCommentContainer):
+		target, value = &rec.ContainerID, comment[len(processCommentContainer):]
+	case strings.HasPrefix(comment, processCommentThread):
+		if id, err := strconv.ParseUint(comment[len(processCommentThread):], 10, 32); err == nil {
+			rec.ThreadID, rec.HasThreadID = uint32(id), true
+		}
+	case strings.HasPrefix(comment, processCommentUser):
+		if id, err := strconv.ParseUint(comment[len(processCommentUser):], 10, 32); err == nil {
+			rec.UserID, rec.HasUserID = uint32(id), true
+		}
+	}
+	if target != nil {
+		if len(value) > MaxOptionStringBytes-len(*target) {
+			return ErrOptionLimit
+		}
+		*target += value
+	}
+	return nil
 }
 
 func decodeSPBHeader(header []byte, payloadOffset, bodyEnd int64, order binary.ByteOrder, summary *scanSummary) (PacketRecord, error) {

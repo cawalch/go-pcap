@@ -44,7 +44,7 @@ func scanDNSOverTLS(source ipFrameSource, extraKeyLog []byte) ([]DNSOverTLSRecor
 	if err != nil || len(keys.Entries) == 0 {
 		return nil, err
 	}
-	streams, err := collectStreams(source, dnsOverTLSPort)
+	streams, err := collectStreams(source, dnsOverTLSPort, nil, false)
 	if err != nil {
 		return nil, err
 	}

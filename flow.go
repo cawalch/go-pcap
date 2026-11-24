@@ -169,44 +169,18 @@ type flowAccumulator struct {
 	hsTimes []tcpHandshakeTime
 }
 
-func (acc *flowAccumulator) observe(pkt *PacketRecord, frame *Frame, payload []byte) error {
-	key, _ := makeCanonicalFlowKey(frame.IPProtocol, frame.SrcAddr, frame.SrcPort, frame.DstAddr, frame.DstPort)
-	idx, exists, err := acc.table.lookupOrInsert(key)
-	if err != nil {
-		return err
+// Preserve the first attribution. Only an observation of the same PID can
+// supply missing fields once any process metadata has been recorded.
+func (flow *FlowSummary) observeProcess(pkt *PacketRecord) {
+	if !pkt.HasProcessID && !pkt.HasUserID && pkt.ProcessName == "" && pkt.ProcessArgs == "" && pkt.ContainerID == "" {
+		return
 	}
-	if !exists {
-		acc.flows = append(acc.flows, FlowSummary{
-			Protocol:         frame.IPProtocol,
-			SrcAddr:          frame.SrcAddr,
-			DstAddr:          frame.DstAddr,
-			SrcPort:          frame.SrcPort,
-			DstPort:          frame.DstPort,
-			FirstTimestampNs: pkt.TimestampNs,
-			LastTimestampNs:  pkt.TimestampNs,
-			ProcessID:        pkt.ProcessID,
-			UserID:           pkt.UserID,
-			ProcessName:      pkt.ProcessName,
-			ProcessArgs:      pkt.ProcessArgs,
-			ContainerID:      pkt.ContainerID,
-			HasProcessID:     pkt.HasProcessID,
-			HasUserID:        pkt.HasUserID,
-			PortsUnavailable: !frame.hasPorts,
-		})
-		acc.hsTimes = append(acc.hsTimes, tcpHandshakeTime{})
-	}
-
-	flow := &acc.flows[idx]
-	if flow.PortsUnavailable && frame.hasPorts {
-		flow.PortsUnavailable = false
-	}
-	hst := &acc.hsTimes[idx]
-	flow.PacketCount++
-	if pkt.TimestampNs < flow.FirstTimestampNs {
-		flow.FirstTimestampNs = pkt.TimestampNs
-	}
-	if pkt.TimestampNs > flow.LastTimestampNs {
-		flow.LastTimestampNs = pkt.TimestampNs
+	if flow.HasProcessID {
+		if !pkt.HasProcessID || pkt.ProcessID != flow.ProcessID {
+			return
+		}
+	} else if flow.ProcessName != "" || flow.HasUserID || flow.ProcessArgs != "" || flow.ContainerID != "" {
+		return
 	}
 	if !flow.HasProcessID && pkt.HasProcessID {
 		flow.ProcessID = pkt.ProcessID
@@ -225,6 +199,41 @@ func (acc *flowAccumulator) observe(pkt *PacketRecord, frame *Frame, payload []b
 	if flow.ContainerID == "" && pkt.ContainerID != "" {
 		flow.ContainerID = pkt.ContainerID
 	}
+}
+
+func (acc *flowAccumulator) observe(pkt *PacketRecord, frame *Frame, payload []byte) error {
+	key, _ := makeCanonicalFlowKey(frame.IPProtocol, frame.SrcAddr, frame.SrcPort, frame.DstAddr, frame.DstPort)
+	idx, exists, err := acc.table.lookupOrInsert(key)
+	if err != nil {
+		return err
+	}
+	if !exists {
+		acc.flows = append(acc.flows, FlowSummary{
+			Protocol:         frame.IPProtocol,
+			SrcAddr:          frame.SrcAddr,
+			DstAddr:          frame.DstAddr,
+			SrcPort:          frame.SrcPort,
+			DstPort:          frame.DstPort,
+			FirstTimestampNs: pkt.TimestampNs,
+			LastTimestampNs:  pkt.TimestampNs,
+			PortsUnavailable: !frame.hasPorts,
+		})
+		acc.hsTimes = append(acc.hsTimes, tcpHandshakeTime{})
+	}
+
+	flow := &acc.flows[idx]
+	if flow.PortsUnavailable && frame.hasPorts {
+		flow.PortsUnavailable = false
+	}
+	hst := &acc.hsTimes[idx]
+	flow.PacketCount++
+	if pkt.TimestampNs < flow.FirstTimestampNs {
+		flow.FirstTimestampNs = pkt.TimestampNs
+	}
+	if pkt.TimestampNs > flow.LastTimestampNs {
+		flow.LastTimestampNs = pkt.TimestampNs
+	}
+	flow.observeProcess(pkt)
 	if frame.TCPFlags&TCPFlagSYN != 0 && frame.TCPOptionsLength != 0 {
 		flow.observeTCPTimestamp(frame, payload)
 	}

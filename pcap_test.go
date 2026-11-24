@@ -118,7 +118,7 @@ func buildPCAPNGFixture(order binary.ByteOrder, secretData []byte, frames [][]by
 	shb.Write(shbFixed[:])
 	appendPCAPNGOption(&shb, order, optSHBHardware, []byte("arm64"))
 	appendPCAPNGOption(&shb, order, optSHBOS, []byte("darwin"))
-	appendPCAPNGOption(&shb, order, optSHBUserAppl, []byte("ptcpdump"))
+	appendPCAPNGOption(&shb, order, optSHBUserAppl, []byte("go-pcap"))
 	appendPCAPNGOption(&shb, order, optEndOfOpt, nil)
 	appendPCAPNGBlock(&buf, order, BlockTypeSectionHeader, shb.Bytes())
 
@@ -167,8 +167,8 @@ func buildPCAPNGFixture(order binary.ByteOrder, secretData []byte, frames [][]by
 		var pidBytes, tidBytes [4]byte
 		order.PutUint32(pidBytes[:], 4242)
 		order.PutUint32(tidBytes[:], 99)
-		appendPCAPNGOption(&epb, order, optEPBProcessID, pidBytes[:])
-		appendPCAPNGOption(&epb, order, optEPBThreadID, tidBytes[:])
+		appendPCAPNGOption(&epb, order, optEPBDarwinProcessIndex, pidBytes[:])
+		appendPCAPNGOption(&epb, order, optEPBLegacyThreadID, tidBytes[:])
 		appendPCAPNGOption(&epb, order, optEndOfOpt, nil)
 		appendPCAPNGBlock(&buf, order, BlockTypeEnhancedPacket, epb.Bytes())
 	}
@@ -237,7 +237,7 @@ func TestPCAPNGWithDSBProcessAttributionAndFlows(t *testing.T) {
 		if cap.Format != FormatPCAPNG {
 			t.Fatalf("Format = %v, want FormatPCAPNG", cap.Format)
 		}
-		if cap.Hardware != "arm64" || cap.OS != "darwin" || cap.UserAppl != "ptcpdump" {
+		if cap.Hardware != "arm64" || cap.OS != "darwin" || cap.UserAppl != "go-pcap" {
 			t.Fatalf("SHB options = (%q, %q, %q)", cap.Hardware, cap.OS, cap.UserAppl)
 		}
 		if len(cap.Interfaces) != 1 || cap.Interfaces[0].Name != "en0" {

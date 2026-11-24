@@ -3,6 +3,7 @@ package pcap
 import (
 	"bytes"
 	"cmp"
+	"container/heap"
 	"fmt"
 	"net/netip"
 	"slices"
@@ -38,8 +39,9 @@ type StreamBuffer struct {
 	Anomalies    StreamAnomalies
 }
 
-// TCPStream pairs a bidirectional 5-tuple flow index with its reassembled
-// client-to-server and server-to-client byte streams.
+// TCPStream holds one connection on a bidirectional five-tuple. Connections
+// that reuse the tuple share a FlowIndex. Client follows the first observed
+// packet in this connection and Server follows the reverse direction.
 type TCPStream struct {
 	FlowIndex int
 	SrcAddr   netip.Addr
@@ -77,7 +79,9 @@ func ReassembleTCP(segments []TCPSegmentInput) (StreamBuffer, error) {
 	return out, err
 }
 
-func reassembleTCPWithBudget(segments []TCPSegmentInput, remainingBudget int64, written func(segment, end int, gap bool)) (StreamBuffer, int64, error) {
+type tcpWriteObserver func(segment, end int, seq uint32, gap bool)
+
+func reassembleTCPWithBudget(segments []TCPSegmentInput, remainingBudget int64, written tcpWriteObserver) (StreamBuffer, int64, error) {
 	if len(segments) > MaxSegmentsPerFlow {
 		return StreamBuffer{}, 0, fmt.Errorf("%w: %d segments exceed %d", ErrReassemblyLimit, len(segments), MaxSegmentsPerFlow)
 	}
@@ -157,8 +161,7 @@ func reassembleTCPWithBudget(segments []TCPSegmentInput, remainingBudget int64, 
 		return out, 0, nil
 	}
 
-	// Sort by relative start offset, then by arrival order so first-seen segments
-	// take precedence on overlaps.
+	// Sequence order identifies contiguous ranges. Capture order resolves ownership.
 	slices.SortFunc(norm, func(a, b normSegment) int {
 		if c := cmp.Compare(a.relStart, b.relStart); c != 0 {
 			return c
@@ -193,88 +196,249 @@ func reassembleTCPWithBudget(segments []TCPSegmentInput, remainingBudget int64, 
 		buf.Grow(int(size))
 	}
 
-	for i := range norm {
+	for i := 0; i < len(norm); {
 		seg := &norm[i]
 		gap := seg.relStart > cursor
 		if gap {
 			out.Anomalies.SequenceGap = true
 			out.GapCount++
 			out.GapBytes += uint64(seg.relStart - cursor)
-			cursor = seg.relStart
 		}
 
-		var newPayload []byte
-		if seg.relStart < cursor {
+		// All segments in this group share at least one byte with a predecessor.
+		// Adjacent non-overlapping segments stay on the single-copy path.
+		end := seg.relEnd
+		j := i + 1
+		for j < len(norm) && norm[j].relStart < end {
+			next := norm[j]
 			out.Anomalies.Retransmission = true
 			out.OverlapCount++
-			overlapEnd := min(seg.relEnd, cursor)
-			overlapLen := overlapEnd - seg.relStart
-			out.OverlapBytes += uint64(overlapLen)
-
-			// Starts are sorted, so this overlap lies in the contiguous
-			// output since the last gap. Convert sequence to buffer offsets.
-			written := buf.Bytes()
-			start := int64(len(written)) - (cursor - seg.relStart)
-			if !bytes.Equal(written[start:start+overlapLen], seg.payload[:overlapLen]) {
+			out.OverlapBytes += uint64(min(next.relEnd, end) - next.relStart)
+			end = max(end, next.relEnd)
+			j++
+		}
+		length := min(end-seg.relStart, maxBytes-int64(buf.Len()))
+		if length > 0 {
+			if j == i+1 {
+				buf.Write(seg.payload[:length])
+				if written != nil {
+					written(seg.order, buf.Len(), baseSeq+uint32(seg.relStart), gap)
+				}
+			} else if appendTCPOverlap(&buf, norm[i:j], length, baseSeq, gap, written) {
 				out.Anomalies.OverlapConflict = true
 			}
-
-			if seg.relEnd <= cursor {
-				continue
-			}
-			newPayload = seg.payload[cursor-seg.relStart:]
-		} else {
-			newPayload = seg.payload
 		}
-
-		avail := maxBytes - int64(buf.Len())
-		if avail <= 0 {
+		if length < end-seg.relStart {
 			out.Anomalies.Truncated = true
 			break
 		}
-		if int64(len(newPayload)) > avail {
-			newPayload = newPayload[:avail]
-			out.Anomalies.Truncated = true
-		}
-		buf.Write(newPayload)
-		if written != nil {
-			written(seg.order, buf.Len(), gap)
-		}
-		cursor += int64(len(newPayload))
-		if out.Anomalies.Truncated {
-			break
-		}
+		cursor = end
+		i = j
 	}
 
 	out.Data = buf.Bytes()
 	return out, int64(len(out.Data)), nil
 }
 
-type flowSegments struct {
-	flowIndex int
-	srcAddr   netip.Addr
-	dstAddr   netip.Addr
-	srcPort   uint16
-	dstPort   uint16
-	client    []TCPSegmentInput
-	server    []TCPSegmentInput
+// appendTCPOverlap emits each range from the first captured segment covering it.
+// The heap changes only at segment boundaries, independent of the sequence span.
+func appendTCPOverlap(buf *bytes.Buffer, group []normSegment, length int64, baseSeq uint32, gap bool, written tcpWriteObserver) bool {
+	start := group[0].relStart
+	limit := start + length
+	offset := buf.Len()
+	var active captureOrderHeap
+	next := 0
+	for pos := start; pos < limit; {
+		for next < len(group) && group[next].relStart <= pos {
+			heap.Push(&active, group[next])
+			next++
+		}
+		for active[0].relEnd <= pos {
+			heap.Pop(&active)
+		}
+		owner := active[0]
+		end := min(limit, owner.relEnd)
+		if next < len(group) {
+			end = min(end, group[next].relStart)
+		}
+		buf.Write(owner.payload[pos-owner.relStart : end-owner.relStart])
+		if written != nil {
+			written(owner.order, buf.Len(), baseSeq+uint32(pos), gap)
+		}
+		gap = false
+		pos = end
+	}
+	data := buf.Bytes()[offset:]
+	for _, seg := range group {
+		if seg.relStart >= limit {
+			break
+		}
+		end := min(limit, seg.relEnd)
+		if !bytes.Equal(data[seg.relStart-start:end-start], seg.payload[:end-seg.relStart]) {
+			return true
+		}
+	}
+	return false
 }
 
-// Streams reassembles bounded TCP byte streams for all TCP flows in the capture
-// in deterministic first-seen flow order.
+type captureOrderHeap []normSegment
+
+func (h captureOrderHeap) Len() int           { return len(h) }
+func (h captureOrderHeap) Less(i, j int) bool { return h[i].order < h[j].order }
+func (h captureOrderHeap) Swap(i, j int)      { h[i], h[j] = h[j], h[i] }
+func (h *captureOrderHeap) Push(x any)        { *h = append(*h, x.(normSegment)) }
+func (h *captureOrderHeap) Pop() any {
+	a := *h
+	last := a[len(a)-1]
+	*h = a[:len(a)-1]
+	return last
+}
+
+type flowSegments struct {
+	flowIndex        int
+	firstPacket      int
+	srcAddr, dstAddr netip.Addr
+	srcPort, dstPort uint16
+	client, server   []TCPSegmentInput
+	canonical        bool
+}
+
+// A SYN-ACK can be observed before its matching SYN.
+type tcpOpening struct {
+	seq       uint32
+	canonical bool
+	known     bool
+	inferred  bool
+}
+
+func (o *tcpOpening) observe(frame *Frame, canonical bool) bool {
+	switch frame.TCPFlags & (TCPFlagSYN | TCPFlagACK) {
+	case TCPFlagSYN:
+		opening := tcpOpening{seq: frame.TCPSeq, canonical: canonical, known: true}
+		changed := *o != opening
+		// Fast Open allows the SYN-ACK to acknowledge data on the SYN.
+		if o.inferred && o.canonical == canonical && o.seq-frame.TCPSeq <= frame.PayloadLength {
+			changed = false
+		}
+		*o = opening
+		return changed
+	case TCPFlagSYN | TCPFlagACK:
+		if !o.known {
+			*o = tcpOpening{seq: frame.TCPAck - 1, canonical: !canonical, known: true, inferred: true}
+		}
+	}
+	return false
+}
+
+// All connections on a five-tuple share the same per-direction limits.
+type tcpFlowBudget struct {
+	segments [2]int
+	bytes    [2]int64
+}
+
+func tcpSide(canonical bool) int {
+	if canonical {
+		return 0
+	}
+	return 1
+}
+
+func (b *tcpFlowBudget) addSegment(side int) error {
+	if b.segments[side] >= MaxSegmentsPerFlow {
+		return fmt.Errorf("%w: flow direction exceeds %d segments", ErrReassemblyLimit, MaxSegmentsPerFlow)
+	}
+	b.segments[side]++
+	return nil
+}
+
+func (b *tcpFlowBudget) reassemble(side int, segments []TCPSegmentInput, remaining *int64, written tcpWriteObserver) (StreamBuffer, error) {
+	budget := min(*remaining, MaxFlowStreamBytes-b.bytes[side])
+	buf, used, err := reassembleTCPWithBudget(segments, budget, written)
+	b.bytes[side] += used
+	*remaining -= used
+	return buf, err
+}
+
+type tcpFlowUsage struct {
+	opening tcpOpening
+	budget  tcpFlowBudget
+	slot    int // One-based index of the current connection.
+}
+
+// streamMetadata describes the packet and byte boundaries used by dissectors.
+type streamMetadata struct {
+	firstPacket                int
+	clientPrefix, serverPrefix int
+	wire                       [2]tcpWireDirection
+}
+
+// A packet index and its TCP acknowledgement describe a captured payload.
+type tcpPacketEvidence struct {
+	index uint32
+	ack   uint32
+}
+
+type tcpWireSpan struct {
+	end    uint32
+	packet tcpPacketEvidence
+}
+
+type tcpWireDirection struct {
+	seq   uint32 // Sequence number of byte zero in the contiguous prefix.
+	spans []tcpWireSpan
+}
+
+type tcpWireCapture struct {
+	synDirections uint8
+	packets       [2][]tcpPacketEvidence // Indexed by direction and segment.
+}
+
+func (wire *tcpWireCapture) observe(dir, segment int, index int, frame *Frame, hasPayload bool) {
+	if frame.TCPFlags&TCPFlagSYN != 0 {
+		wire.synDirections |= 1 << dir
+	}
+	// Both observed SYNs anchor the prefixes. No packet evidence is needed
+	// when both directions opened before the first captured payload.
+	if !hasPayload || wire.synDirections == 3 && wire.packets[0] == nil && wire.packets[1] == nil {
+		return
+	}
+	packets := wire.packets[dir]
+	packets = append(packets, make([]tcpPacketEvidence, segment+1-len(packets))...)
+	packets[segment].index = uint32(index)
+	if frame.TCPFlags&TCPFlagACK != 0 {
+		packets[segment].ack = frame.TCPAck
+	}
+	wire.packets[dir] = packets
+}
+
+func (wire *tcpWireDirection) add(end int, seq uint32, packet tcpPacketEvidence) {
+	if len(wire.spans) == 0 {
+		wire.seq = seq
+	}
+	if last := len(wire.spans) - 1; last >= 0 && wire.spans[last].packet == packet {
+		wire.spans[last].end = uint32(end)
+		return
+	}
+	wire.spans = append(wire.spans, tcpWireSpan{end: uint32(end), packet: packet})
+}
+
+// Streams reassembles TCP connections in order of their first observed packet.
+// An opening SYN after midstream traffic or with a different initial sequence
+// number starts a new connection on the same [FlowSummary].
 func (c *Capture) Streams(data []byte) ([]TCPStream, error) {
-	return collectStreams(ipFrameSource{capture: c, data: data}, 0)
+	return collectStreams(ipFrameSource{capture: c, data: data}, 0, nil, false)
 }
 
 // A nonzero port restricts reassembly after global flow indices are assigned.
-func collectStreams(source ipFrameSource, port uint16) ([]TCPStream, error) {
-
+func collectStreams(source ipFrameSource, port uint16, meta *[]streamMetadata, trackWire bool) ([]TCPStream, error) {
 	var table flowIndexTable
-	tcpSlotByFlow := make(map[int]int)
+	var inline [8]tcpFlowUsage
+	usage := inline[:0]
 	var collected []flowSegments
+	var wire []tcpWireCapture
 
-	err := source.walk(func(_ PacketRecord, frame Frame, l4 []byte) error {
-		key, _ := makeCanonicalFlowKey(frame.IPProtocol, frame.SrcAddr, frame.SrcPort, frame.DstAddr, frame.DstPort)
+	err := source.walk(func(pkt PacketRecord, frame Frame, l4 []byte) error {
+		key, canonical := makeCanonicalFlowKey(frame.IPProtocol, frame.SrcAddr, frame.SrcPort, frame.DstAddr, frame.DstPort)
 		flowIdx, _, err := table.lookupOrInsert(key)
 		if err != nil {
 			return err
@@ -282,78 +446,97 @@ func collectStreams(source ipFrameSource, port uint16) ([]TCPStream, error) {
 		if frame.IPProtocol != IPProtoTCP || !frame.hasPorts || frame.Anomalies.IPFragment || frame.Anomalies.TruncatedLayer || frame.Anomalies.InvalidTCPDataOffset {
 			return nil
 		}
-
 		if port != 0 && frame.SrcPort != port && frame.DstPort != port {
 			return nil
 		}
 
-		slot, hasSlot := tcpSlotByFlow[flowIdx]
-		if !hasSlot {
-			slot = len(collected)
-			tcpSlotByFlow[flowIdx] = slot
+		if flowIdx >= len(usage) {
+			usage = append(usage, make([]tcpFlowUsage, flowIdx+1-len(usage))...)
+		}
+		state := &usage[flowIdx]
+		if changed := state.opening.observe(&frame, canonical); state.slot == 0 || changed {
+			if len(collected) >= MaxFlows {
+				return fmt.Errorf("%w: exceeds %d TCP connections", ErrFlowLimit, MaxFlows)
+			}
+			state.slot = len(collected) + 1
 			collected = append(collected, flowSegments{
-				flowIndex: flowIdx,
-				srcAddr:   frame.SrcAddr,
-				dstAddr:   frame.DstAddr,
-				srcPort:   frame.SrcPort,
-				dstPort:   frame.DstPort,
+				flowIndex: flowIdx, firstPacket: pkt.Index,
+				srcAddr: frame.SrcAddr, dstAddr: frame.DstAddr,
+				srcPort: frame.SrcPort, dstPort: frame.DstPort,
+				canonical: canonical,
 			})
-		}
-
-		entry := &collected[slot]
-		seg := TCPSegmentInput{
-			Seq:     frame.TCPSeq,
-			Flags:   frame.TCPFlags,
-			Payload: l4,
-		}
-		if frame.SrcAddr == entry.srcAddr && frame.SrcPort == entry.srcPort {
-			if len(entry.client) >= MaxSegmentsPerFlow {
-				return fmt.Errorf("%w: flow %d client segments exceed %d", ErrReassemblyLimit, flowIdx, MaxSegmentsPerFlow)
+			if trackWire {
+				wire = append(wire, tcpWireCapture{})
 			}
-			entry.client = append(entry.client, seg)
-		} else {
-			if len(entry.server) >= MaxSegmentsPerFlow {
-				return fmt.Errorf("%w: flow %d server segments exceed %d", ErrReassemblyLimit, flowIdx, MaxSegmentsPerFlow)
-			}
-			entry.server = append(entry.server, seg)
+		}
+		if err := state.budget.addSegment(tcpSide(canonical)); err != nil {
+			return err
+		}
+		entry := &collected[state.slot-1]
+		dir, segments := 0, &entry.client
+		if canonical != entry.canonical {
+			dir, segments = 1, &entry.server
+		}
+		*segments = append(*segments, TCPSegmentInput{Seq: frame.TCPSeq, Flags: frame.TCPFlags, Payload: l4})
+		if trackWire {
+			wire[state.slot-1].observe(dir, len(*segments)-1, pkt.Index, &frame, len(l4) != 0)
 		}
 		return nil
 	})
-	if err != nil {
+	if err != nil || len(collected) == 0 {
 		return nil, err
 	}
 
-	if len(collected) == 0 {
-		return nil, nil
-	}
-
 	streams := make([]TCPStream, 0, len(collected))
-	remainingBudget := int64(MaxTotalStreamBytes)
-
+	if meta != nil {
+		*meta = make([]streamMetadata, 0, len(collected))
+	}
+	remaining := int64(MaxTotalStreamBytes)
 	for i := range collected {
 		entry := &collected[i]
-		clientBuf, usedClient, err := reassembleTCPWithBudget(entry.client, remainingBudget, nil)
-		if err != nil {
-			return nil, err
+		st := TCPStream{
+			FlowIndex: entry.flowIndex, SrcAddr: entry.srcAddr, DstAddr: entry.dstAddr,
+			SrcPort: entry.srcPort, DstPort: entry.dstPort,
 		}
-		remainingBudget -= usedClient
-
-		serverBuf, usedServer, err := reassembleTCPWithBudget(entry.server, remainingBudget, nil)
-		if err != nil {
-			return nil, err
+		info := streamMetadata{firstPacket: entry.firstPacket}
+		state := &usage[entry.flowIndex]
+		for dir, segments := range [2][]TCPSegmentInput{entry.client, entry.server} {
+			side := tcpSide(entry.canonical)
+			if dir == 1 {
+				side = 1 - side
+			}
+			prefix := 0
+			var written tcpWriteObserver
+			if meta != nil {
+				var packets []tcpPacketEvidence
+				if trackWire {
+					packets = wire[i].packets[dir]
+				}
+				gapped := false
+				written = func(segment, end int, seq uint32, gap bool) {
+					gapped = gapped || gap
+					if !gapped {
+						prefix = end
+						if len(packets) != 0 {
+							info.wire[dir].add(end, seq, packets[segment])
+						}
+					}
+				}
+			}
+			buf, err := state.budget.reassemble(side, segments, &remaining, written)
+			if err != nil {
+				return nil, err
+			}
+			if dir == 0 {
+				st.Client, info.clientPrefix = buf, prefix
+			} else {
+				st.Server, info.serverPrefix = buf, prefix
+			}
 		}
-		remainingBudget -= usedServer
-
-		streams = append(streams, TCPStream{
-			FlowIndex: entry.flowIndex,
-			SrcAddr:   entry.srcAddr,
-			DstAddr:   entry.dstAddr,
-			SrcPort:   entry.srcPort,
-			DstPort:   entry.dstPort,
-			Client:    clientBuf,
-			Server:    serverBuf,
-		})
+		streams = append(streams, st)
+		if meta != nil {
+			*meta = append(*meta, info)
+		}
 	}
-
 	return streams, nil
 }

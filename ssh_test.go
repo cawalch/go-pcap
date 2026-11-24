@@ -171,3 +171,22 @@ func TestSSHJA4SSHCrossesSegmentBoundary(t *testing.T) {
 		t.Fatalf("JA4SSH = %q, want %q", records[0].JA4SSH, want)
 	}
 }
+
+func TestSSHReusedTupleFingerprints(t *testing.T) {
+	a, b := [4]byte{192, 0, 2, 1}, [4]byte{192, 0, 2, 2}
+	var frames [][]byte
+	for i, body := range []string{"SSH-2.0-one\r\n", "other", "SSH-2.0-last\r\n"} {
+		seq := uint32(i * 1000)
+		frames = append(frames, buildEthernetIPv4TCPFrame(a, b, 5000, 22, seq, 0, TCPFlagSYN, nil),
+			buildEthernetIPv4TCPFrame(a, b, 5000, 22, seq+1, 0, TCPFlagACK, []byte(body)))
+	}
+	raw := buildClassicPCAP(binary.LittleEndian, false, LinkTypeEthernet, 65535, frames)
+	c, err := New(raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rows, err := c.SSH(raw)
+	if err != nil || len(rows) != 2 || rows[0].JA4SSH != "c13s0_c1s0_c0s0" || rows[1].JA4SSH != "c14s0_c1s0_c0s0" || rows[0].FlowIndex != rows[1].FlowIndex {
+		t.Fatalf("SSH = %+v, %v", rows, err)
+	}
+}

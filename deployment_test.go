@@ -3,6 +3,7 @@ package pcap
 import (
 	"bytes"
 	"encoding/hex"
+	"math"
 	"net/netip"
 	"os"
 	"slices"
@@ -260,6 +261,99 @@ func TestDeploymentCaptures(t *testing.T) {
 						t.Errorf("opaque UDP frame %d payload = %x, want %s", frame, payload, wantHex)
 					}
 				}
+			}
+		})
+	}
+}
+
+// Apple tcpdump wrote this PcapNG from the synthetic PKTAP input documented
+// in testdata/deployments/README.md.
+func TestDarwinPKTAPProcessAttribution(t *testing.T) {
+	raw, err := os.ReadFile("testdata/deployments/darwin-pktap.pcapng")
+	if err != nil {
+		t.Fatal(err)
+	}
+	wantProcesses := []ProcessEvent{{16232, "fixture-proxy"}, {7447, "fixture-client"}, {math.MaxUint32, "fixture-name"}}
+	for pass := range 2 {
+		r := bytes.NewReader(raw)
+		c, err := New(raw)
+		if err != nil {
+			t.Fatal(err)
+		}
+		cr, err := NewFromReaderAt(r, r.Size())
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !slices.Equal(c.Processes, wantProcesses) || !slices.Equal(cr.Processes, wantProcesses) {
+			t.Fatalf("pass %d process entries: %+v / %+v", pass, c.Processes, cr.Processes)
+		}
+		packets := checkReaderParity(t, raw, c.Packets, cr.PacketsFromReaderAt)
+		wantPacketProcesses := []ProcessEvent{{16232, "fixture-proxy"}, {16232, "fixture-proxy"}, {}, {0, "fixture-name"}}
+		if len(packets) != len(wantPacketProcesses) {
+			t.Fatalf("pass %d packet count: %d", pass, len(packets))
+		}
+		for i, pkt := range packets {
+			want := wantPacketProcesses[i]
+			if pkt.HasProcessID != (want.ProcessID != 0) || pkt.ProcessID != want.ProcessID || pkt.ProcessName != want.ProcessName {
+				t.Errorf("packet %d process: %+v", i, pkt)
+			}
+			if pkt.HasThreadID || pkt.HasUserID || pkt.ProcessArgs != "" || pkt.ContainerID != "" {
+				t.Errorf("packet %d mistaken Apple options: %+v", i, pkt)
+			}
+		}
+		flows := checkReaderParity(t, raw, c.Flows, cr.FlowsFromReaderAt)
+		if len(flows) != 1 || !flows[0].HasProcessID || flows[0].ProcessID != 16232 || flows[0].ProcessName != "fixture-proxy" {
+			t.Fatalf("pass %d flows: %+v", pass, flows)
+		}
+		if pass == 0 {
+			var out, outReader bytes.Buffer
+			if err := c.ExtractFlowPCAPNG(raw, &out, 0); err != nil {
+				t.Fatal(err)
+			}
+			if err := cr.ExtractFlowPCAPNGFromReaderAt(r, &outReader, 0); err != nil || !bytes.Equal(out.Bytes(), outReader.Bytes()) {
+				t.Fatalf("native export parity: %v", err)
+			}
+			raw = out.Bytes()
+		}
+	}
+}
+
+func TestFlowPreservesFirstProcessAttribution(t *testing.T) {
+	frame := buildEthernetIPv4UDPFrame([4]byte{192, 0, 2, 1}, [4]byte{192, 0, 2, 2}, 50000, 53, nil)
+	named := PacketRecord{ProcessName: "first"}
+	full := PacketRecord{HasProcessID: true, ProcessID: 42, ProcessName: "other", HasUserID: true, UserID: 7, ContainerID: "other", ProcessArgs: "other"}
+	for _, tc := range []struct {
+		name    string
+		packets []PacketRecord
+		want    PacketRecord
+	}{
+		{"name then different process", []PacketRecord{{}, named, full}, named},
+		{"PID then different process", []PacketRecord{{HasProcessID: true, ProcessID: 12}, full}, PacketRecord{HasProcessID: true, ProcessID: 12}},
+		{"same PID supplies missing fields", []PacketRecord{{HasProcessID: true, ProcessID: 42}, full}, full},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var out bytes.Buffer
+			w, err := NewPCAPNGWriter(&out, PCAPNGWriterOptions{})
+			if err != nil {
+				t.Fatal(err)
+			}
+			for _, pkt := range tc.packets {
+				if err := w.WritePacket(pkt, frame); err != nil {
+					t.Fatal(err)
+				}
+			}
+			raw := out.Bytes()
+			c, err := New(raw)
+			if err != nil {
+				t.Fatal(err)
+			}
+			rows := checkReaderParity(t, raw, c.Flows, c.FlowsFromReaderAt)
+			if len(rows) != 1 {
+				t.Fatalf("flows: %+v", rows)
+			}
+			f := rows[0]
+			if f.HasProcessID != tc.want.HasProcessID || f.ProcessID != tc.want.ProcessID || f.ProcessName != tc.want.ProcessName || f.ProcessArgs != tc.want.ProcessArgs || f.HasUserID != tc.want.HasUserID || f.UserID != tc.want.UserID || f.ContainerID != tc.want.ContainerID {
+				t.Fatalf("flow attribution %+v, want %+v", f, tc.want)
 			}
 		})
 	}

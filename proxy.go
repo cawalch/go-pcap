@@ -16,11 +16,9 @@ import (
 func UnwrapProxyStream(client, server []byte) (innerClient, innerServer []byte, proxyType string, targetHost string, targetPort uint16, unwrapped bool) {
 	if bytes.HasPrefix(client, []byte("CONNECT ")) {
 		clientLine, cEnd := proxyHTTPHeader(client)
-		serverLine, sEnd := proxyHTTPHeader(server)
 		target, version, ok := strings.Cut(strings.TrimPrefix(clientLine, "CONNECT "), " ")
-		proto, status, _ := strings.Cut(serverLine, " ")
-		code, _, _ := strings.Cut(status, " ")
-		if ok && (version == "HTTP/1.1" || version == "HTTP/1.0") && (proto == "HTTP/1.1" || proto == "HTTP/1.0") && code == "200" {
+		sEnd := proxyConnectResponseEnd(server)
+		if ok && (version == "HTTP/1.1" || version == "HTTP/1.0") && sEnd != 0 {
 			host, port, err := net.SplitHostPort(target)
 			n, parseErr := strconv.ParseUint(port, 10, 16)
 			if err == nil && parseErr == nil && n != 0 && host != "" && !strings.ContainsAny(host, "/?#@") && strings.IndexFunc(host, func(r rune) bool { return r <= ' ' || r == 127 }) == -1 {
@@ -60,6 +58,27 @@ func proxyHTTPHeader(data []byte) (string, int) {
 	return string(line), end + 4
 }
 
+// Include provisional responses in the same bounded handshake as the final 2xx.
+func proxyConnectResponseEnd(data []byte) int {
+	data = data[:min(len(data), 4096)]
+	for off := 0; off < len(data); {
+		line, n := proxyHTTPHeader(data[off:])
+		proto, status, ok := strings.Cut(line, " ")
+		code, _, _ := strings.Cut(status, " ")
+		if !ok || (proto != "HTTP/1.0" && proto != "HTTP/1.1") || len(code) != 3 || code[1] < '0' || code[1] > '9' || code[2] < '0' || code[2] > '9' {
+			break
+		}
+		off += n
+		if code[0] == '2' {
+			return off
+		}
+		if code[0] != '1' || code == "101" {
+			break
+		}
+	}
+	return 0
+}
+
 func socksAddress(message []byte, code byte) ([]byte, int) {
 	if len(message) < 5 || message[0] != 5 || message[1] != code || message[2] != 0 {
 		return nil, 0
@@ -82,6 +101,12 @@ func socksAddress(message []byte, code byte) ([]byte, int) {
 	return message[offset : offset+n], offset + n + 2
 }
 
+func (st *TCPStream) reverse() {
+	st.Client, st.Server = st.Server, st.Client
+	st.SrcAddr, st.DstAddr = st.DstAddr, st.SrcAddr
+	st.SrcPort, st.DstPort = st.DstPort, st.SrcPort
+}
+
 // proxyStream orients a recognized tunnel to its request and retains the wire
 // offsets of the inner payloads. It operates on a copy of the stream metadata.
 func proxyStream(st TCPStream) (TCPStream, int, int) {
@@ -91,9 +116,7 @@ func proxyStream(st TCPStream) (TCPStream, int, int) {
 		if !ok {
 			return st, 0, 0
 		}
-		st.Client, st.Server = st.Server, st.Client
-		st.SrcAddr, st.DstAddr = st.DstAddr, st.SrcAddr
-		st.SrcPort, st.DstPort = st.DstPort, st.SrcPort
+		st.reverse()
 	}
 	co, so := len(st.Client.Data)-len(client), len(st.Server.Data)-len(server)
 	st.Client.Data, st.Server.Data = client, server

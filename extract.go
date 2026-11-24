@@ -7,7 +7,8 @@ import (
 
 // ExtractFlowPCAPNG writes one bidirectional IP flow from data to w. flowIndex
 // uses the first-seen ordering of [Capture.Flows]. The export retains the
-// interfaces used by the flow and all source name records and decryption secrets.
+// interfaces used by the flow and all source name records, Darwin process
+// entries and decryption secrets.
 // A missing flow returns [ErrOutOfBounds] without writing to w.
 func (c *Capture) ExtractFlowPCAPNG(data []byte, w io.Writer, flowIndex int) error {
 	return c.extractFlowPCAPNG(flowExportSource{data: *NewSafeReader(data)}, w, flowIndex)
@@ -201,7 +202,8 @@ func (s *flowExportSource) writeSelectedBlocks(w io.Writer, used *[MaxInterfaces
 				offset += 12
 			}
 		case BlockTypeNameResolution, BlockTypeDecryptionSecrets, BlockTypeDarwinProcessEvent:
-			// Darwin process references in EPB options retain their original indices.
+			// Keep Darwin process blocks in their original section order so
+			// primary and effective process references retain their indices.
 		default:
 			return nil
 		}

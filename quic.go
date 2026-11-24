@@ -57,8 +57,9 @@ type QUICHandshake struct {
 	Anomalies             TLSAnomalies
 }
 
-// QUICRecord associates a parsed [QUICHandshake] with its first observed Initial UDP flow in
-// a [Capture].
+// QUICRecord associates a parsed [QUICHandshake] with its first observed Initial
+// UDP flow in a [Capture]. FlowIndex uses the ordering of [Capture.Flows].
+// For fragmented UDP, the ports come from the reassembled datagram.
 type QUICRecord struct {
 	FlowIndex int
 	SrcAddr   netip.Addr
@@ -432,6 +433,10 @@ func reassembleQUICCryptoChunks(chunks []quicCryptoChunk) ([]byte, bool) {
 // datagrams belonging to the same connection, reassembles their CRYPTO frames,
 // and parses the embedded TLS 1.3 ClientHello and 'q13...' JA4 fingerprint.
 func DecryptQUICInitial(datagrams [][]byte) (QUICHandshake, error) {
+	return decryptQUICInitial(datagrams, nil, true)
+}
+
+func decryptQUICInitial(datagrams [][]byte, observedRetryID []byte, inferRetry bool) (QUICHandshake, error) {
 	if len(datagrams) == 0 {
 		return QUICHandshake{}, fmt.Errorf("%w: empty datagram slice", ErrInvalidQUIC)
 	}
@@ -442,7 +447,7 @@ func DecryptQUICInitial(datagrams [][]byte) (QUICHandshake, error) {
 	var firstHdr QUICInitialHeader
 	var haveFirst bool
 	var effectiveDCID []byte
-	var keys quicInitialKeys
+	var keys, retryKeys quicInitialKeys
 	var chunks []quicCryptoChunk
 
 	for _, dgram := range datagrams {
@@ -462,13 +467,24 @@ func DecryptQUICInitial(datagrams [][]byte) (QUICHandshake, error) {
 				haveFirst = true
 			}
 			plain, decErr := decryptSingleQUICInitial(rem[:hdr.PacketLength], hdr, keys)
-			if decErr != nil && !bytes.Equal(hdr.DCID, effectiveDCID) {
-				// Retry-updated DCID: re-derive client Initial keys for the new DCID.
-				if retryKeys, kErr := deriveQUICInitialKeys(hdr.DCID, hdr.Version, true); kErr == nil {
-					if retryPlain, rErr := decryptSingleQUICInitial(rem[:hdr.PacketLength], hdr, retryKeys); rErr == nil {
-						keys = retryKeys
-						effectiveDCID = hdr.DCID
-						plain, decErr = retryPlain, nil
+			if decErr != nil && inferRetry && !bytes.Equal(hdr.DCID, effectiveDCID) {
+				// The caller grouped these datagrams into one exchange. Try keys
+				// derived from the new destination ID when the Retry is unavailable.
+				if otherKeys, kErr := deriveQUICInitialKeys(hdr.DCID, hdr.Version, true); kErr == nil {
+					if otherPlain, rErr := decryptSingleQUICInitial(rem[:hdr.PacketLength], hdr, otherKeys); rErr == nil {
+						keys, effectiveDCID = otherKeys, hdr.DCID
+						plain, decErr = otherPlain, nil
+					}
+				}
+			}
+			if decErr != nil && observedRetryID != nil && !bytes.Equal(hdr.DCID, firstHdr.DCID) {
+				if retryKeys.aead == nil && bytes.Equal(hdr.DCID, observedRetryID) {
+					retryKeys, _ = deriveQUICInitialKeys(observedRetryID, firstHdr.Version, true)
+				}
+				if retryKeys.aead != nil {
+					plain, decErr = decryptSingleQUICInitial(rem[:hdr.PacketLength], hdr, retryKeys)
+					if decErr == nil {
+						effectiveDCID = observedRetryID
 					}
 				}
 			}
@@ -514,18 +530,19 @@ func DecryptQUICInitial(datagrams [][]byte) (QUICHandshake, error) {
 
 // QUIC decrypts QUIC v1 and QUIC v2 Initial flows across all UDP packets in the
 // capture and extracts their embedded TLS 1.3 ClientHello and 'q13...' JA4
-// fingerprints. It correlates unique nonempty connection IDs across client port
-// changes and reports observed Retry and Version Negotiation responses.
+// fingerprints. Distinct exchanges on a UDP tuple share its flow index. QUIC
+// correlates unique nonempty connection IDs across client port changes and
+// reports observed Retry and Version Negotiation responses.
 func (c *Capture) QUIC(data []byte) ([]QUICRecord, error) {
 	return scanQUIC(ipFrameSource{capture: c, data: data})
 }
 
 // quicScanHeader checks an Initial, Retry, or Version Negotiation header for
 // flow correlation. The returned IDs borrow the UDP payload.
-func quicScanHeader(udpPayload []byte) (version uint32, dcid, scid []byte, vn, retry, ok bool) {
+func quicScanHeader(udpPayload []byte) (version uint32, dcid, scid []byte, initialLength int, vn, retry, ok bool) {
 	first := udpPayload[0]
 	if first&0x80 == 0 {
-		return 0, nil, nil, false, false, false
+		return 0, nil, nil, 0, false, false, false
 	}
 	version = binary.BigEndian.Uint32(udpPayload[1:5])
 	vn = version == 0
@@ -535,23 +552,23 @@ func quicScanHeader(udpPayload []byte) (version uint32, dcid, scid []byte, vn, r
 		var ok bool
 		dcid, scid, n, ok = quicConnectionIDs(udpPayload)
 		if !ok {
-			return 0, nil, nil, false, false, false
+			return 0, nil, nil, 0, false, false, false
 		}
 		tail := len(udpPayload) - n
 		if vn && (tail == 0 || tail%4 != 0) || retry && (tail <= 16 || tail-16 > MaxQUICTokenBytes) {
-			return 0, nil, nil, false, false, false
+			return 0, nil, nil, 0, false, false, false
 		}
 	} else {
 		if first&0x40 == 0 {
-			return 0, nil, nil, false, false, false
+			return 0, nil, nil, 0, false, false, false
 		}
 		hdr, err := parseQUICInitialPacketView(udpPayload)
 		if err != nil {
-			return 0, nil, nil, false, false, false
+			return 0, nil, nil, 0, false, false, false
 		}
-		dcid, scid = hdr.DCID, hdr.SCID
+		dcid, scid, initialLength = hdr.DCID, hdr.SCID, hdr.PacketLength
 	}
-	return version, dcid, scid, vn, retry, true
+	return version, dcid, scid, initialLength, vn, retry, true
 }
 
 // quicCID owns the bytes of a length-validated long-header connection ID.
@@ -567,156 +584,287 @@ func makeQUICCID(data []byte) quicCID {
 	return id
 }
 
+// Intern addresses so each directional CID index stores compact endpoint keys.
+type quicEndpoint struct {
+	addr uint32
+	port uint16
+}
+
+type quicTuple struct {
+	client, server quicEndpoint
+}
+
+func (t quicTuple) reverse() quicTuple {
+	return quicTuple{t.server, t.client}
+}
+
+type quicExchangeKey struct {
+	tuple      quicTuple
+	version    uint32
+	dcid, scid quicCID
+}
+
+const (
+	quicInitialDCID = iota
+	quicResponseDCID
+	quicServerSCID
+)
+
+type quicTupleCID struct {
+	tuple   quicTuple
+	version uint32
+	id      quicCID
+	kind    uint8
+}
+
+// quicEndpointCID deliberately excludes the client port so an Initial can be
+// correlated after rebinding. A reused ID is ambiguous across ports.
+type quicEndpointCID struct {
+	client   uint32
+	server   quicEndpoint
+	id       quicCID
+	response bool
+}
+
+func registerQUICSlot[K comparable](m map[K]int, key K, slot int) {
+	if prev, found := m[key]; found && prev != slot {
+		m[key] = -1
+	} else {
+		m[key] = slot
+	}
+}
+
+type quicFlowBuf struct {
+	key             quicExchangeKey
+	flowIndex       int
+	hasRetry, hasVN bool
+	retryID         quicCID
+	serverID        quicCID
+	count           int
+	failedProbes    int
+	clientPkt       [][]byte
+	serverPkt       [][]byte
+}
+
+func (fb *quicFlowBuf) isServerAlias(dcid quicCID) bool {
+	return fb.serverID.length > 0 && dcid == fb.serverID && dcid != fb.key.dcid && (!fb.hasRetry || dcid != fb.retryID)
+}
+
+// Reserve speculative authentication for exchanges with packet budget left.
+// A failed probe consumes the allowance for further probes, while direct CID
+// matches still have the full packet budget.
+func (fb *quicFlowBuf) canProbe() bool {
+	return fb.count+fb.failedProbes < MaxQUICPacketsPerFlow
+}
+
 func scanQUIC(source ipFrameSource) ([]QUICRecord, error) {
-
-	type quicFlowBuf struct {
-		flowIndex       int
-		srcAddr         netip.Addr
-		dstAddr         netip.Addr
-		srcPort         uint16
-		dstPort         uint16
-		version         uint32
-		dcid, scid      quicCID
-		hasRetry, hasVN bool
-		count           int
-		clientPkt       [][]byte
-		serverPkt       [][]byte
-	}
-
-	// Index the client's DCID in the forward direction and SCID in reverse.
-	// Include the server port so only the client port can change.
-	type cidKey struct {
-		client, server netip.Addr
-		port           uint16
-		id             quicCID
-		response       bool
-	}
-	byCID := make(map[cidKey]int)
-	register := func(key cidKey, slot int) {
-		if key.id.length == 0 {
-			return
-		}
-		if prev, found := byCID[key]; found && prev != slot {
-			byCID[key] = -1 // More than one exchange uses this ID.
-		} else {
-			byCID[key] = slot
-		}
-	}
-
 	var table flowIndexTable
 	var defrag ipFragAccumulator
-	slotByFlow := make(map[int]int)
 	var flows []quicFlowBuf
-
-	err := source.walk(func(_ PacketRecord, frame Frame, l4 []byte) error {
-
-		var udpPayload []byte
-		if frame.Anomalies.IPFragment && frame.IPProtocol == IPProtoUDP {
-			var srcPort, dstPort uint16
-			var ok bool
-			udpPayload, srcPort, dstPort, ok = defrag.addUDPFragment(&frame, l4)
-			if !ok {
-				return nil
-			}
-			frame.SrcPort = srcPort
-			frame.DstPort = dstPort
-		} else if frame.IPProtocol == IPProtoUDP && frame.PayloadLength >= 7 {
-			udpPayload = l4
+	var addresses []netip.Addr
+	addressIDs := make(map[netip.Addr]uint32)
+	addressID := func(addr netip.Addr) uint32 {
+		if id, ok := addressIDs[addr]; ok {
+			return id
 		}
+		id := uint32(len(addresses))
+		addresses = append(addresses, addr)
+		addressIDs[addr] = id
+		return id
+	}
+	byInitial := make(map[quicExchangeKey]int)
+	byTupleCID := make(map[quicTupleCID]int)
+	byEndpointCID := make(map[quicEndpointCID]int)
+	register := func(key quicExchangeKey, slot int) {
+		if _, known := byInitial[key]; known {
+			return
+		}
+		byInitial[key] = slot
+		tuple := key.tuple
+		registerQUICSlot(byTupleCID, quicTupleCID{tuple, key.version, key.scid, quicResponseDCID}, slot)
+		if tuple != flows[slot].key.tuple {
+			return // The exchange is already indexed for rebinding.
+		}
+		if key == flows[slot].key {
+			registerQUICSlot(byTupleCID, quicTupleCID{tuple, key.version, key.dcid, quicInitialDCID}, slot)
+		}
+		if key.dcid.length > 0 {
+			registerQUICSlot(byEndpointCID, quicEndpointCID{tuple.client.addr, tuple.server, key.dcid, false}, slot)
+		}
+		if key.scid.length > 0 {
+			registerQUICSlot(byEndpointCID, quicEndpointCID{tuple.client.addr, tuple.server, key.scid, true}, slot)
+		}
+	}
+	registerServerID := func(slot int, tuple quicTuple, id quicCID) {
+		fb := &flows[slot]
+		fb.serverID = id
+		registerQUICSlot(byTupleCID, quicTupleCID{fb.key.tuple, fb.key.version, id, quicServerSCID}, slot)
+		if tuple != fb.key.tuple {
+			registerQUICSlot(byTupleCID, quicTupleCID{tuple, fb.key.version, id, quicServerSCID}, slot)
+		}
+		registerQUICSlot(byEndpointCID, quicEndpointCID{tuple.client.addr, tuple.server, id, false}, slot)
+	}
 
+	err := source.walk(func(_ PacketRecord, frame Frame, udpPayload []byte) error {
 		key, _ := makeCanonicalFlowKey(frame.IPProtocol, frame.SrcAddr, frame.SrcPort, frame.DstAddr, frame.DstPort)
 		flowIdx, _, err := table.lookupOrInsert(key)
 		if err != nil {
 			return err
 		}
-		if frame.IPProtocol != IPProtoUDP || len(udpPayload) < 7 {
+		if frame.IPProtocol != IPProtoUDP {
 			return nil
 		}
-		version, dstID, srcID, vn, retry, ok := quicScanHeader(udpPayload)
+		if frame.Anomalies.IPFragment {
+			var ok bool
+			udpPayload, frame.SrcPort, frame.DstPort, ok = defrag.addUDPFragment(&frame, udpPayload)
+			if !ok {
+				return nil
+			}
+		}
+		if len(udpPayload) < 7 {
+			return nil
+		}
+		version, dstID, srcID, initialLength, vn, retry, ok := quicScanHeader(udpPayload)
 		if !ok {
 			return nil
 		}
 
+		tuple := quicTuple{quicEndpoint{addressID(frame.SrcAddr), frame.SrcPort}, quicEndpoint{addressID(frame.DstAddr), frame.DstPort}}
+		reverse := tuple.reverse()
 		dcid, scid := makeQUICCID(dstID), makeQUICCID(srcID)
-
-		// QUIC-only captures often assign the same index to the tuple and
-		// its exchange. Only displaced indexes and rebindings need the map.
-		slot := flowIdx
-		hasTuple := slot < len(flows) && flows[slot].flowIndex == flowIdx
-		if !hasTuple {
-			slot, hasTuple = slotByFlow[flowIdx]
-		}
-		found := hasTuple
+		initial := quicExchangeKey{tuple, version, dcid, scid}
+		slot, found := byInitial[initial]
 		client := true
-		var tupleIDsMatch bool
-		if found {
-			fb := &flows[slot]
-			client = frame.DstAddr == fb.dstAddr && frame.DstPort == fb.dstPort
-			if client {
-				tupleIDsMatch = fb.version == version && fb.dcid == dcid && fb.scid == scid
+		if vn || retry || !found {
+			client, found = false, false
+			if vn {
+				// Version Negotiation echoes both of the client's IDs.
+				for _, v := range [...]uint32{QUICVersion1, QUICVersion2} {
+					if match, ok := byInitial[quicExchangeKey{reverse, v, scid, dcid}]; ok && flows[match].key.dcid == scid {
+						if found && slot != match {
+							return nil
+						}
+						slot, found = match, true
+					}
+				}
 			} else {
-				tupleIDsMatch = (vn || fb.version == version) && fb.scid == dcid
+				slot, found = byTupleCID[quicTupleCID{reverse, version, dcid, quicResponseDCID}]
+				if found && slot < 0 {
+					// This response's destination ID has multiple owners on the tuple.
+					return nil
+				}
 			}
-		}
-		// A client can rebind onto a tuple already used by another exchange.
-		// When its IDs disagree, prefer a unique directional CID match.
-		if !tupleIDsMatch {
-			forward := cidKey{frame.SrcAddr, frame.DstAddr, frame.DstPort, dcid, false}
-			reverse := cidKey{frame.DstAddr, frame.SrcAddr, frame.SrcPort, dcid, true}
-
-			f, fOK := byCID[forward]
-			r, rOK := byCID[reverse]
-			// A changed client SCID identifies a separate Initial exchange,
-			// even when both clients chose the same destination ID.
-			if !vn && !retry && fOK && f >= 0 && !rOK && flows[f].version == version && flows[f].scid == scid {
-				slot, found, client = f, true, true
-			} else if rOK && r >= 0 && !fOK && (vn || flows[r].version == version) {
-				slot, found, client = r, true, false
+			if !found && dcid.length > 0 {
+				f, fOK := byEndpointCID[quicEndpointCID{tuple.client.addr, tuple.server, dcid, false}]
+				r, rOK := byEndpointCID[quicEndpointCID{reverse.client.addr, reverse.server, dcid, true}]
+				if !vn && !retry && fOK && f >= 0 && !rOK && flows[f].key.version == version && flows[f].key.scid == scid {
+					slot, found, client = f, true, true
+				} else if rOK && r >= 0 && !fOK && (vn || flows[r].key.version == version) {
+					slot, found = r, true
+				}
 			}
 		}
 		if vn || retry {
-			if !found || client {
+			if !found {
 				return nil
 			}
 			fb := &flows[slot]
-			if fb.count >= MaxQUICPacketsPerFlow || dcid != fb.scid {
+			if fb.count >= MaxQUICPacketsPerFlow {
 				return nil
 			}
-			if vn && scid == fb.dcid {
+			if vn && scid == fb.key.dcid {
 				fb.hasVN = true
 				fb.count++
 			}
-			if retry && version == fb.version && !fb.hasRetry && scid != fb.dcid {
+			if retry && !fb.hasRetry && scid != fb.key.dcid {
 				fb.hasRetry = true
+				fb.retryID = scid
 				fb.count++
-				register(cidKey{fb.srcAddr, fb.dstAddr, fb.dstPort, scid, false}, slot)
+				alias := fb.key
+				alias.dcid = scid
+				register(alias, slot)
+				alias.tuple = reverse
+				register(alias, slot)
 			}
 			return nil
 		}
+
+		if !found || !client {
+			// An Initial captured before its client packet has the client's
+			// SCID as its DCID. Verify that it decrypts with server keys
+			// before interpreting the earlier packets as a server Initial.
+			previous, exists := byTupleCID[quicTupleCID{reverse, version, scid, quicInitialDCID}]
+			if exists && previous >= 0 && (!found || slot == previous) {
+				fb := &flows[previous]
+				if fb.canProbe() && len(fb.clientPkt) > 0 && len(fb.serverPkt) == 0 && !fb.hasRetry && !fb.hasVN {
+					if quicAuthenticatesInitial(fb.clientPkt[0], dstID, false) {
+						delete(byInitial, fb.key)
+						oldTuple := fb.key.tuple
+						deleteQUICSlot(byTupleCID, quicTupleCID{oldTuple, version, fb.key.dcid, quicInitialDCID}, previous)
+						deleteQUICSlot(byTupleCID, quicTupleCID{oldTuple, version, fb.key.scid, quicResponseDCID}, previous)
+						deleteQUICSlot(byEndpointCID, quicEndpointCID{oldTuple.client.addr, oldTuple.server, fb.key.dcid, false}, previous)
+						deleteQUICSlot(byEndpointCID, quicEndpointCID{oldTuple.client.addr, oldTuple.server, fb.key.scid, true}, previous)
+						serverID := fb.key.scid
+						fb.key = initial
+						fb.serverPkt, fb.clientPkt = fb.clientPkt, nil
+						if serverID.length > 0 && serverID != dcid {
+							registerServerID(previous, tuple, serverID)
+						}
+						slot, found, client = previous, true, true
+					} else {
+						fb.failedProbes++
+					}
+				}
+			}
+		}
+		if !found {
+			if alias, ok := byTupleCID[quicTupleCID{tuple, version, dcid, quicServerSCID}]; ok && alias >= 0 && flows[alias].key.scid == scid {
+				slot, found, client = alias, true, true
+			}
+		}
+		if found && client {
+			fb := &flows[slot]
+			if fb.isServerAlias(dcid) {
+				// A normal server SCID changes the destination ID without
+				// changing the Initial keys. A new client can independently
+				// choose the same IDs and will use different keys.
+				found = false
+				if fb.canProbe() {
+					found = quicAuthenticatesInitial(udpPayload, fb.key.dcid.data[:fb.key.dcid.length], true) ||
+						fb.hasRetry && quicAuthenticatesInitial(udpPayload, fb.retryID.data[:fb.retryID.length], true)
+					if !found {
+						fb.failedProbes++
+					}
+				}
+			}
+		}
 		if !found {
 			if len(flows) >= MaxQUICFlowsPerScan {
-				return fmt.Errorf("%w: exceeds %d QUIC flows", ErrQUICLimit, MaxQUICFlowsPerScan)
+				return fmt.Errorf("%w: exceeds %d QUIC exchanges", ErrQUICLimit, MaxQUICFlowsPerScan)
 			}
 			slot = len(flows)
-			flows = append(flows, quicFlowBuf{
-				flowIndex: flowIdx, srcAddr: frame.SrcAddr, dstAddr: frame.DstAddr,
-				srcPort: frame.SrcPort, dstPort: frame.DstPort, version: version, dcid: dcid, scid: scid,
-			})
-			register(cidKey{frame.SrcAddr, frame.DstAddr, frame.DstPort, dcid, false}, slot)
-			register(cidKey{frame.SrcAddr, frame.DstAddr, frame.DstPort, scid, true}, slot)
+			flows = append(flows, quicFlowBuf{key: initial, flowIndex: flowIdx})
+			client = true
 		}
 
 		fb := &flows[slot]
 		if fb.count >= MaxQUICPacketsPerFlow {
 			return nil
 		}
-		if !hasTuple && (flowIdx != slot || fb.flowIndex != flowIdx) {
-			slotByFlow[flowIdx] = slot
-		}
 		fb.count++
+		udpPayload = quicSameInitials(udpPayload, initialLength, version, dstID, srcID)
 		if client {
+			if fb.isServerAlias(dcid) {
+				registerQUICSlot(byTupleCID, quicTupleCID{tuple, version, scid, quicResponseDCID}, slot)
+			} else {
+				register(initial, slot)
+			}
 			fb.clientPkt = append(fb.clientPkt, udpPayload)
 		} else {
+			registerQUICSlot(byTupleCID, quicTupleCID{reverse, version, dcid, quicResponseDCID}, slot)
+			if fb.serverID.length == 0 && scid.length > 0 && scid != fb.key.dcid && (!fb.hasRetry || scid != fb.retryID) {
+				registerServerID(slot, reverse, scid)
+			}
 			fb.serverPkt = append(fb.serverPkt, udpPayload)
 		}
 		return nil
@@ -731,17 +879,20 @@ func scanQUIC(source ipFrameSource) ([]QUICRecord, error) {
 		if len(fb.clientPkt) == 0 {
 			continue
 		}
-		srcAddr, dstAddr, srcPort, dstPort := fb.srcAddr, fb.dstAddr, fb.srcPort, fb.dstPort
+		tuple := fb.key.tuple
 		clientPkt, serverPkt := fb.clientPkt, fb.serverPkt
-		hs, err := DecryptQUICInitial(clientPkt)
+		var retryID []byte
+		if fb.hasRetry {
+			retryID = fb.retryID.data[:fb.retryID.length]
+		}
+		hs, err := decryptQUICInitial(clientPkt, retryID, false)
 		if err != nil && len(serverPkt) > 0 {
 			// Handle server-first capture ordering by retrying client Initial on serverPkt.
-			if swappedHS, swapErr := DecryptQUICInitial(serverPkt); swapErr == nil {
+			if swappedHS, swapErr := decryptQUICInitial(serverPkt, nil, false); swapErr == nil {
 				hs = swappedHS
 				err = nil
 				serverPkt = clientPkt
-				srcAddr, dstAddr = dstAddr, srcAddr
-				srcPort, dstPort = dstPort, srcPort
+				tuple = tuple.reverse()
 			}
 		}
 		if err != nil {
@@ -759,15 +910,48 @@ func scanQUIC(source ipFrameSource) ([]QUICRecord, error) {
 		}
 		records = append(records, QUICRecord{
 			FlowIndex: fb.flowIndex,
-			SrcAddr:   srcAddr,
-			DstAddr:   dstAddr,
-			SrcPort:   srcPort,
-			DstPort:   dstPort,
+			SrcAddr:   addresses[tuple.client.addr],
+			DstAddr:   addresses[tuple.server.addr],
+			SrcPort:   tuple.client.port,
+			DstPort:   tuple.server.port,
 			Handshake: hs,
 		})
 	}
 
 	return records, nil
+}
+
+func deleteQUICSlot[K comparable](m map[K]int, key K, slot int) {
+	if prev, found := m[key]; found && prev == slot {
+		delete(m, key)
+	}
+}
+
+func quicAuthenticatesInitial(datagram, keyDCID []byte, client bool) bool {
+	hdr, err := parseQUICInitialPacketView(datagram)
+	if err != nil {
+		return false
+	}
+	keys, err := deriveQUICInitialKeys(keyDCID, hdr.Version, client)
+	if err != nil {
+		return false
+	}
+	_, err = decryptSingleQUICInitial(datagram, hdr, keys)
+	return err == nil
+}
+
+// Coalesced packets on the same datagram use the same destination ID. Stop
+// before an Initial with different IDs or version so it cannot contribute
+// CRYPTO data to this exchange.
+func quicSameInitials(datagram []byte, n int, version uint32, dcid, scid []byte) []byte {
+	for len(datagram)-n >= 7 {
+		hdr, err := parseQUICInitialPacketView(datagram[n:])
+		if err != nil || hdr.Version != version || !bytes.Equal(hdr.DCID, dcid) || !bytes.Equal(hdr.SCID, scid) {
+			break
+		}
+		n += hdr.PacketLength
+	}
+	return datagram[:n]
 }
 
 func decryptQUICServerInitial(datagrams [][]byte, clientDCID []byte, version uint32) (TLSServerHello, bool) {

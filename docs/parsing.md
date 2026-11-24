@@ -80,7 +80,7 @@ The following limits bound parsing work and memory allocation on each call:
 | `MaxDecompressedCaptureBytes` | 64 MiB | Bounds decompressed output across gzip members in `DecompressCapture` |
 | `MaxInterfaces` | 256 interfaces | Bounds PcapNG `IDB` descriptors per capture |
 | `MaxPackets` | 1,048,576 packets | Bounds packets indexed or returned by `New`, `PacketSeq`, `Packets`, and `Flows` |
-| `MaxFlows` | 65,536 flows | Bounds distinct 5-tuple flows aggregated by `Flows` and L7 dissectors |
+| `MaxFlows` | 65,536 flows | Bounds distinct five-tuples and the number of reassembled TCP connections |
 | `MaxDecryptionSecrets` | 256 blocks | Bounds PcapNG `DSB` blocks per capture |
 | `MaxDecryptionSecretBytes` | 4 MiB | Bounds cumulative secret payload bytes copied across all `DSB` blocks |
 | `MaxPCAPNGBlocks` | 2,097,152 blocks | Bounds all PcapNG block types across sections |
@@ -111,8 +111,8 @@ The following limits bound parsing work and memory allocation on each call:
 | `MaxTLSHandshakesPerScan` | 16,384 handshakes | Bounds TLS handshakes returned per capture scan |
 | `MaxTLSKeyLogEntries` | 4,096 entries | Bounds NSS keylog entries parsed per `ParseTLSKeyLog` / `TLSKeyLog` call |
 | `MaxQUICCryptoBytes` | 64 KiB | Bounds reassembled QUIC Initial `CRYPTO` stream size |
-| `MaxQUICPacketsPerFlow` | 64 packets | Bounds Initial UDP datagrams inspected per QUIC flow |
-| `MaxQUICFlowsPerScan` | 16,384 flows | Bounds QUIC Initial flows returned per capture scan |
+| `MaxQUICPacketsPerFlow` | 64 packets | Bounds UDP datagrams inspected per QUIC Initial exchange |
+| `MaxQUICFlowsPerScan` | 16,384 exchanges | Bounds QUIC Initial exchanges tracked per capture scan |
 | `MaxHTTPHeaders` | 128 headers | Bounds HTTP header lines per request or response |
 | `MaxHTTPBodyBytes` | 4 MiB | Bounds each carved HTTP body before and after content decoding |
 | `MaxHTTPDecodedBodyBytesPerScan` | 64 MiB | Bounds cumulative HTTP/1.x content decoding per `Capture.HTTP` call, including failed attempts |
@@ -199,8 +199,25 @@ If you need a slice of all packet records, call `capture.Packets(data)` (or
   bounds-checked zero-copy slice into `data`.
 - `ProcessID`, `ThreadID`, `UserID`, `ProcessName`, `ProcessArgs`,
   `ContainerID`, `Flags`, and `DropCount`: Process attribution and packet
-  metadata decoded from PcapNG Enhanced Packet Block options and Darwin Process
-  Event Blocks (`DPEB`). A packet references process entries in its own section.
+  metadata decoded from PcapNG Enhanced Packet Block (EPB) options.
+
+Apple PcapNG captures store process IDs and names in Process Information Blocks,
+also called Darwin Process Event Blocks (DPEB). An EPB's Apple primary process
+option (`0x8001`) indexes the preceding process blocks in its own section,
+starting at zero. `PacketRecord` exposes the primary process when the index
+resolves. Apple uses process ID `0xffffffff` for a name without a PID. The
+reader sets `ProcessName` for these entries and leaves `HasProcessID` false.
+Effective process references, service classes, packet metadata
+flags, flow IDs, and trace tags use their own Apple options. The reader leaves
+the process fields unset when only the effective process is available.
+[Apple PcapNG definitions](https://github.com/apple-oss-distributions/libpcap/blob/aa560f1fd969af63ebfb182fa33373d1d2549de5/libpcap/pcap/pcap-ng.h#L315-L350)
+
+The reader also accepts a resolvable legacy go-pcap process reference
+(`0x8000`) when the native reference is absent. Earlier go-pcap writers put
+inline attribution in the Apple option range. The reader decodes those inline
+fields only for a section whose application is explicitly `go-pcap` and which
+has yet to declare a process block. An earlier file without that application
+marker may lose inline attribution on read.
 
 ## Decode L2–L4 frames and tunnels
 
@@ -369,7 +386,9 @@ increment `ServerPackets` and `ServerBytes`. For TCP flows, `Flows` records:
   (`<half_synack_ack_rtt_us>_<client_ttl>`) from the 3-way handshake timestamps
   and IP `TTL` / `HopLimit`.
 - First-seen process attribution (`ProcessID`, `UserID`, `ProcessName`,
-  `ProcessArgs`, and `ContainerID`).
+  `ProcessArgs`, and `ContainerID`). The first packet with attribution supplies
+  these fields. Later packets can fill missing fields when they carry the same
+  known PID. A name-only observation keeps its PID unknown.
 
 Call `flow.CommunityID(seed)` on a summary from `Flows` or `FlowsFromReaderAt`
 to correlate IPv4 or IPv6 TCP and UDP traffic with other tools. Both directions
@@ -425,6 +444,13 @@ resolves overlapping segments using a first-seen-wins policy and sets
 `StreamAnomalies.OverlapConflict` when a later overlapping segment contains
 differing bytes at the same sequence offset.
 
+`Streams` starts a new connection when an opening SYN follows a midstream
+capture or changes the opening sequence number or sending endpoint. A matching
+SYN retransmission stays in its connection. Each connection uses its first
+observed packet to define the client direction. Connections that reuse a
+five-tuple share the same `FlowIndex` and directional segment and byte limits.
+Without a new opening SYN, tuple reuse can be indistinguishable from a gap.
+
 ## Parse DNS messages and tunneling metrics
 
 Call `ParseDNS(payload)` on a single DNS message or `capture.DNS(data)` to
@@ -440,6 +466,12 @@ stops decoding that direction. For a split message, `PacketIndex` and
 `TimestampNs` identify the packet supplying the first prefix byte. This lets
 you locate the message in the original capture even when the final bytes
 arrived later. Slice and ReaderAt scans return records in packet-index order.
+
+DNS record flow indices use the order returned by `capture.Flows(data)`. For
+fragmented UDP messages, the record uses the fragment flow index and the
+reassembled UDP ports. The packet index and timestamp identify the fragment
+that completed the message.
+
 [DNS over TCP (RFC 7766)](https://www.rfc-editor.org/rfc/rfc7766)
 
 ### Diagnose DNS transactions
@@ -629,13 +661,19 @@ handshake metadata even when application payloads remain opaque.
 [QUIC v1 Initial secrets](https://www.rfc-editor.org/rfc/rfc9001#section-5.2) ·
 [QUIC v2 changes](https://www.rfc-editor.org/rfc/rfc9369#section-3.3)
 
-`QUIC` and `QUICFromReaderAt` group Initials across a client port change when
-the same endpoint IPs and server port have a unique matching nonempty connection
-ID. The record keeps the original flow index and ports. A matching Retry can
-supply a new destination ID for a subsequent client Initial. For example, read
-`record.Handshake.HasRetry` or `record.Handshake.HasVersionNegotiation` on
-each returned record to check which server responses appeared in the capture.
-These flags describe packet observations. Retry integrity tags are not verified.
+`QUIC` and `QUICFromReaderAt` return distinct Initial exchanges on the same
+UDP tuple in first-observed order. They group Initials across a client port
+change when the same endpoint IPs and server port have a unique matching
+nonempty connection ID. Each record uses the flow index of its first observed
+Initial packet in `capture.Flows(data)`. The record retains the original ports,
+including UDP ports recovered from fragments. A matching Retry can supply a new
+destination ID for a subsequent client Initial. Read `record.Handshake.HasRetry`
+or `record.Handshake.HasVersionNegotiation` on each record to check which server
+responses appeared in the capture. These flags describe packet observations.
+Retry integrity tags are not verified.
+When authentication is needed to resolve a server-first packet or a changed
+server connection ID, unsuccessful checks count toward the exchange's budget
+for resolving ambiguous packets.
 
 ## Decrypt TLS 1.2 and TLS 1.3 streams offline
 
@@ -679,14 +717,14 @@ TLS, HTTP, HTTP/2, SSH, SMB, and RDP capture methods inspect the payload after
 one successful HTTP CONNECT or no-authentication SOCKS5 CONNECT exchange.
 `DecryptedTLSStreams` uses the inner TLS records with the supplied key log.
 The flow index and addresses identify the captured client and proxy. `HTTP`
-returns the outer CONNECT request and 200 response as header-only records
+returns the outer CONNECT request, interim responses, and successful 2xx response as header-only records
 before any inner HTTP messages. Body offsets refer to the original stream.
 
 Use `UnwrapProxyStream(stream.Client.Data, stream.Server.Data)` on a reassembled
 request and response to get the inner byte slices, proxy type, requested host,
 and port. The host comes from the proxy request and can differ from the inner
 TLS server name. Both slices borrow the original stream buffers. HTTP headers
-must each end within 4,096 bytes. SOCKS5 accepts up to 16 offered methods and
+must end within 4,096 bytes per direction, including any interim responses. SOCKS5 accepts up to 16 offered methods and
 IPv4, IPv6, or domain targets. On an incomplete or rejected exchange the helper
 returns both input slices and `false`.
 
@@ -707,6 +745,18 @@ For conflicting or invalid lengths on a body-bearing message, the parser
 returns the headers, omits the body, and consumes the remaining input in that
 direction. An incomplete chunk stream also consumes the remaining input and
 retains the bounded body prefix. Bodyless response statuses end at the headers.
+
+On cleartext connections, `HTTP` stops each direction at its first known TCP
+gap and retains any complete headers and available body prefix before it. It
+identifies request and response directions from complete start lines. When
+both sides are available, it pairs requests and final responses in order.
+On partial captures, a TCP acknowledgement can identify a response to a
+request that preceded the captured requests. When acknowledgements are
+unavailable, an earlier response with a complete `Content-Length` body and a
+later response packet can establish that boundary. Otherwise the parser uses the observed HTTP
+message order. A response to HEAD ends at the headers even if it advertises
+a content length. Interim responses leave the request pending. The
+standalone `ParseHTTPResponse` function has no request-method context.
 
 For a single `gzip`, `x-gzip`, or `deflate` content coding, the parser removes
 chunk framing before decoding the content. Deflate supports zlib streams and raw
@@ -912,12 +962,19 @@ retain its wire length even if the destination snaplen truncates it further.
 
 Use `NewPCAPNGWriter(w, opts)` to stream PcapNG `SHB`, `IDB` (nanosecond
 resolution), `NRB` (`WriteNameResolution`), `ISB` (`WriteInterfaceStats`),
-`DSB` (`WriteDecryptionSecrets`), and process-attributed `EPB` (`WritePacket`)
-blocks to any `io.Writer`. Interface 0 is ready immediately; set `LinkTypeSet: true`
+`DSB` (`WriteDecryptionSecrets`), and `EPB` (`WritePacket`) blocks to any
+`io.Writer`. Interface 0 is ready immediately. Set `LinkTypeSet: true`
 to select `LinkTypeNull` explicitly on interface 0 for any interface name. Call
 `AddInterface` for each additional interface and use its returned ID in
 `PacketRecord` and `InterfaceStatistics`. Each interface has its own link type
 and snaplen. After an output error, start a new capture stream.
+
+When a process ID or name is present, `WritePacket` emits the Apple process
+index and shares a process block across packets with the same attribution.
+Process ID `0xffffffff` is reserved for a name-only entry. Passing that ID
+with `HasProcessID` set returns `ErrInvalidPacket`. A new entry that would
+exceed `MaxProcessEvents` returns `ErrOptionLimit`. The writer stores the
+thread ID, user ID, command line, and container ID in go-pcap packet comments.
 
 Call `capture.ExtractFlowPCAPNG(data, w, flowIndex)` to write one bidirectional
 flow. Pass the original capture bytes and the zero-based index from `Flows`.
@@ -945,6 +1002,11 @@ interface using standard-library `syscall` descriptors (`/dev/bpf*` on macOS,
 `libpcap`. Use `BPFFilterTCPPort`, `BPFFilterUDPPort`, `BPFFilterIPProtocol`,
 and `BPFFilterIPv4Host` to construct classic BPF filter programs, or `EvalBPF`
 to evaluate a classic BPF program in memory.
+
+On Linux, `Promiscuous` requests membership for the capture socket until it
+closes. `OriginalLen` retains the wire length when the socket filter or
+`SnapLen` shortens a packet. On Windows, a positive `Timeout` applies to
+each `ReadPacket` call, including time spent waiting for a filter match.
 
 Call `live.Stats()` before closing the handle to check kernel packet loss:
 
