@@ -691,13 +691,9 @@ func scanPCAPNGBlocksWithCallback(r *SafeReader, collectPackets bool, hintCount 
 
 		switch blockType {
 		case BlockTypeSectionHeader:
-			if err := decodeSHB(r, bodyStart, bodyEnd, order, &summary, &haveSection); err != nil {
-				return err
-			}
+			return decodeSHB(r, bodyStart, bodyEnd, order, &summary, &haveSection)
 		case BlockTypeInterfaceDesc:
-			if err := decodeIDB(r, bodyStart, bodyEnd, order, &summary); err != nil {
-				return err
-			}
+			return decodeIDB(r, bodyStart, bodyEnd, order, &summary)
 		case blockTypeLegacyPacket, BlockTypeEnhancedPacket, BlockTypeSimplePacket:
 			body := r.data[bodyStart:bodyEnd]
 			var rec PacketRecord
@@ -718,26 +714,16 @@ func scanPCAPNGBlocksWithCallback(r *SafeReader, collectPackets bool, hintCount 
 				packets = append(packets, rec)
 			}
 			if cb != nil {
-				if err := cb(rec); err != nil {
-					return err
-				}
+				return cb(rec)
 			}
 		case BlockTypeDecryptionSecrets:
-			if err := decodeDSB(r, bodyStart, bodyEnd, order, &totalSecretBytes, &summary); err != nil {
-				return err
-			}
+			return decodeDSB(r, bodyStart, bodyEnd, order, &totalSecretBytes, &summary)
 		case BlockTypeNameResolution:
-			if err := decodeNRB(r, bodyStart, bodyEnd, order, &summary); err != nil {
-				return err
-			}
+			return decodeNRB(r, bodyStart, bodyEnd, order, &summary)
 		case BlockTypeInterfaceStats:
-			if err := decodeISB(r, bodyStart, bodyEnd, order, &summary); err != nil {
-				return err
-			}
+			return decodeISB(r, bodyStart, bodyEnd, order, &summary)
 		case BlockTypeDarwinProcessEvent:
-			if err := decodeDPEB(r, bodyStart, bodyEnd, order, &summary); err != nil {
-				return err
-			}
+			return decodeDPEB(r, bodyStart, bodyEnd, order, &summary)
 		default:
 			// Other blocks (vendor custom blocks) are skipped after framing validation.
 		}
