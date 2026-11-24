@@ -206,3 +206,26 @@ func BenchmarkDecodeFrameWirelessAndIPsec(b *testing.B) {
 		})
 	}
 }
+
+func TestLongIKEFlowBytes(t *testing.T) {
+	for _, port := range []uint16{500, 4500} {
+		marker := 0
+		if port == 4500 {
+			marker = 4
+		}
+		body := make([]byte, 300+marker)
+		body[marker+17] = 0x20
+		binary.BigEndian.PutUint32(body[marker+24:], 300)
+		frame := buildEthernetIPv4UDPFrame([4]byte{192, 0, 2, 1}, [4]byte{192, 0, 2, 2}, 50000, port, body)
+		data := buildClassicPCAP(binary.LittleEndian, false, LinkTypeEthernet, 65535, [][]byte{frame})
+		c, err := New(data)
+		if err != nil {
+			t.Fatal(err)
+		}
+		checkReaderParity(t, data, c.Flows, c.FlowsFromReaderAt)
+		flows, err := c.Flows(data)
+		if err != nil || len(flows) != 1 || flows[0].ClientBytes != 272 {
+			t.Fatalf("port %d: flows=%+v err=%v", port, flows, err)
+		}
+	}
+}

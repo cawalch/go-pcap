@@ -268,7 +268,7 @@ func (c *Capture) FlowsFromReaderAt(r io.ReaderAt) ([]FlowSummary, error) {
 		if err != nil {
 			return nil
 		}
-		if n < pkt.PayloadLength && !completeFlowPrefix(&frame, payload, pkt.PayloadLength) {
+		if n < pkt.PayloadLength && !completeProtocolPrefix(&frame, payload, pkt.PayloadLength) {
 			payload, err = extendFramePrefix(&budget, c.fileSize, pkt, &frame, payload, &scratch)
 			if err != nil {
 				return err
@@ -524,8 +524,8 @@ func (c *Capture) walkFlowPrefixes(budget *scanReadBudget, visit func(PacketReco
 }
 
 func completeProtocolPrefix(f *Frame, data []byte, captured int64) bool {
-	// IKEv2 classification requires the full UDP datagram. Flow summaries can
-	// use UDP metadata alone, but protocol scanners need the adjusted span.
+	// IKEv2 classification requires the full UDP datagram. All consumers
+	// need the adjusted payload span, including flow byte accounting.
 	if f.IPProtocol == IPProtoUDP && (isIKEPort(f.SrcPort) || isIKEPort(f.DstPort)) {
 		return false
 	}
