@@ -162,10 +162,9 @@ func readHTTP2Frames(stream []byte, remaining *int, sequenceGap bool, request fu
 	headers := http2Headers{table: hpackTable{limit: MaxHTTP2DynamicTableBytes}}
 	var priorities []string
 	var headerStart int
-	var headerKind, headerFlags uint8
+	var headerKind uint8
 	settingsSeen := false
 	totalDataBytes := 0
-	var event http2FrameEvent
 
 	for offset+9 <= len(stream) && out.FrameCount < MaxHTTP2FramesPerStream {
 		fLen := int(stream[offset])<<16 | int(stream[offset+1])<<8 | int(stream[offset+2])
@@ -199,7 +198,7 @@ func readHTTP2Frames(stream []byte, remaining *int, sequenceGap bool, request fu
 				continue
 			}
 			if fType != HTTP2FrameContinuation {
-				headerStart, headerKind, headerFlags = offset-fLen-9, fType, fFlags
+				headerStart, headerKind = offset-fLen-9, fType
 			}
 			block, complete, err := headers.consume(fType, fFlags, streamID, payload, remaining)
 			if errors.Is(err, ErrHTTPLimit) {
@@ -213,22 +212,29 @@ func readHTTP2Frames(stream []byte, remaining *int, sequenceGap bool, request fu
 			if !complete {
 				break
 			}
-			if visit != nil {
-				event.header = http2HeaderEvent{block: block, start: headerStart, streamID: headers.target, kind: headerKind}
-				event.endStream = headerKind == HTTP2FrameHeaders && headerFlags&0x01 != 0
-			}
-			if request != nil && headerKind == HTTP2FrameHeaders && block.Method != "" {
-				if err := request(headerStart, headers.target, block); err != nil {
-					return HTTP2Summary{}, err
-				}
-			}
 			if collectSummary {
 				st := getStream(headers.target)
 				st.HeaderBlocks = append(st.HeaderBlocks, block)
 				if out.HasClientPreface && out.AkamaiFingerprint == "" && block.Method != "" {
 					out.AkamaiFingerprint = out.fingerprint(priorities, block)
 				}
+				continue
 			}
+			if request != nil && headerKind == HTTP2FrameHeaders && block.Method != "" {
+				if err := request(headerStart, headers.target, block); err != nil {
+					return HTTP2Summary{}, err
+				}
+			}
+			if visit != nil {
+				if err := visit(http2FrameEvent{
+					frame: http2Range{offset - fLen - 9, offset}, streamID: streamID, kind: fType, flags: fFlags,
+					header:    http2HeaderEvent{block: block, start: headerStart, streamID: headers.target, kind: headerKind},
+					endStream: headerKind == HTTP2FrameHeaders && stream[headerStart+4]&0x01 != 0,
+				}); err != nil {
+					return HTTP2Summary{}, err
+				}
+			}
+			continue
 		case HTTP2FrameSettings:
 			// Ignore SETTINGS ACK frames (flag 0x01 with empty payload) and non-connection streams.
 			if streamID == 0 && (fFlags&0x01) == 0 && !settingsSeen && len(payload)%6 == 0 {
@@ -274,28 +280,33 @@ func readHTTP2Frames(stream []byte, remaining *int, sequenceGap bool, request fu
 				dataStart++
 				dataEnd -= int(payload[0])
 			}
-			if visit != nil {
-				event.data = http2Range{dataStart, dataEnd}
-				event.endStream = fFlags&0x01 != 0
+			if collectSummary {
+				if dataEnd > dataStart && totalDataBytes < MaxHTTPBodyBytes {
+					take := min(dataEnd-dataStart, MaxHTTPBodyBytes-totalDataBytes)
+					st := getStream(streamID)
+					st.Data = append(st.Data, stream[dataStart:dataStart+take]...)
+					totalDataBytes += take
+				}
+				continue
 			}
-			if collectSummary && dataEnd > dataStart && totalDataBytes < MaxHTTPBodyBytes {
-				take := min(dataEnd-dataStart, MaxHTTPBodyBytes-totalDataBytes)
-				st := getStream(streamID)
-				st.Data = append(st.Data, stream[dataStart:dataStart+take]...)
-				totalDataBytes += take
+			if err := visit(http2FrameEvent{
+				frame: http2Range{offset - fLen - 9, offset}, streamID: streamID, kind: fType, flags: fFlags,
+				data: http2Range{dataStart, dataEnd}, endStream: fFlags&0x01 != 0,
+			}); err != nil {
+				return HTTP2Summary{}, err
 			}
+			continue
 		case HTTP2FrameRSTStream:
 			if len(payload) != 4 || streamID == 0 {
 				visit = nil
 			}
 		}
 		if visit != nil {
-			event.frame = http2Range{offset - fLen - 9, offset}
-			event.streamID, event.kind, event.flags = streamID, fType, fFlags
-			if err := visit(event); err != nil {
+			if err := visit(http2FrameEvent{
+				frame: http2Range{offset - fLen - 9, offset}, streamID: streamID, kind: fType, flags: fFlags,
+			}); err != nil {
 				return HTTP2Summary{}, err
 			}
-			event = http2FrameEvent{}
 		}
 	}
 
