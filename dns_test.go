@@ -382,3 +382,10 @@ func TestDNSApexAndCaptureWideSourceStats(t *testing.T) {
 		t.Fatalf("time-spread stats = %+v, err = %v", spreadStats, err)
 	}
 }
+
+func TestDNSPartialSectionCapacity(t *testing.T) {
+	msg, err := ParseDNS([]byte{0, 1, 0x80, 0, 0, 0, 0, 20, 0, 0, 0, 0})
+	if err != nil || !msg.Anomalies.TruncatedSection || cap(msg.Answers) != 0 || msg.AnswerCount != 20 {
+		t.Fatalf("answers cap=%d count=%d anomalies=%+v err=%v", cap(msg.Answers), msg.AnswerCount, msg.Anomalies, err)
+	}
+}

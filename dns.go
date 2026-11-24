@@ -150,7 +150,7 @@ func ParseDNS(payload []byte) (DNSMessage, error) {
 
 	offset := 12
 	if qdCount > 0 {
-		msg.Questions = make([]DNSQuestion, 0, qdCount)
+		msg.Questions = make([]DNSQuestion, 0, min(int(qdCount), (len(payload)-offset)/5))
 	}
 	for range qdCount {
 		name, nextOff, err := decodeDNSName(payload, offset, &msg.Anomalies)
@@ -200,7 +200,8 @@ func decodeDNSRecordSection(
 	count int,
 	anomalies *DNSAnomalies,
 ) ([]DNSResourceRecord, int, error) {
-	records := make([]DNSResourceRecord, 0, count)
+	// A root owner name and the fixed fields need at least eleven wire bytes.
+	records := make([]DNSResourceRecord, 0, min(count, (len(payload)-offset)/11))
 	for range count {
 		if offset >= len(payload) {
 			anomalies.TruncatedSection = true
