@@ -30,7 +30,7 @@ func (c *Capture) WebWithWebSockets(data []byte) (WebRecords, []WebSocketRecord,
 
 func (c *Capture) scanWeb(data []byte, ws *webSocketScan) (WebRecords, error) {
 	var meta []streamMetadata
-	streams, err := collectStreams(ipFrameSource{capture: c, data: data}, 0, &meta)
+	streams, err := collectStreams(ipFrameSource{capture: c, data: data}, 0, &meta, true)
 	if err != nil || (len(streams) == 0 && ws == nil) {
 		return WebRecords{}, err
 	}
@@ -65,7 +65,7 @@ func scanHTTPStreams(streams []TCPStream, meta []streamMetadata, keys *TLSKeyLog
 				wire.Server.Data = wire.Server.Data[:meta[i].serverPrefix]
 				clearInner, co, so = proxyStream(wire)
 			}
-			if err := appendClearHTTP(&wire, &clearInner, co, so, http1, &decoded); err != nil {
+			if err := appendClearHTTP(&wire, &clearInner, meta[i].wire, co, so, http1, &decoded); err != nil {
 				return err
 			}
 		}
@@ -90,7 +90,7 @@ func scanHTTPStreams(streams []TCPStream, meta []streamMetadata, keys *TLSKeyLog
 				}
 			}
 			if http1 != nil {
-				if err := appendHTTPFromTCPStream(decrypted[i], true, http1, &decoded, 0, 0); err != nil {
+				if err := appendHTTPFromTCPStream(decrypted[i], [2]tcpWireDirection{}, true, http1, &decoded, 0, 0); err != nil {
 					return err
 				}
 			}

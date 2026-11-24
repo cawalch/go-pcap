@@ -401,7 +401,7 @@ func TestHTTPFramingCaptureParity(t *testing.T) {
 		t.Fatal(err)
 	}
 	var meta []streamMetadata
-	streams, err := collectStreams(ipFrameSource{capture: index, reader: reader, needsPayload: func(f Frame, _ []byte) bool { return f.IPProtocol == IPProtoTCP }}, 0, &meta)
+	streams, err := collectStreams(ipFrameSource{capture: index, reader: reader, needsPayload: func(f Frame, _ []byte) bool { return f.IPProtocol == IPProtoTCP }}, 0, &meta, true)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -495,4 +495,73 @@ func TestHTTPCaptureStopsAtKnownTCPGap(t *testing.T) {
 		t.Fatalf("HTTPRequests = %+v, %v", reqs, err)
 	}
 	checkReaderParity(t, raw, c.HTTPRequests, c.HTTPRequestsFromReaderAt)
+}
+
+func TestHTTPCaptureKeepsValidRequestDirection(t *testing.T) {
+	client, server := [4]byte{192, 0, 2, 1}, [4]byte{192, 0, 2, 2}
+	for _, body := range []string{"GET is supported on this server\r\n", "GET /in-body HTTP/1.1\r\n\r\n"} {
+		raw := buildClassicPCAP(binary.LittleEndian, false, LinkTypeEthernet, 65535, [][]byte{
+			buildEthernetIPv4TCPFrame(client, server, 5000, 80, 1000, 4000, TCPFlagACK, []byte("GET /request HTTP/1.1\r\n\r\n")),
+			buildEthernetIPv4TCPFrame(server, client, 80, 5000, 4000, 1000, TCPFlagACK, []byte(body)),
+		})
+		c, err := New(raw)
+		if err != nil {
+			t.Fatal(err)
+		}
+		rows, err := c.HTTP(raw)
+		if err != nil || len(rows) != 1 || rows[0].SrcPort != 5000 || rows[0].Request.Path != "/request" {
+			t.Fatalf("body %q: %+v, %v", body, rows, err)
+		}
+		web, err := c.Web(raw)
+		if err != nil || !reflect.DeepEqual(rows, web.HTTP) {
+			t.Fatalf("Web body %q: %+v, %v", body, web.HTTP, err)
+		}
+	}
+}
+
+func TestHTTPCaptureDoesNotPairEarlierResponse(t *testing.T) {
+	client, server := [4]byte{192, 0, 2, 1}, [4]byte{192, 0, 2, 2}
+	const (
+		firstResponse = "HTTP/1.1 200 OK\r\nContent-Length: 4\r\n\r\nprev"
+		clientSeq     = 1000
+		serverSeq     = 4000
+	)
+	for _, tc := range []struct {
+		name, request, response string
+		acknowledgements        bool
+	}{
+		{"TCP-ACK", "HEAD /head HTTP/1.1\r\n\r\n", "HTTP/1.1 200 OK\r\nContent-Length: 12\r\n\r\n", true},
+		{"capture-order", "HEAD /head HTTP/1.1\r\n\r\n", "HTTP/1.1 200 OK\r\nContent-Length: 12\r\n\r\n", false},
+		{"CONNECT", proxyRequest, "HTTP/1.1 200 Connection Established\r\n\r\n", true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var previousACK, currentACK uint32
+			if tc.acknowledgements {
+				previousACK, currentACK = clientSeq, clientSeq+uint32(len(tc.request))
+			}
+			earlier := buildEthernetIPv4TCPFrame(server, client, 80, 5000, serverSeq, previousACK, TCPFlagACK, []byte(firstResponse))
+			request := buildEthernetIPv4TCPFrame(client, server, 5000, 80, clientSeq, serverSeq+uint32(len(firstResponse)), TCPFlagACK, []byte(tc.request))
+			response := buildEthernetIPv4TCPFrame(server, client, 80, 5000, serverSeq+uint32(len(firstResponse)), currentACK, TCPFlagACK, []byte(tc.response))
+			packets := [][]byte{earlier, request, response}
+			if tc.acknowledgements {
+				// TCP acknowledgements still distinguish the records when
+				// independent capture points reverse the first two packets.
+				packets[0], packets[1] = packets[1], packets[0]
+			}
+			raw := buildClassicPCAP(binary.LittleEndian, false, LinkTypeEthernet, 65535, packets)
+			c, err := New(raw)
+			if err != nil {
+				t.Fatal(err)
+			}
+			rows, err := c.HTTP(raw)
+			if err != nil || len(rows) != 3 || string(rows[1].Response.Body) != "prev" ||
+				rows[2].Response.StatusCode != 200 || rows[2].Response.BodyLength != 0 || rows[2].Response.Anomalies.TruncatedBody {
+				t.Fatalf("HTTP %s: %+v, %v", tc.name, rows, err)
+			}
+			web, err := c.Web(raw)
+			if err != nil || !reflect.DeepEqual(rows, web.HTTP) {
+				t.Fatalf("Web %s: %+v, %v", tc.name, web.HTTP, err)
+			}
+		})
+	}
 }

@@ -748,11 +748,15 @@ retains the bounded body prefix. Bodyless response statuses end at the headers.
 
 On cleartext connections, `HTTP` stops each direction at its first known TCP
 gap and retains any complete headers and available body prefix before it. It
-identifies request and response directions from their start lines. When both
-sides are available, it pairs requests and final responses in order. A response
-to HEAD ends at the headers even if it advertises a content length. Interim
-responses leave the request pending. The standalone `ParseHTTPResponse`
-function has no request-method context.
+identifies request and response directions from complete start lines. When
+both sides are available, it pairs requests and final responses in order.
+On partial captures, a TCP acknowledgement can identify a response to a
+request that preceded the captured requests. When acknowledgements are
+unavailable, an earlier response with a complete `Content-Length` body and a
+later response packet can establish that boundary. Otherwise the parser uses the observed HTTP
+message order. A response to HEAD ends at the headers even if it advertises
+a content length. Interim responses leave the request pending. The
+standalone `ParseHTTPResponse` function has no request-method context.
 
 For a single `gzip`, `x-gzip`, or `deflate` content coding, the parser removes
 chunk framing before decoding the content. Deflate supports zlib streams and raw

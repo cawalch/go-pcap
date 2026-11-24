@@ -79,7 +79,9 @@ func ReassembleTCP(segments []TCPSegmentInput) (StreamBuffer, error) {
 	return out, err
 }
 
-func reassembleTCPWithBudget(segments []TCPSegmentInput, remainingBudget int64, written func(segment, end int, gap bool)) (StreamBuffer, int64, error) {
+type tcpWriteObserver func(segment, end int, seq uint32, gap bool)
+
+func reassembleTCPWithBudget(segments []TCPSegmentInput, remainingBudget int64, written tcpWriteObserver) (StreamBuffer, int64, error) {
 	if len(segments) > MaxSegmentsPerFlow {
 		return StreamBuffer{}, 0, fmt.Errorf("%w: %d segments exceed %d", ErrReassemblyLimit, len(segments), MaxSegmentsPerFlow)
 	}
@@ -220,9 +222,9 @@ func reassembleTCPWithBudget(segments []TCPSegmentInput, remainingBudget int64, 
 			if j == i+1 {
 				buf.Write(seg.payload[:length])
 				if written != nil {
-					written(seg.order, buf.Len(), gap)
+					written(seg.order, buf.Len(), baseSeq+uint32(seg.relStart), gap)
 				}
-			} else if appendTCPOverlap(&buf, norm[i:j], length, gap, written) {
+			} else if appendTCPOverlap(&buf, norm[i:j], length, baseSeq, gap, written) {
 				out.Anomalies.OverlapConflict = true
 			}
 		}
@@ -240,7 +242,7 @@ func reassembleTCPWithBudget(segments []TCPSegmentInput, remainingBudget int64, 
 
 // appendTCPOverlap emits each range from the first captured segment covering it.
 // The heap changes only at segment boundaries, independent of the sequence span.
-func appendTCPOverlap(buf *bytes.Buffer, group []normSegment, length int64, gap bool, written func(int, int, bool)) bool {
+func appendTCPOverlap(buf *bytes.Buffer, group []normSegment, length int64, baseSeq uint32, gap bool, written tcpWriteObserver) bool {
 	start := group[0].relStart
 	limit := start + length
 	offset := buf.Len()
@@ -261,7 +263,7 @@ func appendTCPOverlap(buf *bytes.Buffer, group []normSegment, length int64, gap 
 		}
 		buf.Write(owner.payload[pos-owner.relStart : end-owner.relStart])
 		if written != nil {
-			written(owner.order, buf.Len(), gap)
+			written(owner.order, buf.Len(), baseSeq+uint32(pos), gap)
 		}
 		gap = false
 		pos = end
@@ -349,7 +351,7 @@ func (b *tcpFlowBudget) addSegment(side int) error {
 	return nil
 }
 
-func (b *tcpFlowBudget) reassemble(side int, segments []TCPSegmentInput, remaining *int64, written func(int, int, bool)) (StreamBuffer, error) {
+func (b *tcpFlowBudget) reassemble(side int, segments []TCPSegmentInput, remaining *int64, written tcpWriteObserver) (StreamBuffer, error) {
 	budget := min(*remaining, MaxFlowStreamBytes-b.bytes[side])
 	buf, used, err := reassembleTCPWithBudget(segments, budget, written)
 	b.bytes[side] += used
@@ -367,21 +369,73 @@ type tcpFlowUsage struct {
 type streamMetadata struct {
 	firstPacket                int
 	clientPrefix, serverPrefix int
+	wire                       [2]tcpWireDirection
+}
+
+// A packet index and its TCP acknowledgement describe a captured payload.
+type tcpPacketEvidence struct {
+	index uint32
+	ack   uint32
+}
+
+type tcpWireSpan struct {
+	end    uint32
+	packet tcpPacketEvidence
+}
+
+type tcpWireDirection struct {
+	seq   uint32 // Sequence number of byte zero in the contiguous prefix.
+	spans []tcpWireSpan
+}
+
+type tcpWireCapture struct {
+	synDirections uint8
+	packets       [2][]tcpPacketEvidence // Indexed by direction and segment.
+}
+
+func (wire *tcpWireCapture) observe(dir, segment int, index int, frame *Frame, hasPayload bool) {
+	if frame.TCPFlags&TCPFlagSYN != 0 {
+		wire.synDirections |= 1 << dir
+	}
+	// Both observed SYNs anchor the prefixes. No packet evidence is needed
+	// when both directions opened before the first captured payload.
+	if !hasPayload || wire.synDirections == 3 && wire.packets[0] == nil && wire.packets[1] == nil {
+		return
+	}
+	packets := wire.packets[dir]
+	packets = append(packets, make([]tcpPacketEvidence, segment+1-len(packets))...)
+	packets[segment].index = uint32(index)
+	if frame.TCPFlags&TCPFlagACK != 0 {
+		packets[segment].ack = frame.TCPAck
+	}
+	wire.packets[dir] = packets
+}
+
+func (wire *tcpWireDirection) add(end int, seq uint32, packet tcpPacketEvidence) {
+	if len(wire.spans) == 0 {
+		wire.seq = seq
+	}
+	if last := len(wire.spans) - 1; last >= 0 && wire.spans[last].packet == packet {
+		wire.spans[last].end = uint32(end)
+		return
+	}
+	wire.spans = append(wire.spans, tcpWireSpan{end: uint32(end), packet: packet})
 }
 
 // Streams reassembles TCP connections in order of their first observed packet.
 // An opening SYN after midstream traffic or with a different initial sequence
 // number starts a new connection on the same [FlowSummary].
 func (c *Capture) Streams(data []byte) ([]TCPStream, error) {
-	return collectStreams(ipFrameSource{capture: c, data: data}, 0, nil)
+	return collectStreams(ipFrameSource{capture: c, data: data}, 0, nil, false)
 }
 
 // A nonzero port restricts reassembly after global flow indices are assigned.
-func collectStreams(source ipFrameSource, port uint16, meta *[]streamMetadata) ([]TCPStream, error) {
+func collectStreams(source ipFrameSource, port uint16, meta *[]streamMetadata, trackWire bool) ([]TCPStream, error) {
 	var table flowIndexTable
 	var inline [8]tcpFlowUsage
 	usage := inline[:0]
 	var collected []flowSegments
+	var wire []tcpWireCapture
 
 	err := source.walk(func(pkt PacketRecord, frame Frame, l4 []byte) error {
 		key, canonical := makeCanonicalFlowKey(frame.IPProtocol, frame.SrcAddr, frame.SrcPort, frame.DstAddr, frame.DstPort)
@@ -411,16 +465,21 @@ func collectStreams(source ipFrameSource, port uint16, meta *[]streamMetadata) (
 				srcPort: frame.SrcPort, dstPort: frame.DstPort,
 				canonical: canonical,
 			})
+			if trackWire {
+				wire = append(wire, tcpWireCapture{})
+			}
 		}
 		if err := state.budget.addSegment(tcpSide(canonical)); err != nil {
 			return err
 		}
 		entry := &collected[state.slot-1]
-		seg := TCPSegmentInput{Seq: frame.TCPSeq, Flags: frame.TCPFlags, Payload: l4}
-		if canonical == entry.canonical {
-			entry.client = append(entry.client, seg)
-		} else {
-			entry.server = append(entry.server, seg)
+		dir, segments := 0, &entry.client
+		if canonical != entry.canonical {
+			dir, segments = 1, &entry.server
+		}
+		*segments = append(*segments, TCPSegmentInput{Seq: frame.TCPSeq, Flags: frame.TCPFlags, Payload: l4})
+		if trackWire {
+			wire[state.slot-1].observe(dir, len(*segments)-1, pkt.Index, &frame, len(l4) != 0)
 		}
 		return nil
 	})
@@ -447,13 +506,20 @@ func collectStreams(source ipFrameSource, port uint16, meta *[]streamMetadata) (
 				side = 1 - side
 			}
 			prefix := 0
-			var written func(int, int, bool)
+			var written tcpWriteObserver
 			if meta != nil {
+				var packets []tcpPacketEvidence
+				if trackWire {
+					packets = wire[i].packets[dir]
+				}
 				gapped := false
-				written = func(_ int, end int, gap bool) {
+				written = func(segment, end int, seq uint32, gap bool) {
 					gapped = gapped || gap
 					if !gapped {
 						prefix = end
+						if len(packets) != 0 {
+							info.wire[dir].add(end, seq, packets[segment])
+						}
 					}
 				}
 			}

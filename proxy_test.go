@@ -60,9 +60,11 @@ func proxyTestCapture(t *testing.T, request, response []byte) (*Capture, []byte)
 	t.Helper()
 	client, server := [4]byte{192, 0, 2, 1}, [4]byte{192, 0, 2, 2}
 	// Capture the server's bytes first to exercise stream orientation.
+	clientBytes := append([]byte(proxyRequest), request...)
+	serverBytes := append([]byte(proxyResponse), response...)
 	frames := [][]byte{
-		buildEthernetIPv4TCPFrame(server, client, 3128, 51000, 1, 1, TCPFlagACK, append([]byte(proxyResponse), response...)),
-		buildEthernetIPv4TCPFrame(client, server, 51000, 3128, 1, 1, TCPFlagACK, append([]byte(proxyRequest), request...)),
+		buildEthernetIPv4TCPFrame(server, client, 3128, 51000, 1, 1+uint32(len(clientBytes)), TCPFlagACK, serverBytes),
+		buildEthernetIPv4TCPFrame(client, server, 51000, 3128, 1, 1+uint32(len(serverBytes)), TCPFlagACK, clientBytes),
 	}
 	raw := buildClassicPCAP(binary.LittleEndian, false, LinkTypeEthernet, 65535, frames)
 	c, err := New(raw)

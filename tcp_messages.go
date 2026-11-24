@@ -108,7 +108,7 @@ func (c *tcpMessageCollector) walkContiguous(visit func(*tcpMessageDirection, []
 		gapSeen := false
 		key, canonical := makeCanonicalFlowKey(IPProtoTCP, dir.src.Addr(), dir.src.Port(), dir.dst.Addr(), dir.dst.Port())
 		state := c.flows[key]
-		buf, err := state.budget.reassemble(tcpSide(canonical), dir.segments, &remaining, func(segment, end int, gap bool) {
+		buf, err := state.budget.reassemble(tcpSide(canonical), dir.segments, &remaining, func(segment, end int, _ uint32, gap bool) {
 			gapSeen = gapSeen || gap
 			if !gapSeen {
 				spans = append(spans, packetSpan{end, segment})

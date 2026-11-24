@@ -147,7 +147,7 @@ func TestNestedOverlapCaptureOrder(t *testing.T) {
 	// The earliest packet supplies the middle, the second supplies the flanks.
 	segments := []TCPSegmentInput{{Seq: 14, Payload: []byte("AA")}, {Seq: 12, Payload: []byte("bbbbbb")}, {Seq: 10, Payload: []byte("cccccccccc")}}
 	var owners []byte
-	res, _, err := reassembleTCPWithBudget(segments, MaxFlowStreamBytes, func(segment, end int, _ bool) {
+	res, _, err := reassembleTCPWithBudget(segments, MaxFlowStreamBytes, func(segment, end int, _ uint32, _ bool) {
 		for len(owners) < end {
 			owners = append(owners, byte('0'+segment))
 		}
