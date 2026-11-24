@@ -1,6 +1,6 @@
 # Deployment capture fixtures
 
-[generate.py](generate.py) builds these PcapNG files byte for byte from fixed,
+[generate.py](generate.py) builds these capture files byte for byte from fixed,
 synthetic inputs with Python 3.13.18. It uses the Python standard library,
 documentation IP addresses, `.example` names, and locally administered MAC
 addresses. The repository license covers the generator and captures.
@@ -82,3 +82,19 @@ certificate chains, and decrypted proxy streams.
 
 See the [worked troubleshooting example](../../docs/parsing.md#trace-a-client-connection-and-a-tls-proxy)
 for capture points and how to correlate the results with logs.
+
+## DNS transaction fixture
+
+`dns-transactions.pcap` contains 13 Ethernet frames with classic PCAP
+microsecond timestamps. Regenerate it with the same script. Inspect the DNS
+IDs, echoed questions, header response codes, and timestamps with TShark:
+
+```sh
+tshark -n -r dns-transactions.pcap -T fields -e frame.number -e dns.id \
+  -e dns.qry.name -e dns.flags.rcode -e dns.response_to -e dns.time
+```
+
+The four unambiguous pairs have elapsed times of 8 ms, 5 ms, 1.2 s and 6 ms
+in query order. TShark associates frame 11 with frame 9. Frame 10 carries
+the same question and ID, so the go-pcap example leaves the pair ambiguous.
+See the [transaction walkthrough](../../docs/parsing.md#diagnose-dns-transactions).

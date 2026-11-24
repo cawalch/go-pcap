@@ -189,7 +189,43 @@ def iot():
     write_pcapng("iot", ["iot-local"], [(0, data, None, b"") for data in frames])
 
 
+def dns_transactions():
+    client, resolver = "192.0.2.14", "192.0.2.53"
+    trace = bytearray(pack("<IHHIIII", 0xa1b2c3d4, 2, 4, 0, 0, 65535, 1))
+    tcp = TCP(client, resolver, 53000, 1000, 2000)
+    tcp.ports = (53000, 53)
+
+    def packet(ms, name, txid, rcode=None, stream=False):
+        reply = rcode is not None
+        msg = dns(name, "198.51.100.80" if reply and rcode == 0 else None)
+        flags = (0x8180 | rcode) if reply else 0x0100
+        msg = pack("!2H", txid, flags) + msg[4:]
+        if stream:
+            data = tcp.send(reply, PSH | ACK, pack("!H", len(msg)) + msg)
+        else:
+            data = (udp(resolver, client, 53, 53000, msg) if reply else
+                    udp(client, resolver, 53000, 53, msg))
+        trace.extend(pack("<4I", 1700000000 + ms // 1000, ms % 1000 * 1000, len(data), len(data)))
+        trace.extend(data)
+
+    packet(0, "ok.example", 1)
+    packet(8, "ok.example", 1, 0)
+    packet(10, "missing.example", 1)
+    packet(15, "missing.example", 1, 3)
+    packet(20, "slow.example", 2, stream=True)
+    packet(25, "fast.example", 3, stream=True)
+    packet(31, "FAST.example", 3, 0, stream=True)
+    packet(1220, "slow.example", 2, 0, stream=True)
+    packet(1230, "retry.example", 4)
+    packet(1240, "retry.example", 4)
+    packet(1250, "retry.example", 4, 0)
+    packet(1260, "orphan.example", 5, 2)
+    packet(1270, "pending.example", 6)
+    (OUT / "dns-transactions.pcap").write_bytes(trace)
+
+
 if __name__ == "__main__":
     client()
     proxy()
     iot()
+    dns_transactions()

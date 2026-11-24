@@ -80,6 +80,7 @@ func main() {
 | --- | --- |
 | Which sensor log entry matches this flow? | Join TCP or UDP flows by `CommunityID`. [Flow summaries](docs/parsing.md#aggregate-5-tuple-flows) |
 | Which names did the client look up? | Inspect questions and answers with `DNS`. [DNS records](docs/parsing.md#parse-dns-messages-and-tunneling-metrics) |
+| Did the resolver reply, and how long did it take? | Pair DNS questions and replies by frame and inspect ambiguous retries. [DNS transaction example](docs/parsing.md#diagnose-dns-transactions) |
 | Which device requested this address? | Read lease observations with `DHCPv4`. [Address assignments](docs/parsing.md#dhcpv4-address-assignments) |
 | What did the client offer during the handshake? | Inspect server names and fingerprints with `TLS` or `QUIC`. [TLS handshakes](docs/parsing.md#parse-tls-handshakes-and-ja4-fingerprints) |
 | What did the web client request? | Use `Web` for HTTP/1, HTTP/2 and TLS records. [Web traffic and decryption](docs/parsing.md#parse-http-messages-and-carve-payloads) |
