@@ -37,24 +37,12 @@ func (c *Capture) HTTPRequestsFromReaderAt(r io.ReaderAt) ([]HTTPRequestObservat
 func scanHTTPRequests(source ipFrameSource) ([]HTTPRequestObservation, error) {
 	var table flowIndexTable
 	var collector tcpMessageCollector
-	openingSeq := make(map[int]uint32)
 	remaining := MaxTotalStreamBytes
 	err := source.walk(func(pkt PacketRecord, f Frame, payload []byte) error {
 		key, _ := makeCanonicalFlowKey(f.IPProtocol, f.SrcAddr, f.SrcPort, f.DstAddr, f.DstPort)
 		flow, _, err := table.lookupOrInsert(key)
 		if err != nil || f.IPProtocol != IPProtoTCP {
 			return err
-		}
-		// A new opening SYN can reuse a five-tuple and its flow index.
-		// Retain the old direction for reporting but start fresh reassembly.
-		if f.TCPFlags&(TCPFlagSYN|TCPFlagACK) == TCPFlagSYN {
-			if seq, seen := openingSeq[flow]; !seen || seq != f.TCPSeq {
-				src := netip.AddrPortFrom(f.SrcAddr, f.SrcPort)
-				dst := netip.AddrPortFrom(f.DstAddr, f.DstPort)
-				delete(collector.byEndpoints, [2]netip.AddrPort{src, dst})
-				delete(collector.byEndpoints, [2]netip.AddrPort{dst, src})
-				openingSeq[flow] = f.TCPSeq
-			}
 		}
 		if len(payload) > remaining {
 			return ErrReassemblyLimit

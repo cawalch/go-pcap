@@ -39,8 +39,9 @@ type StreamBuffer struct {
 	Anomalies    StreamAnomalies
 }
 
-// TCPStream pairs a bidirectional 5-tuple flow index with its reassembled
-// client-to-server and server-to-client byte streams.
+// TCPStream holds one connection on a bidirectional five-tuple. Connections
+// that reuse the tuple share a FlowIndex. Client follows the first observed
+// packet in this connection and Server follows the reverse direction.
 type TCPStream struct {
 	FlowIndex int
 	SrcAddr   netip.Addr
@@ -292,30 +293,98 @@ func (h *captureOrderHeap) Pop() any {
 }
 
 type flowSegments struct {
-	flowIndex int
-	srcAddr   netip.Addr
-	dstAddr   netip.Addr
-	srcPort   uint16
-	dstPort   uint16
-	client    []TCPSegmentInput
-	server    []TCPSegmentInput
+	flowIndex        int
+	firstPacket      int
+	srcAddr, dstAddr netip.Addr
+	srcPort, dstPort uint16
+	client, server   []TCPSegmentInput
+	canonical        bool
 }
 
-// Streams reassembles bounded TCP byte streams for all TCP flows in the capture
-// in deterministic first-seen flow order.
+// A SYN-ACK can be observed before its matching SYN.
+type tcpOpening struct {
+	seq       uint32
+	canonical bool
+	known     bool
+	inferred  bool
+}
+
+func (o *tcpOpening) observe(frame *Frame, canonical bool) bool {
+	switch frame.TCPFlags & (TCPFlagSYN | TCPFlagACK) {
+	case TCPFlagSYN:
+		opening := tcpOpening{seq: frame.TCPSeq, canonical: canonical, known: true}
+		changed := *o != opening
+		// Fast Open allows the SYN-ACK to acknowledge data on the SYN.
+		if o.inferred && o.canonical == canonical && o.seq-frame.TCPSeq <= frame.PayloadLength {
+			changed = false
+		}
+		*o = opening
+		return changed
+	case TCPFlagSYN | TCPFlagACK:
+		if !o.known {
+			*o = tcpOpening{seq: frame.TCPAck - 1, canonical: !canonical, known: true, inferred: true}
+		}
+	}
+	return false
+}
+
+// All connections on a five-tuple share the same per-direction limits.
+type tcpFlowBudget struct {
+	segments [2]int
+	bytes    [2]int64
+}
+
+func tcpSide(canonical bool) int {
+	if canonical {
+		return 0
+	}
+	return 1
+}
+
+func (b *tcpFlowBudget) addSegment(side int) error {
+	if b.segments[side] >= MaxSegmentsPerFlow {
+		return fmt.Errorf("%w: flow direction exceeds %d segments", ErrReassemblyLimit, MaxSegmentsPerFlow)
+	}
+	b.segments[side]++
+	return nil
+}
+
+func (b *tcpFlowBudget) reassemble(side int, segments []TCPSegmentInput, remaining *int64, written func(int, int, bool)) (StreamBuffer, error) {
+	budget := min(*remaining, MaxFlowStreamBytes-b.bytes[side])
+	buf, used, err := reassembleTCPWithBudget(segments, budget, written)
+	b.bytes[side] += used
+	*remaining -= used
+	return buf, err
+}
+
+type tcpFlowUsage struct {
+	opening tcpOpening
+	budget  tcpFlowBudget
+	slot    int // One-based index of the current connection.
+}
+
+// streamMetadata describes the packet and byte boundaries used by dissectors.
+type streamMetadata struct {
+	firstPacket                int
+	clientPrefix, serverPrefix int
+}
+
+// Streams reassembles TCP connections in order of their first observed packet.
+// An opening SYN after midstream traffic or with a different initial sequence
+// number starts a new connection on the same [FlowSummary].
 func (c *Capture) Streams(data []byte) ([]TCPStream, error) {
-	return collectStreams(ipFrameSource{capture: c, data: data}, 0)
+	return collectStreams(ipFrameSource{capture: c, data: data}, 0, nil)
 }
 
 // A nonzero port restricts reassembly after global flow indices are assigned.
-func collectStreams(source ipFrameSource, port uint16) ([]TCPStream, error) {
-
+func collectStreams(source ipFrameSource, port uint16, meta *[]streamMetadata) ([]TCPStream, error) {
 	var table flowIndexTable
-	tcpSlotByFlow := make(map[int]int)
+	var inline [8]tcpFlowUsage
+	usage := inline[:0]
 	var collected []flowSegments
 
-	err := source.walk(func(_ PacketRecord, frame Frame, l4 []byte) error {
-		key, _ := makeCanonicalFlowKey(frame.IPProtocol, frame.SrcAddr, frame.SrcPort, frame.DstAddr, frame.DstPort)
+	err := source.walk(func(pkt PacketRecord, frame Frame, l4 []byte) error {
+		key, canonical := makeCanonicalFlowKey(frame.IPProtocol, frame.SrcAddr, frame.SrcPort, frame.DstAddr, frame.DstPort)
 		flowIdx, _, err := table.lookupOrInsert(key)
 		if err != nil {
 			return err
@@ -323,78 +392,85 @@ func collectStreams(source ipFrameSource, port uint16) ([]TCPStream, error) {
 		if frame.IPProtocol != IPProtoTCP || !frame.hasPorts || frame.Anomalies.IPFragment || frame.Anomalies.TruncatedLayer || frame.Anomalies.InvalidTCPDataOffset {
 			return nil
 		}
-
 		if port != 0 && frame.SrcPort != port && frame.DstPort != port {
 			return nil
 		}
 
-		slot, hasSlot := tcpSlotByFlow[flowIdx]
-		if !hasSlot {
-			slot = len(collected)
-			tcpSlotByFlow[flowIdx] = slot
+		if flowIdx >= len(usage) {
+			usage = append(usage, make([]tcpFlowUsage, flowIdx+1-len(usage))...)
+		}
+		state := &usage[flowIdx]
+		if changed := state.opening.observe(&frame, canonical); state.slot == 0 || changed {
+			if len(collected) >= MaxFlows {
+				return fmt.Errorf("%w: exceeds %d TCP connections", ErrFlowLimit, MaxFlows)
+			}
+			state.slot = len(collected) + 1
 			collected = append(collected, flowSegments{
-				flowIndex: flowIdx,
-				srcAddr:   frame.SrcAddr,
-				dstAddr:   frame.DstAddr,
-				srcPort:   frame.SrcPort,
-				dstPort:   frame.DstPort,
+				flowIndex: flowIdx, firstPacket: pkt.Index,
+				srcAddr: frame.SrcAddr, dstAddr: frame.DstAddr,
+				srcPort: frame.SrcPort, dstPort: frame.DstPort,
+				canonical: canonical,
 			})
 		}
-
-		entry := &collected[slot]
-		seg := TCPSegmentInput{
-			Seq:     frame.TCPSeq,
-			Flags:   frame.TCPFlags,
-			Payload: l4,
+		if err := state.budget.addSegment(tcpSide(canonical)); err != nil {
+			return err
 		}
-		if frame.SrcAddr == entry.srcAddr && frame.SrcPort == entry.srcPort {
-			if len(entry.client) >= MaxSegmentsPerFlow {
-				return fmt.Errorf("%w: flow %d client segments exceed %d", ErrReassemblyLimit, flowIdx, MaxSegmentsPerFlow)
-			}
+		entry := &collected[state.slot-1]
+		seg := TCPSegmentInput{Seq: frame.TCPSeq, Flags: frame.TCPFlags, Payload: l4}
+		if canonical == entry.canonical {
 			entry.client = append(entry.client, seg)
 		} else {
-			if len(entry.server) >= MaxSegmentsPerFlow {
-				return fmt.Errorf("%w: flow %d server segments exceed %d", ErrReassemblyLimit, flowIdx, MaxSegmentsPerFlow)
-			}
 			entry.server = append(entry.server, seg)
 		}
 		return nil
 	})
-	if err != nil {
+	if err != nil || len(collected) == 0 {
 		return nil, err
 	}
 
-	if len(collected) == 0 {
-		return nil, nil
-	}
-
 	streams := make([]TCPStream, 0, len(collected))
-	remainingBudget := int64(MaxTotalStreamBytes)
-
+	if meta != nil {
+		*meta = make([]streamMetadata, 0, len(collected))
+	}
+	remaining := int64(MaxTotalStreamBytes)
 	for i := range collected {
 		entry := &collected[i]
-		clientBuf, usedClient, err := reassembleTCPWithBudget(entry.client, remainingBudget, nil)
-		if err != nil {
-			return nil, err
+		st := TCPStream{
+			FlowIndex: entry.flowIndex, SrcAddr: entry.srcAddr, DstAddr: entry.dstAddr,
+			SrcPort: entry.srcPort, DstPort: entry.dstPort,
 		}
-		remainingBudget -= usedClient
-
-		serverBuf, usedServer, err := reassembleTCPWithBudget(entry.server, remainingBudget, nil)
-		if err != nil {
-			return nil, err
+		info := streamMetadata{firstPacket: entry.firstPacket}
+		state := &usage[entry.flowIndex]
+		for dir, segments := range [2][]TCPSegmentInput{entry.client, entry.server} {
+			side := tcpSide(entry.canonical)
+			if dir == 1 {
+				side = 1 - side
+			}
+			prefix := 0
+			var written func(int, int, bool)
+			if meta != nil {
+				gapped := false
+				written = func(_ int, end int, gap bool) {
+					gapped = gapped || gap
+					if !gapped {
+						prefix = end
+					}
+				}
+			}
+			buf, err := state.budget.reassemble(side, segments, &remaining, written)
+			if err != nil {
+				return nil, err
+			}
+			if dir == 0 {
+				st.Client, info.clientPrefix = buf, prefix
+			} else {
+				st.Server, info.serverPrefix = buf, prefix
+			}
 		}
-		remainingBudget -= usedServer
-
-		streams = append(streams, TCPStream{
-			FlowIndex: entry.flowIndex,
-			SrcAddr:   entry.srcAddr,
-			DstAddr:   entry.dstAddr,
-			SrcPort:   entry.srcPort,
-			DstPort:   entry.dstPort,
-			Client:    clientBuf,
-			Server:    serverBuf,
-		})
+		streams = append(streams, st)
+		if meta != nil {
+			*meta = append(*meta, info)
+		}
 	}
-
 	return streams, nil
 }

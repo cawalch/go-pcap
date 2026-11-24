@@ -2,15 +2,20 @@ package pcap
 
 import (
 	"encoding/binary"
-	"fmt"
 	"net/netip"
 )
 
 // Collect only the TCP directions needed by a length-prefixed dissector.
 // Preserve first-seen order when applying the aggregate reassembly budget.
 type tcpMessageCollector struct {
-	byEndpoints map[[2]netip.AddrPort]int
-	directions  []tcpMessageDirection
+	flows      map[flowKey]tcpMessageFlow
+	directions []tcpMessageDirection
+}
+
+type tcpMessageFlow struct {
+	opening    tcpOpening
+	directions [2]int // One-based direction indices for the current connection.
+	budget     tcpFlowBudget
 }
 
 type tcpMessageDirection struct {
@@ -26,26 +31,35 @@ type messagePacket struct {
 }
 
 func (c *tcpMessageCollector) add(pkt PacketRecord, frame Frame, flow int, payload []byte) error {
-	if !frame.hasPorts || frame.Anomalies.IPFragment || frame.Anomalies.TruncatedLayer || frame.Anomalies.InvalidTCPDataOffset || len(payload) == 0 {
+	if !frame.hasPorts || frame.Anomalies.IPFragment || frame.Anomalies.TruncatedLayer || frame.Anomalies.InvalidTCPDataOffset || len(payload) == 0 && frame.TCPFlags&TCPFlagSYN == 0 {
 		return nil
 	}
-	key := [2]netip.AddrPort{netip.AddrPortFrom(frame.SrcAddr, frame.SrcPort), netip.AddrPortFrom(frame.DstAddr, frame.DstPort)}
-	i, ok := c.byEndpoints[key]
-	if !ok {
-		if c.byEndpoints == nil {
-			c.byEndpoints = make(map[[2]netip.AddrPort]int)
-		}
+	key, canonical := makeCanonicalFlowKey(IPProtoTCP, frame.SrcAddr, frame.SrcPort, frame.DstAddr, frame.DstPort)
+	if c.flows == nil {
+		c.flows = make(map[flowKey]tcpMessageFlow)
+	}
+	state, seen := c.flows[key]
+	if !seen && len(c.flows) >= MaxFlows {
+		return ErrFlowLimit
+	}
+	if state.opening.observe(&frame, canonical) {
+		state.directions = [2]int{}
+	}
+	side := tcpSide(canonical)
+	if err := state.budget.addSegment(side); err != nil {
+		return err
+	}
+	if state.directions[side] == 0 {
 		if len(c.directions) >= 2*MaxFlows {
 			return ErrFlowLimit
 		}
-		i = len(c.directions)
-		c.byEndpoints[key] = i
-		c.directions = append(c.directions, tcpMessageDirection{src: key[0], dst: key[1], flowIndex: flow})
+		c.directions = append(c.directions, tcpMessageDirection{
+			src: netip.AddrPortFrom(frame.SrcAddr, frame.SrcPort), dst: netip.AddrPortFrom(frame.DstAddr, frame.DstPort), flowIndex: flow,
+		})
+		state.directions[side] = len(c.directions)
 	}
-	dir := &c.directions[i]
-	if len(dir.segments) >= MaxSegmentsPerFlow {
-		return fmt.Errorf("%w: too many TCP message segments", ErrReassemblyLimit)
-	}
+	dir := &c.directions[state.directions[side]-1]
+	c.flows[key] = state
 	dir.segments = append(dir.segments, TCPSegmentInput{Seq: frame.TCPSeq, Flags: frame.TCPFlags, Payload: payload})
 	dir.packets = append(dir.packets, messagePacket{pkt.Index, pkt.TimestampNs})
 	return nil
@@ -92,7 +106,9 @@ func (c *tcpMessageCollector) walkContiguous(visit func(*tcpMessageDirection, []
 		dir := &c.directions[i]
 		spans = spans[:0]
 		gapSeen := false
-		buf, used, err := reassembleTCPWithBudget(dir.segments, remaining, func(segment, end int, gap bool) {
+		key, canonical := makeCanonicalFlowKey(IPProtoTCP, dir.src.Addr(), dir.src.Port(), dir.dst.Addr(), dir.dst.Port())
+		state := c.flows[key]
+		buf, err := state.budget.reassemble(tcpSide(canonical), dir.segments, &remaining, func(segment, end int, gap bool) {
 			gapSeen = gapSeen || gap
 			if !gapSeen {
 				spans = append(spans, packetSpan{end, segment})
@@ -101,7 +117,7 @@ func (c *tcpMessageCollector) walkContiguous(visit func(*tcpMessageDirection, []
 		if err != nil {
 			return err
 		}
-		remaining -= used
+		c.flows[key] = state
 		if len(spans) == 0 {
 			continue
 		}

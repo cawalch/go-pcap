@@ -190,10 +190,10 @@ func parseHTTPRequest(stream []byte, decodedBudget *httpDecodeBudget) (HTTPReque
 // framing. See [HTTPAnomalies] for framing and decoding observations. When framing
 // cannot locate the next message, the byte count covers all input.
 func ParseHTTPResponse(stream []byte) (HTTPResponse, int, error) {
-	return parseHTTPResponse(stream, nil)
+	return parseHTTPResponse(stream, "", nil)
 }
 
-func parseHTTPResponse(stream []byte, decodedBudget *httpDecodeBudget) (HTTPResponse, int, error) {
+func parseHTTPResponse(stream []byte, method string, decodedBudget *httpDecodeBudget) (HTTPResponse, int, error) {
 	lineEnd := bytes.Index(stream, []byte("\r\n"))
 	if lineEnd <= 0 || lineEnd > MaxHTTPHeaderLineBytes {
 		return HTTPResponse{}, 0, fmt.Errorf("%w: missing or oversize HTTP status line", ErrInvalidHTTP)
@@ -239,7 +239,7 @@ func parseHTTPResponse(stream []byte, decodedBudget *httpDecodeBudget) (HTTPResp
 		}
 	}
 
-	if (code >= 100 && code < 200) || code == 204 || code == 304 {
+	if method == "HEAD" || method == "CONNECT" && code/100 == 2 || code/100 == 1 || code == 204 || code == 304 {
 		resp.BodyOffset = bodyStart
 		return resp, bodyStart, nil
 	}
@@ -665,18 +665,21 @@ func formatJA4HLanguage(acceptLang string) [4]byte {
 
 // HTTP extracts HTTP/1.x requests, responses, JA4H fingerprints, and carved body
 // payloads from both cleartext TCP streams and TLS streams decrypted via
-// embedded PcapNG Decryption Secrets Blocks (DSB). HTTP uses one
+// embedded PcapNG Decryption Secrets Blocks (DSB). Cleartext parsing ends at
+// the first known gap in each direction. When requests are available, their
+// methods determine response framing, including bodyless HEAD responses. HTTP uses one
 // [MaxHTTPDecodedBodyBytesPerScan] budget for content decoding across all streams.
 // It returns no records and an error wrapping [ErrHTTPLimit] if decoding exceeds
 // the budget, including bytes produced before a decoding error.
 func (c *Capture) HTTP(data []byte) ([]HTTPRecord, error) {
-	streams, err := c.Streams(data)
+	var meta []streamMetadata
+	streams, err := collectStreams(ipFrameSource{capture: c, data: data}, 0, &meta)
 	if err != nil {
 		return nil, err
 	}
 	keys, _ := c.TLSKeyLog(nil)
 	var records []HTTPRecord
-	if err := scanHTTPStreams(streams, keys, &records, nil, nil); err != nil {
+	if err := scanHTTPStreams(streams, meta, keys, &records, nil, nil); err != nil {
 		return nil, err
 	}
 	return records, nil
@@ -693,15 +696,21 @@ func appendClearHTTP(wire, inner *TCPStream, clientOffset, serverOffset int, rec
 			// Bound the outer response so its body cannot consume tunnel data.
 			outer := *inner
 			outer.Client.Data, outer.Server.Data = client[:clientOffset], server[:serverOffset]
-			if err := appendHTTPFromTCPStream(&outer, false, records, decodedBudget, 0, 0); err != nil {
+			if err := appendHTTPFromTCPStream(outer, false, records, decodedBudget, 0, 0); err != nil {
 				return err
 			}
 		}
 	}
-	return appendHTTPFromTCPStream(inner, false, records, decodedBudget, clientOffset, serverOffset)
+	return appendHTTPFromTCPStream(*inner, false, records, decodedBudget, clientOffset, serverOffset)
 }
 
-func appendHTTPFromTCPStream(st *TCPStream, isDecrypted bool, records *[]HTTPRecord, decodedBudget *httpDecodeBudget, clientOffset, serverOffset int) error {
+func appendHTTPFromTCPStream(st TCPStream, isDecrypted bool, records *[]HTTPRecord, decodedBudget *httpDecodeBudget, clientOffset, serverOffset int) error {
+	// Reassembly follows the first observed packet, which can be a response.
+	if bytes.HasPrefix(st.Client.Data, []byte("HTTP/1.")) || hasHTTPRequestStart(st.Server.Data) {
+		st.reverse()
+		clientOffset, serverOffset = serverOffset, clientOffset
+	}
+	nextRequest := len(*records)
 	for off := 0; off < len(st.Client.Data); {
 		req, consumed, err := parseHTTPRequest(st.Client.Data[off:], decodedBudget)
 		if errors.Is(err, errHTTPDecodeBudget) {
@@ -726,8 +735,13 @@ func appendHTTPFromTCPStream(st *TCPStream, isDecrypted bool, records *[]HTTPRec
 		})
 		off += consumed
 	}
+	endRequests := len(*records)
 	for off := 0; off < len(st.Server.Data); {
-		resp, consumed, err := parseHTTPResponse(st.Server.Data[off:], decodedBudget)
+		var method string
+		if nextRequest < endRequests {
+			method = (*records)[nextRequest].Request.Method
+		}
+		resp, consumed, err := parseHTTPResponse(st.Server.Data[off:], method, decodedBudget)
 		if errors.Is(err, errHTTPDecodeBudget) {
 			return err
 		}
@@ -748,7 +762,19 @@ func appendHTTPFromTCPStream(st *TCPStream, isDecrypted bool, records *[]HTTPRec
 			IsDecrypted: isDecrypted,
 			Response:    resp,
 		})
+		if resp.StatusCode == 101 || method == "CONNECT" && resp.StatusCode/100 == 2 {
+			break
+		}
+		if resp.StatusCode >= 200 && nextRequest < endRequests {
+			nextRequest++
+		}
 		off += consumed
 	}
 	return nil
+}
+
+// hasHTTPRequestStart checks the bounded method token to orient one-sided captures.
+func hasHTTPRequestStart(data []byte) bool {
+	method, _, ok := bytes.Cut(data[:min(8, len(data))], []byte(" "))
+	return ok && isStandardHTTPMethod(string(method))
 }

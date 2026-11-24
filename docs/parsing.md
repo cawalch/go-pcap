@@ -80,7 +80,7 @@ The following limits bound parsing work and memory allocation on each call:
 | `MaxDecompressedCaptureBytes` | 64 MiB | Bounds decompressed output across gzip members in `DecompressCapture` |
 | `MaxInterfaces` | 256 interfaces | Bounds PcapNG `IDB` descriptors per capture |
 | `MaxPackets` | 1,048,576 packets | Bounds packets indexed or returned by `New`, `PacketSeq`, `Packets`, and `Flows` |
-| `MaxFlows` | 65,536 flows | Bounds distinct 5-tuple flows aggregated by `Flows` and L7 dissectors |
+| `MaxFlows` | 65,536 flows | Bounds distinct five-tuples and the number of reassembled TCP connections |
 | `MaxDecryptionSecrets` | 256 blocks | Bounds PcapNG `DSB` blocks per capture |
 | `MaxDecryptionSecretBytes` | 4 MiB | Bounds cumulative secret payload bytes copied across all `DSB` blocks |
 | `MaxPCAPNGBlocks` | 2,097,152 blocks | Bounds all PcapNG block types across sections |
@@ -425,6 +425,13 @@ resolves overlapping segments using a first-seen-wins policy and sets
 `StreamAnomalies.OverlapConflict` when a later overlapping segment contains
 differing bytes at the same sequence offset.
 
+`Streams` starts a new connection when an opening SYN follows a midstream
+capture or changes the opening sequence number or sending endpoint. A matching
+SYN retransmission stays in its connection. Each connection uses its first
+observed packet to define the client direction. Connections that reuse a
+five-tuple share the same `FlowIndex` and directional segment and byte limits.
+Without a new opening SYN, tuple reuse can be indistinguishable from a gap.
+
 ## Parse DNS messages and tunneling metrics
 
 Call `ParseDNS(payload)` on a single DNS message or `capture.DNS(data)` to
@@ -679,14 +686,14 @@ TLS, HTTP, HTTP/2, SSH, SMB, and RDP capture methods inspect the payload after
 one successful HTTP CONNECT or no-authentication SOCKS5 CONNECT exchange.
 `DecryptedTLSStreams` uses the inner TLS records with the supplied key log.
 The flow index and addresses identify the captured client and proxy. `HTTP`
-returns the outer CONNECT request and 200 response as header-only records
+returns the outer CONNECT request, interim responses, and successful 2xx response as header-only records
 before any inner HTTP messages. Body offsets refer to the original stream.
 
 Use `UnwrapProxyStream(stream.Client.Data, stream.Server.Data)` on a reassembled
 request and response to get the inner byte slices, proxy type, requested host,
 and port. The host comes from the proxy request and can differ from the inner
 TLS server name. Both slices borrow the original stream buffers. HTTP headers
-must each end within 4,096 bytes. SOCKS5 accepts up to 16 offered methods and
+must end within 4,096 bytes per direction, including any interim responses. SOCKS5 accepts up to 16 offered methods and
 IPv4, IPv6, or domain targets. On an incomplete or rejected exchange the helper
 returns both input slices and `false`.
 
@@ -707,6 +714,14 @@ For conflicting or invalid lengths on a body-bearing message, the parser
 returns the headers, omits the body, and consumes the remaining input in that
 direction. An incomplete chunk stream also consumes the remaining input and
 retains the bounded body prefix. Bodyless response statuses end at the headers.
+
+On cleartext connections, `HTTP` stops each direction at its first known TCP
+gap and retains any complete headers and available body prefix before it. It
+identifies request and response directions from their start lines. When both
+sides are available, it pairs requests and final responses in order. A response
+to HEAD ends at the headers even if it advertises a content length. Interim
+responses leave the request pending. The standalone `ParseHTTPResponse`
+function has no request-method context.
 
 For a single `gzip`, `x-gzip`, or `deflate` content coding, the parser removes
 chunk framing before decoding the content. Deflate supports zlib streams and raw

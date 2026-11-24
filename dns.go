@@ -546,12 +546,15 @@ func scanDNS(source ipFrameSource) ([]DNSRecord, error) {
 			return err
 		}
 
-		if frame.PayloadLength == 0 || !isDNSPort(frame.SrcPort) && !isDNSPort(frame.DstPort) {
+		if !isDNSPort(frame.SrcPort) && !isDNSPort(frame.DstPort) {
 			return nil
 		}
 
 		switch frame.IPProtocol {
 		case IPProtoUDP:
+			if len(l4) == 0 {
+				return nil
+			}
 			msg, err := ParseDNS(l4)
 			if err != nil {
 				return nil
@@ -620,7 +623,7 @@ func (c *Capture) HasDNSQuery(data []byte, qname string) (bool, error) {
 			return err
 		}
 		frame, err := DecodeFrame(payload, pkt.LinkType)
-		if err != nil || frame.IPVersion == 0 || frame.PayloadLength == 0 {
+		if err != nil || frame.IPVersion == 0 || frame.PayloadLength == 0 && frame.IPProtocol != IPProtoTCP {
 			return nil
 		}
 		if frame.Anomalies.IPFragment && frame.IPProtocol == IPProtoUDP {

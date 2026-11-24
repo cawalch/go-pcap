@@ -160,3 +160,93 @@ func TestNestedOverlapCaptureOrder(t *testing.T) {
 		t.Fatalf("bounded result=%+v err=%v", res, err)
 	}
 }
+
+func TestStreamsSeparateReusedConnections(t *testing.T) {
+	a, b := [4]byte{192, 0, 2, 1}, [4]byte{192, 0, 2, 2}
+	open := buildEthernetIPv4TCPFrame(a, b, 45000, 80, 0, 0, TCPFlagSYN, nil)
+	frames := [][]byte{
+		buildEthernetIPv4UDPFrame(a, b, 43000, 53, nil),
+		buildEthernetIPv4TCPFrame(b, a, 80, 45000, 10, 1, TCPFlagSYN|TCPFlagACK, nil),
+		open, open,
+		buildEthernetIPv4TCPFrame(a, b, 45000, 80, 1, 11, TCPFlagACK, []byte("first")),
+		buildEthernetIPv4TCPFrame(a, b, 46000, 80, 1, 0, TCPFlagACK, []byte("other")),
+		buildEthernetIPv4TCPFrame(a, b, 45000, 80, 2, 0, TCPFlagSYN, []byte("second")),
+		buildEthernetIPv4TCPFrame(b, a, 80, 45000, 3, 9, TCPFlagACK, []byte("reply")),
+	}
+	raw := buildClassicPCAP(binary.LittleEndian, false, LinkTypeEthernet, 65535, frames)
+	c, err := New(raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := c.Streams(raw)
+	if err != nil || len(got) != 3 {
+		t.Fatalf("streams = %+v, %v", got, err)
+	}
+	if got[0].FlowIndex != 1 || got[0].SrcPort != 80 || string(got[0].Server.Data) != "first" ||
+		got[1].FlowIndex != 2 || string(got[1].Client.Data) != "other" ||
+		got[2].FlowIndex != 1 || got[2].SrcPort != 45000 || string(got[2].Client.Data) != "second" || string(got[2].Server.Data) != "reply" {
+		t.Fatalf("streams = %+v", got)
+	}
+}
+
+func TestStreamsReorderedFastOpenHandshake(t *testing.T) {
+	a, b := [4]byte{192, 0, 2, 1}, [4]byte{192, 0, 2, 2}
+	const seq = uint32(0xfffffffd)
+	payload := []byte("fast")
+	after := seq + 1 + uint32(len(payload))
+	syn := buildEthernetIPv4TCPFrame(a, b, 5000, 80, seq, 0, TCPFlagSYN, payload)
+	raw := buildClassicPCAP(binary.LittleEndian, false, LinkTypeEthernet, 65535, [][]byte{
+		buildEthernetIPv4TCPFrame(b, a, 80, 5000, 99, after, TCPFlagSYN|TCPFlagACK, nil),
+		syn, syn,
+		buildEthernetIPv4TCPFrame(a, b, 5000, 80, after, 100, TCPFlagACK, []byte(" open")),
+		buildEthernetIPv4TCPFrame(a, b, 5000, 80, 400, 0, TCPFlagSYN, []byte("fresh")),
+	})
+	c, err := New(raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := c.Streams(raw)
+	if err != nil || len(got) != 2 || got[0].SrcPort != 80 || string(got[0].Server.Data) != "fast open" || string(got[1].Client.Data) != "fresh" {
+		t.Fatalf("Streams = %+v, %v", got, err)
+	}
+}
+
+func TestStreamsReusedTupleSharesDirectionalSegmentLimit(t *testing.T) {
+	var frames [][]byte
+	for seq := 0; seq <= MaxSegmentsPerFlow; seq++ {
+		frames = append(frames, buildEthernetIPv4TCPFrame([4]byte{10, 0, 0, 1}, [4]byte{10, 0, 0, 2}, 1000, 80, uint32(seq), 0, TCPFlagSYN, nil))
+	}
+	raw := buildClassicPCAP(binary.LittleEndian, false, LinkTypeEthernet, 65535, frames)
+	c, err := New(raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, err := c.Streams(raw); got != nil || !errors.Is(err, ErrReassemblyLimit) {
+		t.Fatalf("Streams returned %d streams, %v", len(got), err)
+	}
+}
+
+func TestReusedTupleSharesDirectionalByteLimit(t *testing.T) {
+	a, b := [4]byte{192, 0, 2, 1}, [4]byte{192, 0, 2, 2}
+	payload := make([]byte, 32<<10)
+	var frames [][]byte
+	for seq := 0; seq < MaxFlowStreamBytes; seq += len(payload) {
+		frames = append(frames, buildEthernetIPv4TCPFrame(a, b, 5000, 80, uint32(seq), 0, TCPFlagACK, payload))
+	}
+	frames = append(frames,
+		buildEthernetIPv4TCPFrame(b, a, 80, 5000, 100, 0, TCPFlagSYN, []byte("new")),
+		buildEthernetIPv4TCPFrame(a, b, 5000, 80, 200, 0, TCPFlagACK, []byte("over budget")),
+	)
+	raw := buildClassicPCAP(binary.LittleEndian, false, LinkTypeEthernet, 65535, frames)
+	c, err := New(raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	streams, err := c.Streams(raw)
+	if err != nil || len(streams) != 2 {
+		t.Fatalf("Streams returned %d streams, %v", len(streams), err)
+	}
+	if len(streams[0].Client.Data) != MaxFlowStreamBytes || string(streams[1].Client.Data) != "new" || len(streams[1].Server.Data) != 0 || !streams[1].Server.Anomalies.Truncated {
+		t.Fatalf("directional byte limit: first %d bytes, second %+v", len(streams[0].Client.Data), streams[1])
+	}
+}

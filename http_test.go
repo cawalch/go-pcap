@@ -400,12 +400,13 @@ func TestHTTPFramingCaptureParity(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	streams, err := collectStreams(ipFrameSource{capture: index, reader: reader, needsPayload: func(f Frame, _ []byte) bool { return f.IPProtocol == IPProtoTCP }}, 0)
+	var meta []streamMetadata
+	streams, err := collectStreams(ipFrameSource{capture: index, reader: reader, needsPayload: func(f Frame, _ []byte) bool { return f.IPProtocol == IPProtoTCP }}, 0, &meta)
 	if err != nil {
 		t.Fatal(err)
 	}
 	var got []HTTPRecord
-	if err := scanHTTPStreams(streams, nil, &got, nil, nil); err != nil || !reflect.DeepEqual(want, got) {
+	if err := scanHTTPStreams(streams, meta, nil, &got, nil, nil); err != nil || !reflect.DeepEqual(want, got) {
 		t.Fatalf("ReaderAt mismatch: %+v, %v", got, err)
 	}
 }
@@ -426,4 +427,72 @@ func TestHTTPResponseFraming(t *testing.T) {
 			t.Fatalf("%q: consumed %d/%d, body %q, flags %+v, err %v", tc.head, n, len(raw), r.Body, r.Anomalies, err)
 		}
 	}
+}
+
+func TestHTTPCaptureHEADAndInterimResponses(t *testing.T) {
+	a, b := [4]byte{192, 0, 2, 1}, [4]byte{192, 0, 2, 2}
+	req := "HEAD /first HTTP/1.1\r\n\r\nGET /next HTTP/1.1\r\n\r\n"
+	resp := "HTTP/1.1 103 Early Hints\r\n\r\nHTTP/1.1 200 OK\r\nContent-Length: 41\r\nContent-Encoding: gzip\r\n\r\nHTTP/1.1 200 OK\r\nContent-Length: 4\r\n\r\nnext"
+	for _, tunnel := range []bool{false, true} {
+		client, server := req, resp
+		offset := 0
+		if tunnel {
+			client = proxyRequest + client
+			server = "HTTP/1.1 100 Continue\r\n\r\nHTTP/1.1 204 Tunnel Established\r\n\r\n" + server
+			offset = 3
+		}
+		raw := buildClassicPCAP(binary.LittleEndian, false, LinkTypeEthernet, 65535, [][]byte{
+			buildEthernetIPv4TCPFrame(b, a, 80, 5000, 1, 0, TCPFlagACK, []byte(server)),
+			buildEthernetIPv4TCPFrame(a, b, 5000, 80, 1, 0, TCPFlagACK, []byte(client)),
+		})
+		c, err := New(raw)
+		if err != nil {
+			t.Fatal(err)
+		}
+		rows, err := c.HTTP(raw)
+		if err != nil || len(rows) != offset+5 {
+			t.Fatalf("tunnel %v: %+v, %v", tunnel, rows, err)
+		}
+		web, err := c.Web(raw)
+		if err != nil || !reflect.DeepEqual(rows, web.HTTP) {
+			t.Fatalf("Web tunnel %v: %+v, %v", tunnel, web.HTTP, err)
+		}
+		got := rows[offset:]
+		if got[0].Request.Method != "HEAD" || got[0].SrcPort != 5000 || got[1].Request.Path != "/next" ||
+			got[2].Response.StatusCode != 103 || got[3].Response.StatusCode != 200 || got[3].Response.BodyLength != 0 || got[3].Response.Anomalies != (HTTPAnomalies{}) ||
+			got[4].SrcPort != 80 || string(got[4].Response.Body) != "next" || got[4].Response.BodyOffset != len(server)-4 {
+			t.Fatalf("tunnel %v: %+v", tunnel, got)
+		}
+	}
+}
+
+func TestHTTPCaptureStopsAtKnownTCPGap(t *testing.T) {
+	a, b := [4]byte{192, 0, 2, 1}, [4]byte{192, 0, 2, 2}
+	prefix := "GET /ok HTTP/1.1\r\n\r\nGET /fa"
+	reply := "HTTP/1.1 200 OK\r\nContent-Length: 4\r\n\r\na"
+	raw := buildClassicPCAP(binary.LittleEndian, false, LinkTypeEthernet, 65535, [][]byte{
+		buildEthernetIPv4TCPFrame(a, b, 5000, 80, 1, 0, TCPFlagACK, []byte(prefix)),
+		buildEthernetIPv4TCPFrame(a, b, 5000, 80, uint32(len(prefix)+22), 0, TCPFlagACK, []byte("ke HTTP/1.1\r\n\r\n")),
+		buildEthernetIPv4TCPFrame(b, a, 80, 5000, 1, 0, TCPFlagACK, []byte(reply)),
+		buildEthernetIPv4TCPFrame(b, a, 80, 5000, uint32(len(reply)+22), 0, TCPFlagACK, []byte("bcd")),
+		buildEthernetIPv4TCPFrame(a, b, 5000, 80, 1000, 0, TCPFlagSYN, nil),
+		buildEthernetIPv4TCPFrame(a, b, 5000, 80, 1010, 0, TCPFlagACK, []byte("GET /after-gap HTTP/1.1\r\n\r\n")),
+	})
+	c, err := New(raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rows, err := c.HTTP(raw)
+	if err != nil || len(rows) != 2 || rows[0].Request.Path != "/ok" || string(rows[1].Response.Body) != "a" || !rows[1].Response.Anomalies.TruncatedBody {
+		t.Fatalf("%+v, %v", rows, err)
+	}
+	web, err := c.Web(raw)
+	if err != nil || !reflect.DeepEqual(rows, web.HTTP) {
+		t.Fatalf("Web = %+v, %v", web.HTTP, err)
+	}
+	reqs, err := c.HTTPRequests(raw)
+	if err != nil || len(reqs) != 1 || reqs[0].Path != "/ok" {
+		t.Fatalf("HTTPRequests = %+v, %v", reqs, err)
+	}
+	checkReaderParity(t, raw, c.HTTPRequests, c.HTTPRequestsFromReaderAt)
 }
