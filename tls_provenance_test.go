@@ -249,9 +249,12 @@ func TestTLSRecordProvenanceSnaplenRecovery(t *testing.T) {
 		name    string
 		missing uint16
 		reason  tlsStopReason
+		gre     bool
 	}{
-		{"partial", 100, tlsStopTruncated},
-		{"complete", 0, tlsStopEnd},
+		{"partial", 100, tlsStopTruncated, false},
+		{"complete", 0, tlsStopEnd, false},
+		{"GRE partial", 100, tlsStopTruncated, true},
+		{"GRE complete", 0, tlsStopEnd, true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			packets := f.packets(100, "", false, false)
@@ -260,6 +263,18 @@ func TestTLSRecordProvenanceSnaplenRecovery(t *testing.T) {
 			length := binary.BigEndian.Uint16(clipped[ipv4LengthOffset:])
 			binary.BigEndian.PutUint16(clipped[ipv4LengthOffset:], length+tc.missing)
 			packets = slices.Insert(packets, 6, clipped)
+			if tc.gre {
+				for i, packet := range packets {
+					// The outer packet declares extra bytes after the inner IP
+					// datagram. Those bytes do not extend the inner TCP stream.
+					outer := make([]byte, 38)
+					copy(outer[:14], packet[:14])
+					outer[14], outer[22], outer[23] = 0x45, 64, IPProtoGRE
+					binary.BigEndian.PutUint16(outer[16:18], uint16(len(packet)-14+24+100))
+					binary.BigEndian.PutUint16(outer[36:38], uint16(EtherTypeIPv4))
+					packets[i] = append(outer, packet[14:]...)
+				}
+			}
 			rows := tlsProofScan(t, buildPCAPNGFixture(binary.LittleEndian, f.keys, packets), nil)
 			end := len(f.client) + len(f.first) + len(f.control) + len(f.second)
 			if len(rows) != 1 || rows[0].client.stop != (tlsProvenanceBoundary{end, tc.reason}) ||
