@@ -23,7 +23,7 @@ func attachLinuxBPFFilter(fd int, fprog *syscall.SockFprog) error {
 	return nil
 }
 
-func getPacketStatistics(fd int, counters *[2]uint32, size *uint32) syscall.Errno {
+func getPacketStatistics(fd int, counters *[3]uint32, size *uint32) syscall.Errno {
 	_, _, errno := syscall.Syscall6(syscall.SYS_GETSOCKOPT, uintptr(fd),
 		syscall.SOL_PACKET, syscall.PACKET_STATISTICS, uintptr(unsafe.Pointer(counters)),
 		uintptr(unsafe.Pointer(size)), 0)

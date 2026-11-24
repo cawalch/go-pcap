@@ -3,6 +3,7 @@
 package pcap
 
 import (
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -260,4 +261,25 @@ func (lc *LiveCapture) statsDelta(fd int) (LiveStats, error) {
 		PacketsReceived: uint64(raw.Recv - uint32(lc.stats.PacketsReceived)),
 		PacketsDropped:  uint64(raw.Drop - uint32(lc.stats.PacketsDropped)),
 	}, nil
+}
+
+// Close closes the underlying live capture descriptor and unblocks any
+// concurrent ReadPacket call.
+func (lc *LiveCapture) Close() error {
+	if lc == nil || lc.file == nil {
+		return nil
+	}
+	lc.statsMu.Lock()
+	if lc.closed {
+		lc.statsMu.Unlock()
+		return nil
+	}
+	lc.closed = true
+	lc.statsMu.Unlock()
+
+	err := lc.file.Close()
+	if errors.Is(err, os.ErrClosed) {
+		return nil
+	}
+	return err
 }

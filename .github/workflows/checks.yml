@@ -48,7 +48,7 @@ jobs:
           for arch in amd64 386; do
             GOARCH="$arch" go test -c -o "$RUNNER_TEMP/live.test" .
             sudo setcap cap_net_raw=ep "$RUNNER_TEMP/live.test"
-            "$RUNNER_TEMP/live.test" -test.v -test.run '^TestLive(StatsLoopback|LinuxQueuedTimestamp|LinuxTruncatedWireLength)$'
+            "$RUNNER_TEMP/live.test" -test.v -test.run '^TestLive(StatsLoopback|Linux.*|CaptureConcurrentCloseUnblocksReadPacket)$'
           done
       - name: Bounded fuzz smoke tests
         if: matrix.go == 'stable'

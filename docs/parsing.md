@@ -1047,12 +1047,15 @@ to evaluate a classic BPF program in memory.
 
 On Linux, `Promiscuous` requests membership for the capture socket until it
 closes. `OriginalLen` retains the wire length when the socket filter or
-`SnapLen` shortens a packet. `TimestampNs` uses the kernel software receive
-timestamp. Linux requests 64-bit seconds and tries the legacy timestamp option
-on older kernels. The kernel can supply a read-time timestamp if the packet
-arrived before software timestamping took effect. When the socket has no usable
-kernel timestamp for the packet, `TimestampNs` uses the userspace wall clock at
-read time.
+`SnapLen` shortens a packet. `TimestampNs` comes from the kernel when it
+captures the packet and uses nanosecond resolution. The receive ring holds at
+least two blocks sized to fit the requested snapshot, so its allocation can
+exceed `BufferSize`. With no explicit `BufferSize`, Linux sizes the ring for
+up to 32 blocks and budgets 4 MiB for the ring and snapshot buffer, unless the
+snapshot length requires more. The kernel publishes partially filled blocks on
+a timer, so sparse traffic can fill the available blocks before it uses their
+full byte capacity. `Immediate` selects a one-millisecond interval, and a
+positive `Timeout` still bounds how long `ReadPacket` waits.
 
 On macOS, `TimestampNs` comes from the kernel BPF packet header and has
 microsecond resolution. `OpenLive` translates the interface's native BPF

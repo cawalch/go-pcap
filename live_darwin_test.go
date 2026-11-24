@@ -5,9 +5,11 @@ package pcap
 import (
 	"bytes"
 	"encoding/binary"
+	"errors"
 	"os"
 	"syscall"
 	"testing"
+	"time"
 )
 
 func TestDarwinBPFLinkType(t *testing.T) {
@@ -75,5 +77,53 @@ func TestLiveDarwinRawLinkType(t *testing.T) {
 	}
 	if fileType := binary.LittleEndian.Uint32(out.Bytes()[20:24]); fileType != 101 {
 		t.Fatalf("classic PCAP link type = %d, want 101", fileType)
+	}
+}
+
+func TestLiveCaptureConcurrentCloseUnblocksReadPacket(t *testing.T) {
+	pair, err := syscall.Socketpair(syscall.AF_UNIX, syscall.SOCK_DGRAM, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = syscall.Close(pair[1]) }()
+	if err := syscall.SetNonblock(pair[0], true); err != nil {
+		_ = syscall.Close(pair[0])
+		t.Fatal(err)
+	}
+	r := os.NewFile(uintptr(pair[0]), "capture-socket")
+
+	lc := &LiveCapture{
+		file:     r,
+		linkType: LinkTypeEthernet,
+		snapLen:  DefaultLiveSnapLen,
+		buf:      make([]byte, 4096),
+	}
+
+	done := make(chan error, 1)
+	go func() {
+		_, _, readErr := lc.ReadPacket()
+		done <- readErr
+	}()
+
+	time.Sleep(10 * time.Millisecond)
+	if err := lc.Close(); err != nil {
+		t.Fatalf("Close() error = %v", err)
+	}
+	// Second Close is idempotent.
+	if err := lc.Close(); err != nil {
+		t.Fatalf("second Close() error = %v", err)
+	}
+	// Stats after Close must return ErrInvalidHeader.
+	if _, err := lc.Stats(); !errors.Is(err, ErrInvalidHeader) {
+		t.Fatalf("Stats() after Close() error = %v, want ErrInvalidHeader", err)
+	}
+
+	select {
+	case readErr := <-done:
+		if readErr == nil {
+			t.Fatal("ReadPacket() succeeded after concurrent Close(), want error")
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("ReadPacket() remained blocked after concurrent Close()")
 	}
 }
