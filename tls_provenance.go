@@ -1,6 +1,9 @@
 package pcap
 
-import "slices"
+import (
+	"encoding/binary"
+	"slices"
+)
 
 const (
 	maxTLSProvenanceRecords = 65_536  // Records inspected across both directions, including control records.
@@ -126,12 +129,67 @@ func (p *tlsRecordMapper) application(start, end, plainStart, n int, early bool)
 	return true
 }
 
+// Read the declared length of the IP datagram carrying TCP. The observed
+// payload end can be earlier than the packet end when a tunnel clips its inner
+// datagram. An outer length anomaly alone need not mean that TCP lost bytes.
+// A negative result marks unknown extent when the layer list is exhausted.
+func truncatedTCPPayload(source ipFrameSource, pkt PacketRecord, frame *Frame) (int64, error) {
+	layers := frame.LayerSlices()
+	if len(layers) == 0 || layers[len(layers)-1].Proto != LayerTCP {
+		return -1, nil
+	}
+	capturedEnd := int64(frame.PayloadOffset) + int64(frame.PayloadLength)
+	for _, layer := range slices.Backward(layers) {
+		off := int64(layer.Offset)
+		lengthOffset, declaredEnd := off+2, off
+		switch layer.Proto {
+		case LayerIPv4:
+		case LayerIPv6:
+			lengthOffset, declaredEnd = off+4, off+40
+		default:
+			continue
+		}
+		if lengthOffset+2 > int64(frame.PayloadOffset) || capturedEnd > pkt.PayloadLength {
+			return 0, ErrOutOfBounds
+		}
+		at := pkt.PayloadOffset + lengthOffset
+		if at < pkt.PayloadOffset {
+			return 0, ErrIntegerOverflow
+		}
+		var length uint16
+		if source.needsPayload != nil {
+			var field [2]byte
+			if err := readExactAt(source.reader, field[:], at, source.capture.fileSize); err != nil {
+				return 0, err
+			}
+			length = binary.BigEndian.Uint16(field[:])
+		} else {
+			var err error
+			length, err = NewSafeReader(source.data).ReadUint16BE(at)
+			if err != nil {
+				return 0, err
+			}
+		}
+		return max(0, declaredEnd+int64(length)-capturedEnd), nil
+	}
+	return -1, nil
+}
+
 // Reassemble the contiguous TCP prefix and recover record provenance for each
 // TLS opening. The source supplies either capture bytes or a ReaderAt.
 func scanTLSProvenance(source ipFrameSource, extraKeyLog []byte) ([]tlsProvenanceStream, error) {
 	keys, err := source.capture.TLSKeyLog(extraKeyLog)
 	if err != nil {
 		return nil, err
+	}
+	if source.needsPayload != nil && source.reader != nil {
+		if window := fileWindow(source.reader, source.capture.fileSize, source.capture.scanReadAhead()); window != nil {
+			defer window.release()
+			source.reader = window
+		}
+		// Count both the stream walk and the opt-in length reads against a
+		// single ReaderAt allowance.
+		source.reader = &scanReadBudget{r: source.reader, remaining: MaxReaderAtScanBytes}
 	}
 	var meta []streamMetadata
 	streams, err := collectStreams(source, 0, &meta, tcpWireAll)

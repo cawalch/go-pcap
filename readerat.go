@@ -367,8 +367,6 @@ func completeFlowPrefix(f *Frame, prefix []byte, captured int64) (complete bool,
 				}
 			}
 		}
-	} else {
-		f.ipMissingBytes = uint16(max(0, end-captured))
 	}
 	f.PayloadLength = uint32(payloadBound - int64(f.PayloadOffset))
 	return true, 0

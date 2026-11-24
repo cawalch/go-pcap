@@ -250,11 +250,14 @@ func TestTLSRecordProvenanceSnaplenRecovery(t *testing.T) {
 		missing uint16
 		reason  tlsStopReason
 		gre     bool
+		ipv6    bool
 	}{
-		{"partial", 100, tlsStopTruncated, false},
-		{"complete", 0, tlsStopEnd, false},
-		{"GRE partial", 100, tlsStopTruncated, true},
-		{"GRE complete", 0, tlsStopEnd, true},
+		{"partial", 100, tlsStopTruncated, false, false},
+		{"complete", 0, tlsStopEnd, false, false},
+		{"GRE partial", 100, tlsStopTruncated, true, false},
+		{"GRE complete", 0, tlsStopEnd, true, false},
+		{"IPv6 partial", 100, tlsStopTruncated, false, true},
+		{"GRE IPv6 complete", 0, tlsStopEnd, true, true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			packets := f.packets(100, "", false, false)
@@ -263,17 +266,29 @@ func TestTLSRecordProvenanceSnaplenRecovery(t *testing.T) {
 			length := binary.BigEndian.Uint16(clipped[ipv4LengthOffset:])
 			binary.BigEndian.PutUint16(clipped[ipv4LengthOffset:], length+tc.missing)
 			packets = slices.Insert(packets, 6, clipped)
-			if tc.gre {
-				for i, packet := range packets {
+			for i, packet := range packets {
+				if tc.ipv6 {
+					header := make([]byte, 54)
+					copy(header[:12], packet[:12])
+					binary.BigEndian.PutUint16(header[12:14], EtherTypeIPv6)
+					header[14], header[20], header[21] = 0x60, IPProtoTCP, 64
+					binary.BigEndian.PutUint16(header[18:20], binary.BigEndian.Uint16(packet[16:18])-20)
+					copy(header[34:38], packet[26:30])
+					copy(header[50:54], packet[30:34])
+					packet = append(header, packet[34:]...)
+				}
+				if tc.gre {
 					// The outer packet declares extra bytes after the inner IP
 					// datagram. Those bytes do not extend the inner TCP stream.
 					outer := make([]byte, 38)
-					copy(outer[:14], packet[:14])
+					copy(outer[:12], packet[:12])
+					binary.BigEndian.PutUint16(outer[12:14], EtherTypeIPv4)
 					outer[14], outer[22], outer[23] = 0x45, 64, IPProtoGRE
 					binary.BigEndian.PutUint16(outer[16:18], uint16(len(packet)-14+24+100))
-					binary.BigEndian.PutUint16(outer[36:38], uint16(EtherTypeIPv4))
-					packets[i] = append(outer, packet[14:]...)
+					copy(outer[36:38], packet[12:14])
+					packet = append(outer, packet[14:]...)
 				}
+				packets[i] = packet
 			}
 			rows := tlsProofScan(t, buildPCAPNGFixture(binary.LittleEndian, f.keys, packets), nil)
 			end := len(f.client) + len(f.first) + len(f.control) + len(f.second)

@@ -59,7 +59,6 @@ type Frame struct {
 	IPID            uint32
 	IPFragOffset    uint16 // Fragment offset in bytes (8-byte units * 8)
 	IPMoreFragments bool
-	ipMissingBytes  uint16 // For TCP, uncaptured bytes declared by the innermost IP header.
 	SrcAddr         netip.Addr
 	DstAddr         netip.Addr
 
@@ -454,7 +453,6 @@ func decodeIPv4(r *SafeReader, offset, bound int64, f *Frame) {
 		ipBound = offset + totalLen
 	} else {
 		f.Anomalies.IPTotalLengthExceedsFrame = true
-		f.ipMissingBytes = uint16(offset + totalLen - bound)
 	}
 
 	ipID := binary.BigEndian.Uint16(ip[4:6])
@@ -510,7 +508,6 @@ func decodeIPv6(r *SafeReader, offset, bound int64, f *Frame) {
 		ipBound = declaredEnd
 	} else {
 		f.Anomalies.IPTotalLengthExceedsFrame = true
-		f.ipMissingBytes = uint16(declaredEnd - bound)
 	}
 
 	resetTransportFields(f)
@@ -692,7 +689,6 @@ func decodeTransport(r *SafeReader, offset, ipBound int64, proto uint8, f *Frame
 					case EtherTypeIPv4, EtherTypeIPv6:
 						f.PayloadOffset = 0
 						f.PayloadLength = 0
-						f.ipMissingBytes = 0
 						f.EtherType = protoType
 						dispatchEtherType(r, innerOff, udpBound, f)
 					}
@@ -802,7 +798,6 @@ func decodeGRE(r *SafeReader, offset, ipBound int64, f *Frame) {
 	case EtherTypeIPv4, EtherTypeIPv6, EtherTypeMPLSUnicast, EtherTypeMPLSMulticast, EtherTypePPPoESession, EtherTypeVLAN, EtherTypeQinQ, EtherTypeQinQLegacy:
 		f.PayloadOffset = 0
 		f.PayloadLength = 0
-		f.ipMissingBytes = 0
 		f.EtherType = protoType
 		dispatchEtherType(r, innerOff, ipBound, f)
 	default:
@@ -818,6 +813,5 @@ func decodeInnerEthernet(r *SafeReader, offset, bound int64, f *Frame) {
 	}
 	f.EtherType = binary.BigEndian.Uint16(r.data[offset+12 : offset+14])
 	f.pushLayer(LayerEthernet, offset, 14)
-	f.ipMissingBytes = 0
 	dispatchEtherType(r, offset+14, bound, f)
 }

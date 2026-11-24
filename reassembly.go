@@ -415,21 +415,25 @@ type tcpWireCapture struct {
 type tcpWireTail struct {
 	fin, declaredEnd    uint32
 	hasFIN, isTruncated bool
+	unknownTruncation   bool
 }
 
-func (wire *tcpWireCapture) observe(dir, segment int, index int, frame *Frame, hasPayload bool, mode tcpWireMode) {
+func (wire *tcpWireCapture) observe(dir, segment int, index int, frame *Frame, hasPayload bool, mode tcpWireMode, missing int64) {
 	if mode == tcpWireAll {
 		tail := &wire.tails[dir]
 		end := frame.TCPSeq + frame.PayloadLength
 		if frame.TCPFlags&TCPFlagSYN != 0 {
 			end++
 		}
-		if frame.ipMissingBytes != 0 {
-			end += uint32(frame.ipMissingBytes)
+		switch {
+		case missing < 0:
+			tail.unknownTruncation = true
+		case missing > 0:
+			end += uint32(missing)
 			if !tail.isTruncated || int32(end-tail.declaredEnd) > 0 {
 				tail.declaredEnd, tail.isTruncated = end, true
 			}
-		} else if frame.TCPFlags&TCPFlagFIN != 0 && !tail.hasFIN {
+		case frame.TCPFlags&TCPFlagFIN != 0 && !tail.hasFIN:
 			tail.fin, tail.hasFIN = end, true
 		}
 	}
@@ -533,7 +537,14 @@ func collectStreams(source ipFrameSource, port uint16, meta *[]streamMetadata, t
 		}
 		*segments = append(*segments, TCPSegmentInput{Seq: frame.TCPSeq, Flags: frame.TCPFlags, Payload: l4})
 		if trackWire != tcpWireNone {
-			wire[active.slot-1].observe(dir, len(*segments)-1, pkt.Index, &frame, len(l4) != 0, trackWire)
+			var missing int64
+			if trackWire == tcpWireAll && frame.Anomalies.IPTotalLengthExceedsFrame {
+				missing, err = truncatedTCPPayload(source, pkt, &frame)
+				if err != nil {
+					return err
+				}
+			}
+			wire[active.slot-1].observe(dir, len(*segments)-1, pkt.Index, &frame, len(l4) != 0, trackWire, missing)
 		}
 		return nil
 	})
@@ -585,7 +596,7 @@ func collectStreams(source ipFrameSource, port uint16, meta *[]streamMetadata, t
 				d := &info.wire[dir]
 				tail := &wire[i].tails[dir]
 				end := d.seq + uint32(prefix)
-				d.truncated = tail.isTruncated && int32(tail.declaredEnd-end) > 0
+				d.truncated = tail.unknownTruncation || tail.isTruncated && int32(tail.declaredEnd-end) > 0
 				d.gapBeforeFIN = tail.hasFIN && int32(tail.fin-end) > 0
 			}
 			if dir == 0 {
