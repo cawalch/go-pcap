@@ -397,8 +397,8 @@ increment `ServerPackets` and `ServerBytes`. For TCP flows, `Flows` records:
   handshake completed in capture order. The SYN sender defines the client
   for these samples. If no handshake completes, `ServerJA4L` uses the first
   matching SYN and SYN-ACK pair. Matching retransmissions keep the first
-  timestamp, and a reset clears the pending opening. Both flow readers use
-  the same selection. With `SeparateTCPInterfaces` enabled, packets must
+  timestamp, and a matching reset clears the pending opening. Both flow readers
+  use the same selection. With `SeparateTCPInterfaces` enabled, packets must
   match on the same interface. The scan limits pending interface-specific
   handshakes to `MaxFlows`.
 - First-seen process attribution (`ProcessID`, `UserID`, `ProcessName`,

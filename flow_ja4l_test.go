@@ -31,6 +31,19 @@ func TestFlowJA4LMatchesTCPHandshake(t *testing.T) {
 			"2000_64", "1000_64",
 		},
 		{
+			"delayed reset for previous opening",
+			[]tcpCapturePacket{{0, 1, syn(100)}, {0, 4, syn(500)}, {0, 5, rst},
+				{0, 6, synAck(700, 501)}, {0, 10, ack(501, 701)}},
+			"2000_64", "1000_64",
+		},
+		{
+			"client reset clears matched opening",
+			[]tcpCapturePacket{{0, 1, syn(100)}, {0, 3, synAck(200, 101)},
+				{0, 4, tcpInterfaceFrame(101, 201, TCPFlagRST|TCPFlagACK, false, "")},
+				{0, 10, syn(100)}, {0, 16, synAck(500, 101)}, {0, 20, ack(101, 501)}},
+			"2000_64", "3000_64",
+		},
+		{
 			"retransmissions retain first timestamps",
 			[]tcpCapturePacket{{0, 1, syn(100)}, {0, 3, syn(100)}, {0, 7, synAck(200, 101)},
 				{0, 9, synAck(200, 101)}, {0, 11, ack(101, 201)}},

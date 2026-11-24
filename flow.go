@@ -210,10 +210,24 @@ func (hs *tcpHandshakeTime) observe(flow *FlowSummary, frame *Frame, canonical b
 			}
 			flow.ClientJA4L = JA4L(timestamp-hs.synAckNs, frame.TTL)
 		}
-	default:
-		if flags&TCPFlagRST != 0 {
-			*hs = tcpHandshakeTime{}
+	case TCPFlagRST, TCPFlagRST | TCPFlagACK:
+		if !hs.hasSYN {
+			return
 		}
+		hasAck := flags&TCPFlagACK != 0
+		if canonical == hs.clientCanonical {
+			if frame.TCPSeq-hs.synNext > hs.synPayload ||
+				hs.hasSYNACK && hasAck && frame.TCPAck-hs.synAckNext > hs.synAckPayload {
+				return
+			}
+		} else if hasAck {
+			if frame.TCPAck-hs.synNext > hs.synPayload {
+				return
+			}
+		} else if !hs.hasSYNACK || frame.TCPSeq-hs.synAckNext > hs.synAckPayload {
+			return
+		}
+		*hs = tcpHandshakeTime{}
 	}
 }
 
