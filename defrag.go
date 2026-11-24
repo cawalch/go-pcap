@@ -276,11 +276,9 @@ func (a *ipFragAccumulator) removeGroup(g *ipFragGroup) {
 	delete(a.groups, g.key)
 }
 
-// addUDPFragment returns nil until it recovers a UDP datagram. On success it
-// sets the frame's transport protocol and ports from the reassembled datagram.
-func (a *ipFragAccumulator) addUDPFragment(frame *Frame, fragBytes []byte) []byte {
+func (a *ipFragAccumulator) addUDPFragment(frame *Frame, fragBytes []byte) (udpPayload []byte, srcPort, dstPort uint16, ok bool) {
 	if frame.PayloadLength == 0 && frame.IPVersion != 6 {
-		return nil
+		return nil, 0, 0, false
 	}
 	if a.groups == nil {
 		a.groups = make(map[ipFragKey]*ipFragGroup)
@@ -307,13 +305,13 @@ func (a *ipFragAccumulator) addUDPFragment(frame *Frame, fragBytes []byte) []byt
 		a.pushBack(g)
 	}
 	if g.done || len(g.frags) >= MaxFragmentsPerGroup {
-		return nil
+		return nil, 0, 0, false
 	}
 
 	if frame.IPVersion == 6 && (frame.Anomalies.TruncatedLayer || frame.Anomalies.IPv6ExtLimitExceeded) {
 		g.done = true
 		g.frags = nil
-		return nil
+		return nil, 0, 0, false
 	}
 	g.frags = append(g.frags, IPFragmentInput{
 		SrcAddr:        frame.SrcAddr,
@@ -332,7 +330,7 @@ func (a *ipFragAccumulator) addUDPFragment(frame *Frame, fragBytes []byte) []byt
 		g.hasTerminal = true
 	}
 	if !g.hasZero || !g.hasTerminal {
-		return nil
+		return nil, 0, 0, false
 	}
 
 	reassembled, anomalies, err := DefragmentIP(g.frags)
@@ -341,22 +339,21 @@ func (a *ipFragAccumulator) addUDPFragment(frame *Frame, fragBytes []byte) []byt
 		g.frags = nil
 	}
 	if err != nil || anomalies.TruncatedLayer || anomalies.IPv6ExtLimitExceeded || len(reassembled) < 8 {
-		return nil
+		return nil, 0, 0, false
 	}
 	a.removeGroup(g)
 	if frame.IPVersion == 6 && postFragmentExtension(g.zeroProtocol) {
 		var proto uint8
 		proto, reassembled = ipv6FragmentTransport(g.zeroProtocol, reassembled, 1, &anomalies)
 		if proto != IPProtoUDP || len(reassembled) < 8 {
-			return nil
+			return nil, 0, 0, false
 		}
 	}
 	length := int(binary.BigEndian.Uint16(reassembled[4:6]))
 	if length < 8 || length > len(reassembled) {
-		return nil
+		return nil, 0, 0, false
 	}
-	frame.IPProtocol = IPProtoUDP
-	frame.SrcPort = binary.BigEndian.Uint16(reassembled[0:2])
-	frame.DstPort = binary.BigEndian.Uint16(reassembled[2:4])
-	return reassembled[8:length]
+	srcPort = binary.BigEndian.Uint16(reassembled[0:2])
+	dstPort = binary.BigEndian.Uint16(reassembled[2:4])
+	return reassembled[8:length], srcPort, dstPort, true
 }

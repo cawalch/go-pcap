@@ -130,13 +130,13 @@ func NewFromReaderAt(r io.ReaderAt, size int64) (*Capture, error) {
 	magic := binary.LittleEndian.Uint32(magicBuf[:])
 	switch magic {
 	case PCAPMagicMicroLE:
-		return parseClassicPCAP(nil, r, size, binary.LittleEndian, false)
+		return parseClassicPCAPFromReaderAt(r, size, binary.LittleEndian, false)
 	case PCAPMagicMicroBE:
-		return parseClassicPCAP(nil, r, size, binary.BigEndian, false)
+		return parseClassicPCAPFromReaderAt(r, size, binary.BigEndian, false)
 	case PCAPMagicNanoLE:
-		return parseClassicPCAP(nil, r, size, binary.LittleEndian, true)
+		return parseClassicPCAPFromReaderAt(r, size, binary.LittleEndian, true)
 	case PCAPMagicNanoBE:
-		return parseClassicPCAP(nil, r, size, binary.BigEndian, true)
+		return parseClassicPCAPFromReaderAt(r, size, binary.BigEndian, true)
 	case PCAPNGSectionHeaderMagic:
 		return parsePCAPNGFromReaderAt(r, size)
 	default:
@@ -596,6 +596,48 @@ func readExactAt(r io.ReaderAt, buf []byte, offset, totalSize int64) error {
 		return err
 	}
 	return ErrOutOfBounds
+}
+
+func parseClassicPCAPFromReaderAt(r io.ReaderAt, size int64, order binary.ByteOrder, nano bool) (*Capture, error) {
+	if size < pcapGlobalHeaderSize {
+		return nil, fmt.Errorf("%w: classic PCAP header shorter than %d bytes", ErrInvalidHeader, pcapGlobalHeaderSize)
+	}
+	var hdr [pcapGlobalHeaderSize]byte
+	if err := readExactAt(r, hdr[:], 0, size); err != nil {
+		return nil, err
+	}
+	vMajor := order.Uint16(hdr[4:6])
+	vMinor := order.Uint16(hdr[6:8])
+	if vMajor != 2 || vMinor != 4 {
+		return nil, fmt.Errorf("%w: unsupported PCAP version %d.%d", ErrInvalidHeader, vMajor, vMinor)
+	}
+	snapLen := order.Uint32(hdr[16:20])
+	if snapLen > MaxSnapLen {
+		return nil, fmt.Errorf("%w: snaplen %d exceeds %d", ErrInvalidHeader, snapLen, MaxSnapLen)
+	}
+	linkType := LinkType(order.Uint32(hdr[20:24]) & 0xffff)
+
+	meta, err := scanClassicPCAPReaderAt(r, size, snapLen, linkType, order, nano, nil)
+	if err != nil {
+		return nil, err
+	}
+	if !isKnownLinkType(linkType) {
+		meta.anomalies.UnknownLinkType = true
+	}
+	return &Capture{
+		Format:         FormatPCAP,
+		BigEndian:      order == binary.BigEndian,
+		NanoTimestamp:  nano,
+		VersionMajor:   vMajor,
+		VersionMinor:   vMinor,
+		SnapLen:        snapLen,
+		LinkType:       linkType,
+		Interfaces:     []InterfaceDescriptor{classicInterface(linkType, snapLen, nano)},
+		PacketCount:    meta.packetCount,
+		fileSize:       size,
+		declaredExtent: meta.declaredExtent,
+		anomalies:      meta.anomalies,
+	}, nil
 }
 
 func scanClassicPCAPReaderAt(

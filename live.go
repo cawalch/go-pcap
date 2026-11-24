@@ -89,8 +89,7 @@ func BPFWordAlign(n int) int {
 // index directly into buf.
 func ParseBPFBuffer(buf []byte, linkType LinkType) ([]PacketRecord, error) {
 	var records []PacketRecord
-	for offset := 0; len(buf)-offset >= 18; {
-		batch := buf[offset:]
+	for batch := buf; len(batch) >= 18; {
 		tvSec := binary.LittleEndian.Uint32(batch[:4])
 		tvUsec := binary.LittleEndian.Uint32(batch[4:8])
 		capLen := binary.LittleEndian.Uint32(batch[8:12])
@@ -104,20 +103,16 @@ func ParseBPFBuffer(buf []byte, linkType LinkType) ([]PacketRecord, error) {
 		if recordLen > len(batch) {
 			return nil, fmt.Errorf("%w: BPF packet payload exceeds buffer", ErrInvalidPacket)
 		}
-		records = append(records, PacketRecord{
-			Index:         len(records),
-			LinkType:      linkType,
-			TimestampNs:   int64(tvSec)*1_000_000_000 + int64(tvUsec)*1_000,
-			CaptureLen:    capLen,
-			OriginalLen:   origLen,
-			PayloadOffset: int64(offset + hdrLen),
-			PayloadLength: int64(capLen),
-		})
-		step := BPFWordAlign(recordLen)
-		if step > len(batch) { // The final record may omit alignment padding.
-			break
-		}
-		offset += step
+		records = append(records, PacketRecord{})
+		rec := &records[len(records)-1]
+		rec.Index = len(records) - 1
+		rec.LinkType = linkType
+		rec.TimestampNs = int64(tvSec)*1_000_000_000 + int64(tvUsec)*1_000
+		rec.CaptureLen, rec.OriginalLen = capLen, origLen
+		rec.PayloadOffset = int64(len(buf) - len(batch) + hdrLen)
+		rec.PayloadLength = int64(capLen)
+		// The final record may omit alignment padding.
+		batch = batch[min(BPFWordAlign(recordLen), len(batch)):]
 	}
 	return records, nil
 }

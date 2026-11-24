@@ -221,7 +221,7 @@ func DecompressCapture(data []byte) ([]byte, error) {
 // The returned [Capture] owns its metadata, interface strings, and DSB secret
 // copies and retains no reference to data.
 func New(data []byte) (*Capture, error) {
-	return NewWithLength(data, int64(len(data)))
+	return parseCapture(data, int64(len(data)))
 }
 
 var (
@@ -249,19 +249,27 @@ func NewWithLength(data []byte, fileSize int64) (*Capture, error) {
 	if fileSize < int64(len(data)) {
 		return nil, fmt.Errorf("%w: input length %d is smaller than buffer length %d", ErrInvalidHeader, fileSize, len(data))
 	}
+	return parseCapture(data, fileSize)
+}
+
+func parseCapture(data []byte, fileSize int64) (*Capture, error) {
 	if len(data) < 4 {
 		return nil, errNotPCAPOutOfBounds
 	}
 	magic := binary.LittleEndian.Uint32(data[:4])
 	switch magic {
 	case PCAPMagicMicroLE:
-		return parseClassicPCAP(data, nil, fileSize, binary.LittleEndian, false)
+		r := SafeReader{data: data, size: int64(len(data))}
+		return parseClassicPCAP(&r, fileSize, binary.LittleEndian, false)
 	case PCAPMagicMicroBE:
-		return parseClassicPCAP(data, nil, fileSize, binary.BigEndian, false)
+		r := SafeReader{data: data, size: int64(len(data))}
+		return parseClassicPCAP(&r, fileSize, binary.BigEndian, false)
 	case PCAPMagicNanoLE:
-		return parseClassicPCAP(data, nil, fileSize, binary.LittleEndian, true)
+		r := SafeReader{data: data, size: int64(len(data))}
+		return parseClassicPCAP(&r, fileSize, binary.LittleEndian, true)
 	case PCAPMagicNanoBE:
-		return parseClassicPCAP(data, nil, fileSize, binary.BigEndian, true)
+		r := SafeReader{data: data, size: int64(len(data))}
+		return parseClassicPCAP(&r, fileSize, binary.BigEndian, true)
 	case PCAPNGSectionHeaderMagic:
 		r := SafeReader{data: data, size: int64(len(data))}
 		return parsePCAPNG(&r, fileSize)
@@ -429,46 +437,30 @@ func isKnownLinkType(lt LinkType) bool {
 	}
 }
 
-func parseClassicPCAP(data []byte, r io.ReaderAt, fileSize int64, order binary.ByteOrder, nano bool) (*Capture, error) {
-	size := fileSize
-	if r == nil {
-		size = int64(len(data))
-	}
-	if size < pcapGlobalHeaderSize {
+func parseClassicPCAP(r *SafeReader, fileSize int64, order binary.ByteOrder, nano bool) (*Capture, error) {
+	if r.Size() < pcapGlobalHeaderSize {
 		return nil, fmt.Errorf("%w: classic PCAP header shorter than %d bytes", ErrInvalidHeader, pcapGlobalHeaderSize)
 	}
-	var header []byte
-	if r == nil {
-		header = data[:pcapGlobalHeaderSize]
-	} else {
-		header = make([]byte, pcapGlobalHeaderSize)
-		if err := readExactAt(r, header, 0, size); err != nil {
-			return nil, err
-		}
-	}
-	vMajor, vMinor := order.Uint16(header[4:6]), order.Uint16(header[6:8])
+	vMajor, _ := r.ReadUint16Order(4, order)
+	vMinor, _ := r.ReadUint16Order(6, order)
 	if vMajor != 2 || vMinor != 4 {
 		return nil, fmt.Errorf("%w: unsupported PCAP version %d.%d", ErrInvalidHeader, vMajor, vMinor)
 	}
-	snapLen := order.Uint32(header[16:20])
+	snapLen, _ := r.ReadUint32Order(16, order)
 	if snapLen > MaxSnapLen {
 		return nil, fmt.Errorf("%w: snaplen %d exceeds %d", ErrInvalidHeader, snapLen, MaxSnapLen)
 	}
-	linkType := LinkType(order.Uint32(header[20:24]) & 0xffff)
-	var meta scanSummary
-	var err error
-	if r == nil {
-		sr := SafeReader{data: data, size: size}
-		meta, _, err = scanClassicPCAPPackets(&sr, snapLen, linkType, order, nano, false, 0, nil)
-	} else {
-		meta, err = scanClassicPCAPReaderAt(r, size, snapLen, linkType, order, nano, nil)
-	}
+	rawLinkType, _ := r.ReadUint32Order(20, order)
+	linkType := LinkType(rawLinkType & 0xffff)
+
+	meta, _, err := scanClassicPCAPPackets(r, snapLen, linkType, order, nano, false, 0, nil)
 	if err != nil {
 		return nil, err
 	}
 	if !isKnownLinkType(linkType) {
 		meta.anomalies.UnknownLinkType = true
 	}
+
 	return &Capture{
 		Format:         FormatPCAP,
 		BigEndian:      order == binary.BigEndian,
@@ -477,9 +469,9 @@ func parseClassicPCAP(data []byte, r io.ReaderAt, fileSize int64, order binary.B
 		VersionMinor:   vMinor,
 		SnapLen:        snapLen,
 		LinkType:       linkType,
-		fileSize:       fileSize,
 		Interfaces:     []InterfaceDescriptor{classicInterface(linkType, snapLen, nano)},
 		PacketCount:    meta.packetCount,
+		fileSize:       fileSize,
 		declaredExtent: meta.declaredExtent,
 		anomalies:      meta.anomalies,
 	}, nil
