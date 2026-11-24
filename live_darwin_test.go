@@ -20,6 +20,7 @@ func TestDarwinBPFLinkType(t *testing.T) {
 		syscall.DLT_IEEE802_11_RADIO: LinkTypeIEEE80211RadioTap,
 		228:                          LinkTypeIPv4,
 		229:                          LinkTypeIPv6,
+		276:                          LinkTypeLinuxSLL2,
 	} {
 		if got, err := darwinBPFLinkType(native); err != nil || got != want {
 			t.Errorf("Darwin DLT %d = (%d, %v), want %d", native, got, err, want)

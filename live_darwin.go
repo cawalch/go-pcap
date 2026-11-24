@@ -161,8 +161,8 @@ func OpenLive(ifaceName string, opts LiveOptions) (*LiveCapture, error) {
 }
 
 func darwinBPFLinkType(dlt uint32) (LinkType, error) {
-	// DLT_IPV4 and DLT_IPV6 from Darwin's net/bpf.h are absent from syscall.
-	const dltIPv4, dltIPv6 = 228, 229
+	// These Darwin SDK DLT constants are absent from syscall.
+	const dltIPv4, dltIPv6, dltLinuxSLL2 = 228, 229, 276
 	switch dlt {
 	case syscall.DLT_NULL:
 		return LinkTypeNull, nil
@@ -174,6 +174,8 @@ func darwinBPFLinkType(dlt uint32) (LinkType, error) {
 		return LinkTypeIEEE80211, nil
 	case syscall.DLT_LINUX_SLL:
 		return LinkTypeLinuxSLL, nil
+	case dltLinuxSLL2:
+		return LinkTypeLinuxSLL2, nil
 	case syscall.DLT_IEEE802_11_RADIO:
 		return LinkTypeIEEE80211RadioTap, nil
 	case dltIPv4:
