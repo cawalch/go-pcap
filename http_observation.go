@@ -85,7 +85,7 @@ func scanHTTPRequests(source ipFrameSource) ([]HTTPRequestObservation, error) {
 		if bytes.HasPrefix(data, HTTP2ClientPreface) {
 			_, err := readHTTP2Frames(data, &headerBudget, false, func(off int, id uint32, h HTTP2HeaderBlock) error {
 				return add(off, id, h.Method, h.Authority, h.Path)
-			})
+			}, nil)
 			return err
 		}
 		for off := 0; off < len(data); {

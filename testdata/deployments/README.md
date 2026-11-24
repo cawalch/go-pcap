@@ -151,3 +151,35 @@ tshark -2 -n -r http1-transactions.pcapng -T fields \
   20 follows a TCP sequence gap with two pending requests. TShark links it
   to `/after-gap`. The Go tests expect ambiguous pairing because the gap
   hides response framing.
+
+## HTTP/2 frame fixture
+
+`http2-frames.pcapng` contains 10 Ethernet frames with one prior-knowledge
+cleartext HTTP/2 connection. TShark 4.6.10 (commit `eac916f07299`) produces
+the following frame numbers, HTTP/2 types, stream IDs, and flags. Run the
+command from the repository root.
+
+```sh
+tshark -n -d tcp.port==80,http2 -r testdata/deployments/http2-frames.pcapng \
+  -Y http2.type -T fields -e frame.number -e http2.type -e http2.streamid -e http2.flags
+```
+
+```text
+4	4	0	0x00
+5	4,4	0,0	0x00,0x01
+6	4,1	0,1	0x01,0x04
+7	1	3	0x01
+8	9,0	3,1	0x04,0x09
+9	1,1	3,1	0x05,0x04
+10	0	1	0x01
+```
+
+The client sends stream 1's POST headers before stream 3's GET headers, then
+ends stream 1 with the padded DATA in frame 8. Its unpadded bytes are `pcap`.
+Stream 3 reuses stream 1's indexed `:authority`. The HEADERS in frame 7
+carries END_STREAM. Its header block ends with END_HEADERS on the
+CONTINUATION in frame 8. The server ends stream 3 with a 204 in frame 9
+and stream 1 with the DATA `ok` in frame 10.
+
+The [Go tests](../../http2_frame_test.go) check directional frame and DATA
+offsets, decoded headers, and stream completion without invoking TShark.
