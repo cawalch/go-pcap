@@ -307,10 +307,11 @@ def http2_transactions():
     # Incremental indexing inserts :authority on stream 1. Stream 3 indexes it.
     first = b"\x83\x86\x04\x04/one\x41\x0dtrace.example\x00\x05x-tag\x01a\x00\x05x-tag\x01b"
     second = b"\x83\x86\x04\x04/two\xbe"
+    other = TCP("192.0.2.27", "198.51.100.91", 50001, 3000, 4000)
     frames = [
         conn.send(False, SYN),
         conn.send(True, SYN | ACK),
-        conn.send(False, ACK),
+        other.send(False, data, b"unrelated connection"),
         conn.send(False, data, preface + h2(4, 0, 0)),
         conn.send(True, data, h2(4, 0, 0) + h2(4, 1, 0)),
         conn.send(False, data, h2(4, 1, 0)),
@@ -323,7 +324,11 @@ def http2_transactions():
         conn.send(True, data, h2(1, 4, 1, b"\x88") + h2(0, 0, 1, b"one")),
         conn.send(True, data, h2(1, 5, 1, b"\x00\x05x-end\x02ok")),
     ]
-    write_pcapng("http2-transactions", ["http-client"], [(0, pkt, None, b"") for pkt in frames])
+    packets = [(0 if i == 2 else 1, pkt, None, option(1, b"shared headers") if i == 6 else b"")
+               for i, pkt in enumerate(frames)]
+    secret = b"# synthetic secret marker\n"
+    dsb = block(10, pack("<2I", 0x544c534b, len(secret)) + pad(secret))
+    write_pcapng("http2-transactions", ["unrelated", "http-client"], packets, extra_blocks=dsb)
 
 
 def darwin_pktap():

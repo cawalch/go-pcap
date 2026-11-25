@@ -949,6 +949,45 @@ Run the selection example from the repository root.
 go test -run '^ExampleCapture_HTTP2Transactions$' .
 ```
 
+### Export a cleartext HTTP/2 transaction
+
+Pass the selected row's `ID()` to `ExtractHTTP2TransactionPCAPNG` or
+`ExtractHTTP2TransactionPCAPNGFromReaderAt` with the unchanged source.
+For an exchange that ends cleanly in both directions, the export includes
+the opening SYNs and the contiguous TCP prefix in each direction through
+the selected packets. These prefixes contain the preface, SETTINGS and
+HPACK history, including table entries created on other streams. A single
+packet can also carry several streams. `SharedPackets` describes sharing
+within the contributing packets. Additional context packets can contain
+other streams even when `SharedPackets` is false.
+
+To preserve incomplete, reset or anomalous evidence, the export can include
+all observed payload and opening, close and reset packets from the selected
+TCP opening. Later frames on that opening can therefore appear in the subset.
+The packet-only writer preserves the original packet bytes, capture order,
+timestamps, lengths and interface/FCS semantics. It omits source comments
+and decryption secrets.
+
+Open the subset with `New` or `NewFromReaderAt` and find the target by its
+stream ID within the single exported opening. The request endpoints, timestamp
+and TCP payload offset also survive. Capture packet ordinals and flow indices
+can change. Use the reopened row's ID for subsequent selection in the subset.
+
+An absent or invalid ID returns `ErrOutOfBounds` before the first write.
+TCP openings on the same tuple share a reassembly limit. When isolating the
+opening changes a truncated prefix, the exporter checks the selected row
+again. It can also try the whole packets supplying the original prefix if
+the cutoff falls between packets. If neither selection reproduces the
+evidence, it returns `ErrReassemblyLimit` before the first write. The ReaderAt method
+shares one `MaxReaderAtScanBytes` budget across selection, framing and copying.
+A read or write failure during output can leave a partial PcapNG file.
+
+Run the example that exports stream 3 and reads its response from the subset.
+
+```sh
+go test -run '^ExampleCapture_ExtractHTTP2TransactionPCAPNG$' .
+```
+
 ### Select and export a cleartext HTTP/1 transaction
 
 Use `HTTP1Transactions` or `HTTP1TransactionsFromReaderAt` to list requests.
