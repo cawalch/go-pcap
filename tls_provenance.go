@@ -38,8 +38,10 @@ type tlsApplicationRecord struct {
 }
 
 type tlsDirectionProvenance struct {
-	records     []tlsApplicationRecord
-	closeNotify *tlsApplicationRecord
+	records        []tlsApplicationRecord
+	closeNotify    *tlsApplicationRecord
+	sharedLimit    bool // An earlier opening consumed part of the exhausted TLS budget.
+	limitRecordEnd int  // End of next record if its header is available at a limit.
 	// A later TLS 1.3 application epoch can authenticate independently after
 	// opaque records. Its logical offsets start at zero in the recovered bytes.
 	before tlsProvenanceBoundary
@@ -60,34 +62,41 @@ type tlsProvenanceBudget struct {
 
 type tlsRecordMapper struct {
 	tlsDirectionProvenance
-	budget       *tlsProvenanceBudget
-	spans        []tcpWireSpan
-	spanIndex    int
-	prefix       int
-	inputStop    tlsStopReason
-	earlyOffered bool
+	budget        *tlsProvenanceBudget
+	openingBudget tlsProvenanceBudget
+	spans         []tcpWireSpan
+	spanIndex     int
+	prefix        int
+	inputStop     tlsStopReason
+	earlyOffered  bool
 }
 
 func (p *tlsRecordMapper) stopAt(offset int, reason tlsStopReason) {
 	p.stop = tlsProvenanceBoundary{p.prefix + offset, reason}
 }
 
-func (p *tlsRecordMapper) finish(offset, size int) {
+func (p *tlsRecordMapper) finish(offset int, stream []byte) {
 	if p.before.reason != tlsStopEnd && len(p.records) == 0 {
 		p.stop, p.before = p.before, tlsProvenanceBoundary{}
 	}
-	if p.stop.reason != tlsStopEnd {
-		return
+	if p.stop.reason == tlsStopEnd {
+		reason := p.inputStop
+		if offset != len(stream) && reason == tlsStopEnd {
+			reason = tlsStopTruncated
+		}
+		p.stopAt(offset, reason)
 	}
-	reason := p.inputStop
-	if offset != size && reason == tlsStopEnd {
-		reason = tlsStopTruncated
+	if p.stop.reason == tlsStopLimit {
+		start := p.stop.wireOffset - p.prefix
+		if len(stream)-start >= 5 {
+			p.limitRecordEnd = p.stop.wireOffset + 5 + int(binary.BigEndian.Uint16(stream[start+3:start+5]))
+		}
 	}
-	p.stopAt(offset, reason)
 }
 
 func (p *tlsRecordMapper) inspect(offset int) bool {
 	if p.budget.records == 0 {
+		p.sharedLimit = p.openingBudget.records < maxTLSProvenanceRecords
 		p.stopAt(offset, tlsStopLimit)
 		return false
 	}
@@ -119,6 +128,7 @@ func (p *tlsRecordMapper) mapRecord(start, end, plainStart, n int, early bool) (
 	last := p.spanIndex
 	for ; ; last++ {
 		if last-p.spanIndex >= p.budget.ranges {
+			p.sharedLimit = p.openingBudget.ranges < maxTLSProvenanceRanges
 			p.stopAt(start, tlsStopLimit)
 			return tlsApplicationRecord{}, false
 		}
@@ -240,8 +250,8 @@ func scanTLSProvenance(source ipFrameSource, extraKeyLog []byte) ([]tlsProvenanc
 	for i, wire := range streams {
 		info := &meta[i]
 		dirs := [2]tlsRecordMapper{
-			{budget: &budget, spans: info.wire[0].spans},
-			{budget: &budget, spans: info.wire[1].spans},
+			{budget: &budget, openingBudget: budget, spans: info.wire[0].spans},
+			{budget: &budget, openingBudget: budget, spans: info.wire[1].spans},
 		}
 		for j, anomalies := range [2]StreamAnomalies{wire.Client.Anomalies, wire.Server.Anomalies} {
 			if anomalies.Truncated {

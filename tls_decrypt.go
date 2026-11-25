@@ -228,7 +228,7 @@ func decryptTLS13Records(stream []byte, cipherSuite uint16, handshakeSecret, app
 			if err != nil {
 				provenance.stopAt(offset, tlsStopUnsupported)
 			}
-			provenance.finish(offset, len(stream))
+			provenance.finish(offset, stream)
 		}()
 	}
 	var earlyAEAD cipher.AEAD
@@ -551,7 +551,7 @@ func decryptTLS12Records(stream []byte, cipherSuite uint16, masterSecret []byte,
 			if err != nil {
 				provenance.stopAt(offset, tlsStopUnsupported)
 			}
-			provenance.finish(offset, len(stream))
+			provenance.finish(offset, stream)
 		}()
 	}
 	var aead cipher.AEAD

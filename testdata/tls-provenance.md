@@ -105,3 +105,47 @@ Both requests start in the record carried by packet index 5. Their offsets
 inside the plaintext record are 0 and 46. The 103 and final 204 share packet
 index 6. The 201 response spans three records in packets 7, 8–9, and 10. Its
 body is `reply`.
+
+## Packet-only export across a TLS 1.3 KeyUpdate
+
+`keyed-http1-export.pcapng` has two pipelined GET requests, a server KeyUpdate
+between the first final response and the second response, a third request
+after the selected response, and unrelated TCP and UDP packets. Its test
+traffic keys are embedded in a Decryption Secrets Block. The source has
+two interfaces, a marked packet comment and capture metadata.
+`TestExtractKeyedHTTP1Epoch` reconstructs the fixture, checks the exact
+exported packets and options, and reopens the export with its separate keys.
+
+Reproduce the export from the repository root with TShark and Editcap 4.6.10
+(commit `eac916f07299`). Use a fresh Wireshark profile.
+
+```sh
+proofdir=$(mktemp -d)
+mkdir "$proofdir/profile"
+export WIRESHARK_CONFIG_DIR="$proofdir/profile"
+unset SSLKEYLOGFILE
+source_capture=testdata/keyed-http1-export.pcapng
+selected="$proofdir/selected.pcapng"
+go run ./examples/keyed-http1-export "$source_capture" /second > "$selected"
+editcap --extract-secrets "$source_capture" "$proofdir/test.keys"
+for capture in "$source_capture" "$selected"; do
+  tshark -n -o "tls.keylog_file:$proofdir/test.keys" -r "$capture" -Y http.request \
+    -T fields -e frame.number -e http.request.method -e http.request.uri
+  tshark -n -o "tls.keylog_file:$proofdir/test.keys" -r "$capture" -Y http.response \
+    -T fields -e frame.number -e http.response.code -e http.file_data
+  tshark -n -o "tls.keylog_file:$proofdir/test.keys" -r "$capture" -Y 'tls.handshake.type == 24' \
+    -T fields -e frame.number -e tls.handshake.type
+done
+tshark -n -o tls.keylog_file: -r "$selected" -Y http -T fields -e frame.number
+```
+
+| Evidence | Source frame and values | Exported frame and values |
+| --- | --- | --- |
+| Pipelined requests | 7, GET `/first` and GET `/second` | 6, GET `/first` and GET `/second` |
+| Informational and first final response | 8, 103 and 204 | 7, 103 and 204 |
+| Server KeyUpdate | 9, handshake type 24 | 8, handshake type 24 |
+| Second final response | 13, 201 and body `7265706c79` | 11, 201 and body `7265706c79` |
+| Later request | 14, GET `/later` | Absent |
+
+The final command emits zero HTTP frames. The second response body decodes to
+`reply` with the separate test key log.

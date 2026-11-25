@@ -397,6 +397,7 @@ type tcpWireDirection struct {
 	seq                     uint32 // Sequence number of byte zero in the contiguous prefix.
 	spans                   []tcpWireSpan
 	truncated, gapBeforeFIN bool
+	sharedLimit             bool // Earlier openings reduced this direction's reassembly allowance.
 }
 
 type tcpWireMode uint8
@@ -631,9 +632,13 @@ func collectStreams(source ipFrameSource, port uint16, meta *[]streamMetadata, t
 					}
 				}
 			}
+			reduced := state.budget.bytes[side] != 0 || remaining < MaxFlowStreamBytes
 			buf, err := state.budget.reassemble(side, segments, &remaining, written)
 			if err != nil {
 				return nil, err
+			}
+			if trackWire == tcpWireAll {
+				info.wire[dir].sharedLimit = buf.Anomalies.Truncated && reduced
 			}
 			if trackWire == tcpWireAll && prefix > 0 {
 				d := &info.wire[dir]

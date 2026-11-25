@@ -145,6 +145,10 @@ func scanKeyedHTTP1(source ipFrameSource, keys []byte) ([]KeyedHTTP1Transaction,
 	if err != nil {
 		return nil, err
 	}
+	return keyedHTTP1Transactions(streams)
+}
+
+func keyedHTTP1Transactions(streams []tlsProvenanceStream) ([]KeyedHTTP1Transaction, error) {
 	var rows []KeyedHTTP1Transaction
 	budget := newHTTP1EvidenceBudget()
 	remaining := maxTLSProvenanceRanges
