@@ -9,6 +9,7 @@ import (
 	"crypto/sha256"
 	"encoding/binary"
 	"fmt"
+	"math"
 	"net/netip"
 	"slices"
 	"strings"
@@ -393,9 +394,14 @@ func reassembleQUICCryptoChunks(chunks []quicCryptoChunk) ([]byte, bool) {
 	return buf.Bytes(), gap
 }
 
+// The 16-bit UDP length includes its eight-byte header.
+const maxQUICUDPPayloadBytes = math.MaxUint16 - 8
+
 // DecryptQUICInitial decrypts one or more client QUIC v1/v2 Initial UDP
 // datagrams belonging to the same connection, reassembles their CRYPTO frames,
 // and parses the embedded TLS 1.3 ClientHello and 'q13...' JA4 fingerprint.
+// It returns [ErrQUICLimit] if the input contains more than
+// [MaxQUICPacketsPerFlow] datagrams or any UDP payload exceeds 65,527 bytes.
 func DecryptQUICInitial(datagrams [][]byte) (QUICHandshake, error) {
 	return decryptQUICInitial(datagrams, nil, true)
 }
@@ -406,6 +412,11 @@ func decryptQUICInitial(datagrams [][]byte, observedRetryID []byte, inferRetry b
 	}
 	if len(datagrams) > MaxQUICPacketsPerFlow {
 		return QUICHandshake{}, fmt.Errorf("%w: %d datagrams exceed %d", ErrQUICLimit, len(datagrams), MaxQUICPacketsPerFlow)
+	}
+	for i, dgram := range datagrams {
+		if len(dgram) > maxQUICUDPPayloadBytes {
+			return QUICHandshake{}, fmt.Errorf("%w: datagram %d payload length %d exceeds %d bytes", ErrQUICLimit, i, len(dgram), maxQUICUDPPayloadBytes)
+		}
 	}
 
 	var firstHdr QUICInitialHeader

@@ -665,9 +665,11 @@ handshake metadata even when application payloads remain opaque.
 [QUIC v2 changes](https://www.rfc-editor.org/rfc/rfc9369#section-3.3)
 
 Pass one UDP payload per slice element to `DecryptQUICInitial`. A datagram can
-hold multiple QUIC packets. Within an Initial packet, the parser skips ACK
-frames with up to 256 additional ranges, including any ECN counters, to reach
-subsequent CRYPTO frames.
+hold multiple QUIC packets. The function accepts up to 64 datagrams and up to
+65,527 bytes per payload, the maximum 16-bit UDP length minus the eight-byte
+header. Together these limits allow up to 4,193,728 input bytes per call.
+Exceeding either limit returns `ErrQUICLimit`. Within an Initial packet, the parser skips ACK frames with up to 256 additional ranges, including
+any ECN counters, to reach subsequent CRYPTO frames.
 
 `QUIC` and `QUICFromReaderAt` return distinct Initial exchanges on the same
 UDP tuple in first-observed order. They group Initials across a client port

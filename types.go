@@ -539,7 +539,7 @@ var (
 	ErrDNSLimit = errors.New("DNS record or jump count exceeds limit")
 	// ErrTLSLimit indicates a TLS handshake or capture exceeds TLS size or item limits.
 	ErrTLSLimit = errors.New("TLS handshake exceeds limit")
-	// ErrQUICLimit indicates a QUIC flow or capture exceeds QUIC packet or CRYPTO stream limits.
+	// ErrQUICLimit indicates that QUIC Initial input or capture scanning exceeds a resource limit.
 	ErrQUICLimit = errors.New("QUIC Initial flow exceeds limit")
 	// ErrInvalidWebSocket indicates invalid or incomplete WebSocket framing.
 	ErrInvalidWebSocket = errors.New("invalid WebSocket frame")

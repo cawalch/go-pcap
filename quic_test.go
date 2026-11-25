@@ -150,6 +150,45 @@ func TestQUICBoundsAndMalformedPackets(t *testing.T) {
 	}
 }
 
+func TestDecryptQUICInitialDatagramLimit(t *testing.T) {
+	const maxPayload = 65_527
+	const name = "datagram-limit.example"
+	hello := buildTLS13ClientHelloRecord(name, "h3")
+	initial := buildEncryptedQUICInitialDatagram(t, QUICVersion1, []byte{1, 2, 3, 4}, nil, nil, 1, 0, hello[5:])
+	payload := make([]byte, maxPayload+1)
+	maxDatagrams := make([][]byte, MaxQUICPacketsPerFlow)
+	for i := range maxDatagrams {
+		maxDatagrams[i] = payload[:maxPayload]
+	}
+
+	for _, tc := range []struct {
+		name      string
+		datagrams [][]byte
+		wantErr   error
+	}{
+		{name: "empty input", wantErr: ErrInvalidQUIC},
+		{name: "nil payload", datagrams: [][]byte{nil}, wantErr: ErrInvalidQUIC},
+		{name: "below byte limit", datagrams: [][]byte{payload[:maxPayload-1], initial}},
+		{name: "at byte limit", datagrams: [][]byte{nil, payload[:maxPayload], initial}},
+		{name: "over byte limit", datagrams: [][]byte{initial, payload}, wantErr: ErrQUICLimit},
+		{name: "at both limits", datagrams: maxDatagrams, wantErr: ErrInvalidQUIC},
+		{name: "over both limits", datagrams: append(maxDatagrams, payload), wantErr: ErrQUICLimit},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			hs, err := DecryptQUICInitial(tc.datagrams)
+			if !errors.Is(err, tc.wantErr) {
+				t.Fatalf("DecryptQUICInitial error = %v, want %v", err, tc.wantErr)
+			}
+			if err == nil && (!hs.HasClientHello || hs.ClientHello.SNI != name) {
+				t.Fatalf("DecryptQUICInitial handshake = %+v, want ClientHello for %s", hs, name)
+			}
+			if err != nil && hs.HasClientHello {
+				t.Fatalf("DecryptQUICInitial returned a ClientHello with error %v", err)
+			}
+		})
+	}
+}
+
 func TestQUICAckFrameBounds(t *testing.T) {
 	ack := []byte{
 		0x02,       // ACK
