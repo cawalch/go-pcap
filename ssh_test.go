@@ -39,8 +39,8 @@ func buildSSHKexStream(banner string, kex, hostKey, enc, mac, comp string) []byt
 	return stream.Bytes()
 }
 
-func TestSSHHandshakeAndHASSH(t *testing.T) {
-	cStream := buildSSHKexStream(
+func sshHandshakeFixture() (client, server []byte) {
+	client = buildSSHKexStream(
 		"SSH-2.0-OpenSSH_9.6",
 		"curve25519-sha256",
 		"ssh-ed25519",
@@ -48,7 +48,7 @@ func TestSSHHandshakeAndHASSH(t *testing.T) {
 		"umac-128-etm@openssh.com",
 		"none",
 	)
-	sStream := buildSSHKexStream(
+	server = buildSSHKexStream(
 		"SSH-2.0-OpenSSH_9.6p1",
 		"curve25519-sha256",
 		"ssh-ed25519",
@@ -56,6 +56,11 @@ func TestSSHHandshakeAndHASSH(t *testing.T) {
 		"umac-128-etm@openssh.com",
 		"none",
 	)
+	return client, server
+}
+
+func TestSSHHandshakeAndHASSH(t *testing.T) {
+	cStream, sStream := sshHandshakeFixture()
 
 	hs, err := ParseSSHHandshake(cStream, sStream)
 	if err != nil {
@@ -110,22 +115,7 @@ func TestSSHBoundsAndMalformedInputs(t *testing.T) {
 }
 
 func TestSSHJA4SSHCrossesSegmentBoundary(t *testing.T) {
-	cStream := buildSSHKexStream(
-		"SSH-2.0-OpenSSH_9.6",
-		"curve25519-sha256",
-		"ssh-ed25519",
-		"chacha20-poly1305@openssh.com",
-		"umac-128-etm@openssh.com",
-		"none",
-	)
-	sStream := buildSSHKexStream(
-		"SSH-2.0-OpenSSH_9.6p1",
-		"curve25519-sha256",
-		"ssh-ed25519",
-		"aes128-gcm@openssh.com",
-		"umac-128-etm@openssh.com",
-		"none",
-	)
+	cStream, sStream := sshHandshakeFixture()
 
 	// Build a session with > MaxSegmentsPerFlow total packets across both directions
 	// (2,100 per direction stays within per-direction MaxSegmentsPerFlow for Streams(),

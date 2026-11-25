@@ -192,10 +192,7 @@ func (pw *PCAPNGWriter) WritePacket(pkt PacketRecord, payload []byte) error {
 	if pkt.HasProcessID && pkt.ProcessID == math.MaxUint32 {
 		return fmt.Errorf("%w: process ID %#x is reserved", ErrInvalidPacket, pkt.ProcessID)
 	}
-	origLen := pkt.OriginalLen
-	if origLen < uint32(len(payload)) {
-		origLen = uint32(len(payload))
-	}
+	origLen := max(pkt.OriginalLen, uint32(len(payload)))
 	snapLen := pw.interfaceSnapLens[pkt.InterfaceID]
 	if snapLen > 0 && uint32(len(payload)) > snapLen {
 		payload = payload[:snapLen]

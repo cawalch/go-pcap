@@ -67,7 +67,7 @@ func TestFoxIOReferenceFingerprints(t *testing.T) {
 		t.Errorf("server JA4L = %q", fp)
 	}
 	var segs []JA4SSHSegment
-	for _, v := range strings.Fields(string(read("ssh-window.txt"))) {
+	for v := range strings.FieldsSeq(string(read("ssh-window.txt"))) {
 		length, err := strconv.Atoi(v)
 		if err != nil {
 			t.Fatal(err)
