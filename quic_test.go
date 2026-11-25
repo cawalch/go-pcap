@@ -150,6 +150,54 @@ func TestQUICBoundsAndMalformedPackets(t *testing.T) {
 	}
 }
 
+func TestQUICAckFrameBounds(t *testing.T) {
+	ack := []byte{
+		0x02,       // ACK
+		0x40, 0x07, // Largest Acknowledged
+		0x01,       // ACK Delay
+		0x40, 0x01, // ACK Range Count
+		0x01,       // First ACK Range
+		0x00,       // Gap
+		0x40, 0x01, // ACK Range Length
+	}
+	ackECN := append(bytes.Clone(ack), 0x01, 0x40, 0x01, 0x01)
+	ackECN[0] = 0x03
+	ackWithRanges := func(count uint16) []byte {
+		frame := bytes.NewBuffer([]byte{0x02, 0x44, 0x00, 0x00}) // Largest Acknowledged is 1024.
+		appendQUICVarint2(frame, count)
+		frame.Write(make([]byte, 1+2*int(count))) // First ACK Range and zero-valued range pairs.
+		return frame.Bytes()
+	}
+	crypto := []byte{0x06, 0x05, 0x01, 'x'} // One CRYPTO byte at offset 5.
+	for _, tc := range []struct {
+		name  string
+		frame []byte
+	}{
+		{"ACK", ack},
+		{"ACK_ECN", ackECN},
+		{"256 ranges", ackWithRanges(256)},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var chunks []quicCryptoChunk
+			err := extractQUICCryptoFrames(append(bytes.Clone(tc.frame), crypto...), &chunks)
+			if err != nil || len(chunks) != 1 || chunks[0].offset != 5 || !bytes.Equal(chunks[0].data, crypto[3:]) {
+				t.Fatalf("extract after ACK: chunks = %+v, err = %v", chunks, err)
+			}
+			for end := 1; end < len(tc.frame); end++ {
+				chunks = nil
+				if err := extractQUICCryptoFrames(tc.frame[:end], &chunks); !errors.Is(err, ErrInvalidQUIC) {
+					t.Fatalf("extract at byte %d: err = %v, want ErrInvalidQUIC", end, err)
+				}
+			}
+		})
+	}
+
+	var chunks []quicCryptoChunk
+	if err := extractQUICCryptoFrames(append(ackWithRanges(257), crypto...), &chunks); !errors.Is(err, ErrInvalidQUIC) {
+		t.Fatalf("extract with 257 ACK ranges: err = %v, want ErrInvalidQUIC", err)
+	}
+}
+
 func TestQUICInitialHeaderOwnership(t *testing.T) {
 	dcid, scid := []byte{1, 2, 3, 4}, []byte{5, 6, 7, 8}
 	token := bytes.Repeat([]byte{9}, MaxQUICTokenBytes)

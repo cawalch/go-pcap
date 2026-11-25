@@ -305,47 +305,30 @@ func extractQUICCryptoFrames(plaintext []byte, chunks *[]quicCryptoChunk) error 
 		case 0x00, 0x01:
 			// PADDING (0x00) or PING (0x01): 1 byte, already consumed.
 		case 0x02, 0x03:
-			// ACK frame (0x02 or 0x03 with ECN counts).
-			_, n1, ok1 := ReadQUICVarint(plaintext[i:])
-			if !ok1 {
-				return ErrInvalidQUIC
-			}
-			i += n1
-			_, n2, ok2 := ReadQUICVarint(plaintext[i:])
-			if !ok2 {
-				return ErrInvalidQUIC
-			}
-			i += n2
-			ackRangeCount, n3, ok3 := ReadQUICVarint(plaintext[i:])
-			if !ok3 || ackRangeCount > 256 {
-				return ErrInvalidQUIC
-			}
-			i += n3
-			_, n4, ok4 := ReadQUICVarint(plaintext[i:])
-			if !ok4 {
-				return ErrInvalidQUIC
-			}
-			i += n4
-			for range ackRangeCount {
-				_, ng, okg := ReadQUICVarint(plaintext[i:])
-				if !okg {
+			// Skip Largest Acknowledged and ACK Delay before reading ACK Range Count.
+			for range 2 {
+				_, n, ok := ReadQUICVarint(plaintext[i:])
+				if !ok {
 					return ErrInvalidQUIC
 				}
-				i += ng
-				_, nr, okr := ReadQUICVarint(plaintext[i:])
-				if !okr {
-					return ErrInvalidQUIC
-				}
-				i += nr
+				i += n
 			}
+			ackRangeCount, n, ok := ReadQUICVarint(plaintext[i:])
+			if !ok || ackRangeCount > 256 {
+				return ErrInvalidQUIC
+			}
+			i += n
+			// Skip First ACK Range, then a Gap and ACK Range Length for each range.
+			fields := 1 + 2*int(ackRangeCount)
 			if frameType == 0x03 {
-				for range 3 {
-					_, ne, oke := ReadQUICVarint(plaintext[i:])
-					if !oke {
-						return ErrInvalidQUIC
-					}
-					i += ne
+				fields += 3 // ECT(0), ECT(1), and ECN-CE counts.
+			}
+			for range fields {
+				_, n, ok := ReadQUICVarint(plaintext[i:])
+				if !ok {
+					return ErrInvalidQUIC
 				}
+				i += n
 			}
 		case 0x06:
 			// CRYPTO frame: Offset (varint), Length (varint), Crypto Data.
