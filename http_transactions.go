@@ -105,19 +105,19 @@ func (d *http1Direction) observe(f Frame, index, size int) {
 
 // Collect both contiguous directions of each observed TCP opening, with the
 // packet ownership and control evidence used by the HTTP transaction readers.
-func collectHTTPTransactionDirections(source ipFrameSource, export *http1TransactionExportSelection) ([]http1Direction, error) {
+func collectHTTPTransactionDirections(source ipFrameSource, interfaces map[int]uint32, selected map[int]bool) ([]http1Direction, error) {
 	collector := tcpMessageCollector{separateInterfaces: source.capture != nil && source.capture.SeparateTCPInterfaces}
 	var dirs []http1Direction
 	err := walkHTTPPackets(source, func(pkt PacketRecord, frame Frame, flow int, payload []byte) error {
-		if !keepTCPMessageSegment(&frame, len(payload), TCPFlagSYN|TCPFlagFIN|TCPFlagRST) {
+		if selected != nil && !selected[pkt.Index] || !keepTCPMessageSegment(&frame, len(payload), TCPFlagSYN|TCPFlagFIN|TCPFlagRST) {
 			return nil
 		}
 		pair, err := collector.addSegment(pkt, frame, flow, payload)
 		if err != nil {
 			return err
 		}
-		if export != nil && export.interfaces != nil && pkt.InterfaceID != 0 {
-			export.interfaces[pkt.Index] = pkt.InterfaceID
+		if interfaces != nil && pkt.InterfaceID != 0 {
+			interfaces[pkt.Index] = pkt.InterfaceID
 		}
 		if pair[0] > len(dirs) {
 			dirs = append(dirs, http1Direction{})
@@ -162,7 +162,11 @@ func collectHTTPTransactionDirections(source ipFrameSource, export *http1Transac
 }
 
 func scanHTTP1Transactions(source ipFrameSource, export *http1TransactionExportSelection) ([]HTTP1Transaction, error) {
-	dirs, err := collectHTTPTransactionDirections(source, export)
+	var interfaces map[int]uint32
+	if export != nil {
+		interfaces = export.interfaces
+	}
+	dirs, err := collectHTTPTransactionDirections(source, interfaces, nil)
 	if err != nil {
 		return nil, err
 	}
