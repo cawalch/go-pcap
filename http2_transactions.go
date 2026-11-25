@@ -107,10 +107,10 @@ func newHTTP2TransactionBudget() http2TransactionBudget {
 }
 
 type http2Exchange struct {
-	row                                     HTTP2Transaction
-	client                                  *http2TransactionFrames
-	requestStart, requestEnd, responseStart int
-	keyed                                   *keyedHTTP2Evidence
+	row        HTTP2Transaction
+	client     *http1Direction
+	requestEnd int
+	keyed      *keyedHTTP2Evidence
 	// Count selected bytes in each contributing packet to detect sharing even
 	// when multiple adjacent frames in the packet belong to this transaction.
 	outside                         map[int]int
@@ -151,8 +151,8 @@ func scanHTTP2Transactions(source ipFrameSource) ([]HTTP2Transaction, error) {
 			}
 			responses.incomplete = responses.incomplete || server.missingBeforeFIN()
 		}
-		streams, err := requests.exchanges(&responses, &budget)
-		if err != nil {
+		streams := make(map[uint32]*http2Exchange)
+		if err := requests.selectExchanges(&responses, streams, &budget); err != nil {
 			return nil, err
 		}
 		for _, ex := range streams {
@@ -247,15 +247,11 @@ func (out http2TransactionFrames) read(client bool, headers *int) (http2Transact
 	return out, nil
 }
 
-func (f *http2TransactionFrames) exchanges(responses *http2TransactionFrames, budget *http2TransactionBudget) (map[uint32]*http2Exchange, error) {
-	streams := make(map[uint32]*http2Exchange)
+func (f *http2TransactionFrames) selectExchanges(responses *http2TransactionFrames, streams map[uint32]*http2Exchange, budget *http2TransactionBudget) error {
 	if err := f.selectFrames(false, streams, responses.resets, budget); err != nil {
-		return nil, err
+		return err
 	}
-	if err := responses.selectFrames(true, streams, f.resets, budget); err != nil {
-		return nil, err
-	}
-	return streams, nil
+	return responses.selectFrames(true, streams, f.resets, budget)
 }
 
 func (f *http2TransactionFrames) selectFrames(server bool, streams map[uint32]*http2Exchange, peerResets map[uint32]http2Reset, budget *http2TransactionBudget) error {
@@ -293,9 +289,9 @@ func (f *http2TransactionFrames) selectFrames(server bool, streams map[uint32]*h
 				ex = &http2Exchange{row: HTTP2Transaction{
 					StreamID: e.streamID,
 					Request:  f.messageAt(start, block, e.endStream),
-				}, client: f, requestStart: start, requestEnd: e.frame.end, responseStart: -1}
+				}, client: f.dir, requestEnd: f.base + e.frame.end}
 				if f.tls != nil {
-					ex.keyed = &keyedHTTP2Evidence{}
+					ex.keyed = &keyedHTTP2Evidence{requestStart: f.base + start, responseStart: -1}
 				} else {
 					d := f.dir.dir
 					ex.row.FlowIndex, ex.row.Source, ex.row.Destination = d.flowIndex, d.src, d.dst
@@ -438,7 +434,9 @@ func (ex *http2Exchange) headers(f *http2TransactionFrames, server bool, e http2
 			return true
 		}
 		final := f.messageAt(e.header.start, block, e.endStream)
-		ex.responseStart = e.header.start
+		if ex.keyed != nil {
+			ex.keyed.responseStart = f.base + e.header.start
+		}
 		ex.row.Response, ex.row.StatusCode, ex.row.Pairing = &final, status, HTTP2ResponseConfirmed
 		return true
 	}

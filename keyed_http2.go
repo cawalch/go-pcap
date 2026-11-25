@@ -69,10 +69,11 @@ func (c *Capture) KeyedHTTP2TransactionsFromReaderAt(r io.ReaderAt, extraKeyLog 
 }
 
 type keyedHTTP2Evidence struct {
-	ranges     [2][]HTTP2PlaintextRange
-	records    [2][]TLSRecordEvidence
-	packets    []int
-	extraBytes int
+	requestStart, responseStart int
+	ranges                      [2][]HTTP2PlaintextRange
+	records                     [2][]TLSRecordEvidence
+	packets                     []int
+	extraBytes                  int
 }
 
 func (f *http2TransactionFrames) records() *tlsDirectionProvenance {
@@ -109,13 +110,12 @@ func (f *http2TransactionFrames) afterReset(start int, rst http2Reset) bool {
 }
 
 func (ex *http2Exchange) acknowledged(server *http2TransactionFrames, start int) bool {
-	client := ex.client
-	if client.dir != nil {
-		return http1Acknowledged(client.dir, server.dir, ex.requestEnd-1, start)
+	if server.tls == nil {
+		return http1Acknowledged(ex.client, server.dir, ex.requestEnd-1, start)
 	}
-	d := client.records()
-	request := d.records[d.recordAt(client.base+ex.requestEnd-1)]
-	return client.tls.acknowledged(request, server.base+start)
+	d := &server.tls.client
+	request := d.records[d.recordAt(ex.requestEnd-1)]
+	return server.tls.acknowledged(request, server.base+start)
 }
 
 func (k *keyedHTTP2Evidence) add(f *http2TransactionFrames, start, end int, remaining *int) error {
@@ -216,8 +216,8 @@ func appendKeyedHTTP2(rows []KeyedHTTP2Transaction, client *http2TransactionFram
 		}
 		responses.incomplete = responses.incomplete || sc.IncompleteTail
 	}
-	streams, err := requests.exchanges(&responses, budget)
-	if err != nil {
+	streams := make(map[uint32]*http2Exchange)
+	if err := requests.selectExchanges(&responses, streams, budget); err != nil {
 		return nil, err
 	}
 	for _, ex := range streams {
@@ -227,13 +227,13 @@ func appendKeyedHTTP2(rows []KeyedHTTP2Transaction, client *http2TransactionFram
 		ev := ex.keyed
 		slices.Sort(ev.packets)
 		row := &ex.row
-		start := client.base + ex.requestStart
+		start := ev.requestStart
 		record := s.client.records[s.client.recordAt(start)]
 		rows = append(rows, KeyedHTTP2Transaction{
 			ID:        KeyedHTTP2TransactionID{s.openingPacket, record.wireStart, start - record.plainStart, row.StreamID},
 			FlowIndex: s.FlowIndex, Source: netip.AddrPortFrom(s.SrcAddr, s.SrcPort), Destination: netip.AddrPortFrom(s.DstAddr, s.DstPort),
 			Request: row.Request, Informational: row.Informational, Response: row.Response, StatusCode: row.StatusCode, Pairing: row.Pairing, Reset: row.Reset,
-			RequestPlaintextOffset: start, ResponsePlaintextOffset: ex.responseStart,
+			RequestPlaintextOffset: start, ResponsePlaintextOffset: ev.responseStart,
 			RequestRanges: ev.ranges[0], ResponseRanges: ev.ranges[1], RequestRecords: ev.records[0], ResponseRecords: ev.records[1],
 			SharedRecords: ev.extraBytes > 0, PacketIndices: slices.Compact(ev.packets),
 			ClientCoverage: cc, ServerCoverage: sc,

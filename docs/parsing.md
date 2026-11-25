@@ -757,6 +757,36 @@ and packet references share a further 262,144-entry budget. A record used by
 two transactions charges its references twice. Exceeding an aggregate HTTP
 limit returns `ErrHTTPLimit` and no rows.
 
+### Read DNS messages from decrypted HTTP/2
+
+Call `capture.HTTP2(data)` and select records with `IsDecrypted`. For each
+stream in `record.Summary.Streams`, call `block.DNSOverHTTPS(stream.Data)`
+for each header block. The method reads the `dns` URI parameter on GET
+requests and the `application/dns-message` body of POST requests and 2xx
+responses that allow a body. It accepts an uncoded body of up to 65,535 bytes
+and limits GET request targets to `MaxHTTPHeaderLineBytes`.
+
+Check the match flag and error before using the DNS message. Inspect
+`DNSMessage.Anomalies` for partial DNS sections. Use the flow index and
+HTTP/2 stream ID to pair requests with responses. [RFC 8484](https://www.rfc-editor.org/rfc/rfc8484#section-4)
+
+## Inspect explicit proxy tunnels
+
+TLS, HTTP, HTTP/2, SSH, SMB, and RDP capture methods inspect the payload after
+one successful HTTP CONNECT or no-authentication SOCKS5 CONNECT exchange.
+`DecryptedTLSStreams` uses the inner TLS records with the supplied key log.
+The flow index and addresses identify the captured client and proxy. `HTTP`
+returns the outer CONNECT request, interim responses, and successful 2xx response as header-only records
+before any inner HTTP messages. Body offsets refer to the original stream.
+
+Use `UnwrapProxyStream(stream.Client.Data, stream.Server.Data)` on a reassembled
+request and response to get the inner byte slices, proxy type, requested host,
+and port. The host comes from the proxy request and can differ from the inner
+TLS server name. Both slices borrow the original stream buffers. HTTP headers
+must end within 4,096 bytes per direction, including any interim responses. SOCKS5 accepts up to 16 offered methods and
+IPv4, IPv6, or domain targets. On an incomplete or rejected exchange the helper
+returns both input slices and `false`.
+
 ### Select HTTP/2 transactions inside TLS
 
 Call `KeyedHTTP2Transactions` with capture bytes, or
@@ -805,36 +835,6 @@ An aggregate HTTP limit returns `ErrHTTPLimit` and discards the result.
 
 Run `go test -run '^ExampleCapture_KeyedHTTP2Transactions$' .` to select an
 exchange from the [keyed fixture](../testdata/tls-provenance.md#http2-over-tls).
-
-### Read DNS messages from decrypted HTTP/2
-
-Call `capture.HTTP2(data)` and select records with `IsDecrypted`. For each
-stream in `record.Summary.Streams`, call `block.DNSOverHTTPS(stream.Data)`
-for each header block. The method reads the `dns` URI parameter on GET
-requests and the `application/dns-message` body of POST requests and 2xx
-responses that allow a body. It accepts an uncoded body of up to 65,535 bytes
-and limits GET request targets to `MaxHTTPHeaderLineBytes`.
-
-Check the match flag and error before using the DNS message. Inspect
-`DNSMessage.Anomalies` for partial DNS sections. Use the flow index and
-HTTP/2 stream ID to pair requests with responses. [RFC 8484](https://www.rfc-editor.org/rfc/rfc8484#section-4)
-
-## Inspect explicit proxy tunnels
-
-TLS, HTTP, HTTP/2, SSH, SMB, and RDP capture methods inspect the payload after
-one successful HTTP CONNECT or no-authentication SOCKS5 CONNECT exchange.
-`DecryptedTLSStreams` uses the inner TLS records with the supplied key log.
-The flow index and addresses identify the captured client and proxy. `HTTP`
-returns the outer CONNECT request, interim responses, and successful 2xx response as header-only records
-before any inner HTTP messages. Body offsets refer to the original stream.
-
-Use `UnwrapProxyStream(stream.Client.Data, stream.Server.Data)` on a reassembled
-request and response to get the inner byte slices, proxy type, requested host,
-and port. The host comes from the proxy request and can differ from the inner
-TLS server name. Both slices borrow the original stream buffers. HTTP headers
-must end within 4,096 bytes per direction, including any interim responses. SOCKS5 accepts up to 16 offered methods and
-IPv4, IPv6, or domain targets. On an incomplete or rejected exchange the helper
-returns both input slices and `false`.
 
 ## Parse HTTP messages and carve payloads
 
