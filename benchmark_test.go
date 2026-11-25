@@ -189,22 +189,7 @@ func BenchmarkParseHTTPRequestJA4H(b *testing.B) {
 }
 
 func BenchmarkParseSSHHandshakeHASSH(b *testing.B) {
-	cStream := buildSSHKexStream(
-		"SSH-2.0-OpenSSH_9.6",
-		"curve25519-sha256",
-		"ssh-ed25519",
-		"chacha20-poly1305@openssh.com",
-		"umac-128-etm@openssh.com",
-		"none",
-	)
-	sStream := buildSSHKexStream(
-		"SSH-2.0-OpenSSH_9.6p1",
-		"curve25519-sha256",
-		"ssh-ed25519",
-		"aes128-gcm@openssh.com",
-		"umac-128-etm@openssh.com",
-		"none",
-	)
+	cStream, sStream := sshHandshakeFixture()
 
 	b.ReportAllocs()
 	b.SetBytes(int64(len(cStream) + len(sStream)))

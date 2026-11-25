@@ -209,10 +209,8 @@ func FuzzParseHTTP(f *testing.F) {
 }
 
 func FuzzParseSSHHandshake(f *testing.F) {
-	f.Add(
-		buildSSHKexStream("SSH-2.0-OpenSSH_9.6", "curve25519-sha256", "ssh-ed25519", "chacha20-poly1305@openssh.com", "umac-128-etm@openssh.com", "none"),
-		buildSSHKexStream("SSH-2.0-OpenSSH_9.6p1", "curve25519-sha256", "ssh-ed25519", "aes128-gcm@openssh.com", "umac-128-etm@openssh.com", "none"),
-	)
+	client, server := sshHandshakeFixture()
+	f.Add(client, server)
 
 	f.Fuzz(func(t *testing.T, client, server []byte) {
 		_, _ = ParseSSHHandshake(client, server)
