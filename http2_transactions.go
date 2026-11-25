@@ -22,7 +22,9 @@ type HTTP2TransactionID struct {
 // HTTP2MessageEvidence describes the initial request or final response headers,
 // optional trailers and decoded entity body. Header names and values are
 // HPACK-decoded, in wire order with duplicates. PacketIndex, PacketPayloadOffset
-// and TimestampNs locate the initial HEADERS frame. Body offsets count logical
+// and TimestampNs locate the initial cleartext HEADERS frame. A
+// [KeyedHTTP2Transaction] reports -1 for both packet coordinates and zero
+// for its timestamp. Body offsets count logical
 // entity bytes. BodyLimitExceeded marks a capped prefix, and EndStream reports
 // an observed END_STREAM flag. TCPAnomalies describes the entire direction.
 type HTTP2MessageEvidence struct {
@@ -96,10 +98,19 @@ type http2TransactionBudget struct {
 	decode                                       httpDecodeBudget
 }
 
+func newHTTP2TransactionBudget() http2TransactionBudget {
+	return http2TransactionBudget{
+		headers: MaxHTTP2DecodedHeaderBytes, transactions: MaxHTTPMessagesPerScan,
+		packetRefs: MaxPackets, bodyBytes: MaxTotalStreamBytes,
+		decode: httpDecodeBudget{remaining: MaxHTTPDecodedBodyBytesPerScan},
+	}
+}
+
 type http2Exchange struct {
 	row        HTTP2Transaction
 	client     *http1Direction
 	requestEnd int
+	keyed      *keyedHTTP2Evidence
 	// Count selected bytes in each contributing packet to detect sharing even
 	// when multiple adjacent frames in the packet belong to this transaction.
 	outside                         map[int]int
@@ -119,11 +130,7 @@ func scanHTTP2Transactions(source ipFrameSource, export *http2TransactionExportS
 }
 
 func selectHTTP2Transactions(dirs []http1Direction, export *http2TransactionExportSelection) ([]HTTP2Transaction, error) {
-	budget := http2TransactionBudget{
-		headers: MaxHTTP2DecodedHeaderBytes, transactions: MaxHTTPMessagesPerScan,
-		packetRefs: MaxPackets, bodyBytes: MaxTotalStreamBytes,
-		decode: httpDecodeBudget{remaining: MaxHTTPDecodedBodyBytesPerScan},
-	}
+	budget := newHTTP2TransactionBudget()
 	var rows []HTTP2Transaction
 	for i := range dirs {
 		client := &dirs[i]
@@ -154,24 +161,13 @@ func selectHTTP2Transactions(dirs []http1Direction, export *http2TransactionExpo
 			responses.incomplete = responses.incomplete || server.missingBeforeFIN()
 		}
 		streams := make(map[uint32]*http2Exchange)
-		if err := requests.selectFrames(false, streams, responses.resets, &budget); err != nil {
-			return nil, err
-		}
-		if err := responses.selectFrames(true, streams, requests.resets, &budget); err != nil {
+		if err := requests.selectExchanges(&responses, streams, &budget); err != nil {
 			return nil, err
 		}
 		for _, ex := range streams {
 			row := &ex.row
-			if row.Response == nil && (responses.incomplete || ex.responseInvalid) {
-				row.Pairing = HTTP2ResponseAmbiguous
-			}
-			if err := finishHTTP2Body(&row.Request, ex.requestInvalid || client.anomalies.OverlapConflict, false, &budget); err != nil {
+			if err := ex.finish(responses.incomplete, client.anomalies.OverlapConflict, &budget); err != nil {
 				return nil, err
-			}
-			if row.Response != nil {
-				if err := finishHTTP2Body(row.Response, ex.responseInvalid, httpResponseHasNoBody(row.Request.Method, row.StatusCode), &budget); err != nil {
-					return nil, err
-				}
 			}
 			for idx, outside := range ex.outside {
 				row.PacketIndices = append(row.PacketIndices, idx)
@@ -196,10 +192,30 @@ func selectHTTP2Transactions(dirs []http1Direction, export *http2TransactionExpo
 	return rows, nil
 }
 
+func (ex *http2Exchange) finish(incomplete, conflict bool, budget *http2TransactionBudget) error {
+	row := &ex.row
+	if row.Response == nil && (incomplete || ex.responseInvalid) {
+		row.Pairing = HTTP2ResponseAmbiguous
+	}
+	if err := finishHTTP2Body(&row.Request, ex.requestInvalid || conflict, false, budget); err != nil {
+		return err
+	}
+	if row.Response != nil {
+		if err := finishHTTP2Body(row.Response, ex.responseInvalid, httpResponseHasNoBody(row.Request.Method, row.StatusCode), budget); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 // Keep at most MaxHTTP2FramesPerStream events in each direction. Reading both
 // directions before selecting allows a reset on either side to bound its peer.
 type http2TransactionFrames struct {
-	dir        *http1Direction
+	dir        *http1Direction      // Cleartext TCP source.
+	tls        *tlsProvenanceStream // Authenticated source when scanning keyed TLS.
+	data       []byte
+	anomalies  StreamAnomalies
+	base, side int // TLS plaintext offset of data, and direction (0 client, 1 server).
 	events     []http2FrameEvent
 	resets     map[uint32]http2Reset
 	incomplete bool
@@ -211,12 +227,15 @@ type http2Reset struct {
 }
 
 func readHTTP2TransactionFrames(d *http1Direction, client bool, headers *int) (http2TransactionFrames, error) {
-	out := http2TransactionFrames{dir: d}
+	return (http2TransactionFrames{dir: d, data: d.data, anomalies: d.anomalies}).read(client, headers)
+}
+
+func (out http2TransactionFrames) read(client bool, headers *int) (http2TransactionFrames, error) {
 	end := 0
 	if client {
 		end = len(HTTP2ClientPreface)
 	}
-	sum, err := readHTTP2Frames(d.data, headers, false, nil, func(e http2FrameEvent) error {
+	sum, err := readHTTP2Frames(out.data, headers, false, nil, func(e http2FrameEvent) error {
 		end = e.frame.end
 		if e.streamID%2 == 0 || e.header.kind != HTTP2FrameHeaders && e.kind != HTTP2FrameData && e.kind != HTTP2FrameRSTStream {
 			return nil // Includes unfinished header fragments, pushes and connection controls.
@@ -228,8 +247,7 @@ func readHTTP2TransactionFrames(d *http1Direction, client bool, headers *int) (h
 			if out.resets == nil {
 				out.resets = make(map[uint32]http2Reset)
 			}
-			packet, _ := d.location(e.frame.end - 1)
-			out.resets[e.streamID] = http2Reset{packet: packet.index, endSeq: d.spans[0].seq + uint32(e.frame.end)}
+			out.resets[e.streamID] = out.resetAt(e.frame.end)
 		}
 		out.events = append(out.events, e)
 		return nil
@@ -237,26 +255,31 @@ func readHTTP2TransactionFrames(d *http1Direction, client bool, headers *int) (h
 	if err != nil && !errors.Is(err, ErrInvalidHTTP) {
 		return out, err
 	}
-	if sum.FrameCount == MaxHTTP2FramesPerStream && len(d.data)-end >= 9 && !sum.HeadersIncomplete {
+	if sum.FrameCount == MaxHTTP2FramesPerStream && len(out.data)-end >= 9 && !sum.HeadersIncomplete {
 		return out, ErrHTTPLimit
 	}
-	out.incomplete = err != nil || sum.HeadersIncomplete || end < len(d.data) || d.anomalies.SequenceGap || d.anomalies.Truncated
+	out.incomplete = err != nil || sum.HeadersIncomplete || end < len(out.data) || out.anomalies.SequenceGap || out.anomalies.Truncated
 	return out, nil
 }
 
+func (f *http2TransactionFrames) selectExchanges(responses *http2TransactionFrames, streams map[uint32]*http2Exchange, budget *http2TransactionBudget) error {
+	if err := f.selectFrames(false, streams, responses.resets, budget); err != nil {
+		return err
+	}
+	return responses.selectFrames(true, streams, f.resets, budget)
+}
+
 func (f *http2TransactionFrames) selectFrames(server bool, streams map[uint32]*http2Exchange, peerResets map[uint32]http2Reset, budget *http2TransactionBudget) error {
-	d := f.dir
 	var lastRequest uint32
 	for _, e := range f.events {
 		if rst, ok := peerResets[e.streamID]; ok {
 			// Bytes already in flight may arrive after a reset. An ACK of the
 			// reset puts this frame after it regardless of capture order.
-			seg := d.spans[d.spanAt(e.frame.start)].segment
-			after := d.dir.packets[seg].index > rst.packet
-			if d.dir.segments[seg].Flags&TCPFlagACK != 0 {
-				after = int32(d.acks[seg]-rst.endSeq) >= 0
+			start := e.frame.start
+			if e.header.kind == HTTP2FrameHeaders {
+				start = e.header.start
 			}
-			if after {
+			if f.afterReset(start, rst) || f.afterReset(e.frame.end-1, rst) {
 				continue
 			}
 		}
@@ -279,11 +302,18 @@ func (f *http2TransactionFrames) selectFrames(server bool, streams map[uint32]*h
 				}
 				budget.transactions--
 				ex = &http2Exchange{row: HTTP2Transaction{
-					FlowIndex: d.dir.flowIndex, Source: d.dir.src, Destination: d.dir.dst, StreamID: e.streamID,
-					Request: http2MessageAt(d, start, block, e.endStream),
-				}, client: d, requestEnd: e.frame.end, outside: make(map[int]int)}
+					StreamID: e.streamID,
+					Request:  f.messageAt(start, block, e.endStream),
+				}, client: f.dir, requestEnd: f.base + e.frame.end}
+				if f.tls != nil {
+					ex.keyed = &keyedHTTP2Evidence{requestStart: f.base + start, responseStart: -1}
+				} else {
+					d := f.dir.dir
+					ex.row.FlowIndex, ex.row.Source, ex.row.Destination = d.flowIndex, d.src, d.dst
+					ex.outside = make(map[int]int)
+				}
 				streams[e.streamID] = ex
-			} else if ex == nil || !ex.headers(d, server, e) {
+			} else if ex == nil || !ex.headers(f, server, e) {
 				continue
 			}
 		case e.kind == HTTP2FrameData:
@@ -302,7 +332,7 @@ func (f *http2TransactionFrames) selectFrames(server bool, streams map[uint32]*h
 				*invalid = true
 				continue
 			}
-			data := d.data[e.data.start:e.data.end]
+			data := f.data[e.data.start:e.data.end]
 			take := min(len(data), MaxHTTPBodyBytes-len(msg.Body))
 			msg.Body = append(msg.Body, data[:take]...)
 			msg.BodyLimitExceeded = msg.BodyLimitExceeded || take < len(data)
@@ -312,17 +342,26 @@ func (f *http2TransactionFrames) selectFrames(server bool, streams map[uint32]*h
 		default:
 			continue // Reset on an unobserved stream.
 		}
-		if err := ex.addPackets(d, start, e.frame.end, &budget.packetRefs); err != nil {
+		var err error
+		if f.tls != nil {
+			err = ex.keyed.add(f, start, e.frame.end, &budget.packetRefs)
+		} else {
+			err = ex.addPackets(f.dir, start, e.frame.end, &budget.packetRefs)
+		}
+		if err != nil {
 			return err
 		}
 	}
 	return nil
 }
 
-func http2MessageAt(d *http1Direction, start int, block HTTP2HeaderBlock, ended bool) HTTP2MessageEvidence {
-	packet, offset := d.location(start)
+func (f *http2TransactionFrames) messageAt(start int, block HTTP2HeaderBlock, ended bool) HTTP2MessageEvidence {
+	packet, offset := messagePacket{index: -1}, -1
+	if f.dir != nil {
+		packet, offset = f.dir.location(start)
+	}
 	return HTTP2MessageEvidence{HTTP2HeaderBlock: block, PacketIndex: packet.index, PacketPayloadOffset: offset,
-		TimestampNs: packet.timestamp, TCPAnomalies: d.anomalies, EndStream: ended}
+		TimestampNs: packet.timestamp, TCPAnomalies: f.anomalies, EndStream: ended}
 }
 
 func validHTTP2Fields(block HTTP2HeaderBlock, request, trailers bool) bool {
@@ -380,7 +419,7 @@ func validHTTP2Fields(block HTTP2HeaderBlock, request, trailers bool) bool {
 	return !seen[":protocol"] && block.Scheme != "" && block.Path != ""
 }
 
-func (ex *http2Exchange) headers(d *http1Direction, server bool, e http2FrameEvent) bool {
+func (ex *http2Exchange) headers(f *http2TransactionFrames, server bool, e http2FrameEvent) bool {
 	block := e.header.block
 	msg, invalid := &ex.row.Request, &ex.requestInvalid
 	if server {
@@ -392,7 +431,7 @@ func (ex *http2Exchange) headers(d *http1Direction, server bool, e http2FrameEve
 	if msg == nil {
 		// The response must acknowledge the entire opening header block,
 		// including its last CONTINUATION. Request DATA can still be pending.
-		if !http1Acknowledged(ex.client, d, ex.requestEnd-1, e.header.start) {
+		if !ex.acknowledged(f, e.header.start) {
 			*invalid = true
 			return false
 		}
@@ -409,7 +448,10 @@ func (ex *http2Exchange) headers(d *http1Direction, server bool, e http2FrameEve
 			ex.row.Informational = append(ex.row.Informational, block)
 			return true
 		}
-		final := http2MessageAt(d, e.header.start, block, e.endStream)
+		final := f.messageAt(e.header.start, block, e.endStream)
+		if ex.keyed != nil {
+			ex.keyed.responseStart = f.base + e.header.start
+		}
 		ex.row.Response, ex.row.StatusCode, ex.row.Pairing = &final, status, HTTP2ResponseConfirmed
 		return true
 	}

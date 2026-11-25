@@ -44,6 +44,31 @@ Run the Go checks without TShark using `go test -run '^TestTLSRecordProvenance' 
 The split-record tests build TLS 1.2 and TLS 1.3 captures in memory with test-only
 keys.
 
+## HTTP/2 over TLS
+
+`keyed-http2.pcapng` contains a TLS 1.3 AES-GCM connection with embedded
+test keys and negotiated ALPN `h2`. The two requests share a TLS record. The
+upload DATA frame spans two records. The response trailer's record spans two
+packets. `TestKeyedHTTP2Transactions` reconstructs this file, verifies
+the same frame and record relationships for TLS 1.2, and checks slice and
+ReaderAt parity. Run `go test -run '^TestKeyedHTTP2' .` for the Go checks.
+
+Run TShark 4.6.10 (commit `eac916f07299`) from the repository root.
+
+```sh
+tshark -2 -n -o tls.keylog_file: -r testdata/keyed-http2.pcapng \
+  -Y 'http2.streamid > 0' -T fields -e frame.number -e http2.streamid \
+  -e http2.header.name -e http2.header.value -e http2.data.data
+```
+
+| Frame | Stream IDs | Decoded headers or DATA |
+| --- | --- | --- |
+| 8 | 1, 3 | POST `/one`, GET `/two`, both with scheme `https` and authority `test` |
+| 10 | 1 | `75706c6f6164` (`upload`) |
+| 11 | 3, 1, 1 | Status 204, then interim 103 and final 200 |
+| 12 | 1 | `646f776e6c6f6164` (`download`) |
+| 14 | 1 | Trailer `x-end: ok` and reassembled `download` |
+
 ## Pipelined HTTP/1 over TLS
 
 `keyed-http1.pcapng` contains a synthetic TLS 1.2 AES-GCM exchange and a DSB
