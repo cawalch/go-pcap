@@ -140,14 +140,8 @@ func readHTTP2Frames(stream []byte, remaining *int, sequenceGap bool, request fu
 		return HTTP2Summary{}, fmt.Errorf("%w: buffer shorter than 9-byte HTTP/2 frame header", ErrInvalidHTTP)
 	}
 	// If no client preface is present, require the first frame to be a valid SETTINGS frame (type 0x04, stream 0).
-	if !out.HasClientPreface {
-		firstType := stream[offset+3]
-		firstFlags := stream[offset+4]
-		firstStream := binary.BigEndian.Uint32(stream[offset+5:offset+9]) & 0x7fffffff
-		firstLen := int(stream[offset])<<16 | int(stream[offset+1])<<8 | int(stream[offset+2])
-		if firstType != HTTP2FrameSettings || firstStream != 0 || (firstFlags&^0x01) != 0 || firstLen%6 != 0 || firstLen > MaxHTTP2Settings*6 || ((firstFlags&0x01) != 0 && firstLen != 0) {
-			return HTTP2Summary{}, fmt.Errorf("%w: stream does not begin with HTTP/2 preface or SETTINGS frame", ErrInvalidHTTP)
-		}
+	if !out.HasClientPreface && !hasHTTP2InitialSettings(stream[offset:]) {
+		return HTTP2Summary{}, fmt.Errorf("%w: stream does not begin with HTTP/2 preface or SETTINGS frame", ErrInvalidHTTP)
 	}
 
 	byID := make(map[uint32]int)
@@ -403,6 +397,14 @@ func (out *HTTP2Summary) fingerprint(priorities []string, block HTTP2HeaderBlock
 		priority = strings.Join(priorities, ",")
 	}
 	return out.SettingsFingerprint + "|" + strconv.FormatUint(uint64(out.WindowUpdate), 10) + "|" + priority + "|" + string(order)
+}
+
+func hasHTTP2InitialSettings(p []byte) bool {
+	if len(p) < 9 || p[3] != HTTP2FrameSettings || p[4]&^byte(1) != 0 || binary.BigEndian.Uint32(p[5:9])&0x7fffffff != 0 {
+		return false
+	}
+	n := int(p[0])<<16 | int(p[1])<<8 | int(p[2])
+	return n <= len(p)-9 && n <= MaxHTTP2Settings*6 && n%6 == 0 && (p[4] == 0 || n == 0)
 }
 
 func isHTTP2HeaderFrame(kind uint8) bool {

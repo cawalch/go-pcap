@@ -835,6 +835,63 @@ needs a recognizable request at the start of the observed prefix.
 bounds the output. HTTP decoding and ReaderAt read limits also apply. An error
 discards the result.
 
+### Select a prior-knowledge cleartext HTTP/2 transaction
+
+Call `HTTP2Transactions` or `HTTP2TransactionsFromReaderAt` to select requests
+on a TCP connection that starts with the HTTP/2 client preface and initial
+SETTINGS. HTTP/1 upgrades to h2c, TLS and server push are outside this view.
+The methods honor `SeparateTCPInterfaces`. Reuse of a five-tuple starts a
+new opening when the collector observes a new SYN.
+
+Each row's `ID()` combines the zero-based capture packet index, TCP payload
+offset of the initial HEADERS frame, and stream ID. Rows follow capture
+packet and offset order. `Request.TimestampNs` comes from the first byte's
+packet even if another packet completes the frame or header block. Headers,
+including pseudo-headers, contain HPACK-decoded fields in order with
+duplicates. `Informational` holds 1xx blocks. Each message keeps its trailers
+separate from the initial fields.
+
+A final response requires the server's initial SETTINGS, a matching stream ID
+in the same opening, consistent TCP evidence, and acknowledgements consistent
+with receipt of the complete request header block. `Pairing` distinguishes a
+confirmed final status, an unseen response and an ambiguous association.
+A request remains selectable after RST_STREAM. `Reset` records the reset.
+A gap or loss of HPACK state stops that direction at the contiguous prefix.
+Conflicting TCP overlap prevents response pairing.
+
+`Body` holds content from complete DATA frames, with padding removed and
+supported content coding decoded. An index into `Body` counts logical entity
+bytes from zero. Use the transaction ID and packet indices for capture
+positions. Inspect `BodyState` for complete (including empty), partial,
+unknown or unsupported content. `BodyLimitExceeded` distinguishes a capped
+prefix. `EndStream` reports a captured END_STREAM on DATA, initial headers or
+trailers. HEAD, 204 and 304 responses can establish an empty entity at the
+final headers.
+
+`PacketIndices` lists the sorted distinct packet indices supplying selected
+frames in either direction, including informational headers, continuations
+and an observed reset. An identical retransmission contributes only if it
+supplies previously missing bytes. `SharedPackets` reports additional TCP
+payload in a contributing packet. The list can omit the preface, SETTINGS
+and earlier HPACK table updates needed to decode those frames independently.
+The caller owns the results.
+
+Each opening tracks at most `MaxHTTP2FramesPerStream` frames per direction
+(1,024), bounding concurrent streams. The scan admits up to
+`MaxHTTPMessagesPerScan` transactions (16,384), `MaxHTTP2DecodedHeaderBytes`
+of decoded header storage (4 MiB), and `MaxPackets` distinct transaction/packet
+references. It retains up to `MaxHTTPBodyBytes` (4 MiB) per body and
+`MaxTotalStreamBytes` (64 MiB) of bodies per scan. Content decoding shares
+`MaxHTTPDecodedBodyBytesPerScan`. Exceeding an HTTP scan limit returns
+`ErrHTTPLimit` and no rows. TCP collection and ReaderAt scan limits also
+apply. ReaderAt charges all packet reads to one `MaxReaderAtScanBytes` budget.
+
+Run the selection example from the repository root.
+
+```sh
+go test -run '^ExampleCapture_HTTP2Transactions$' .
+```
+
 ### Select and export a cleartext HTTP/1 transaction
 
 Use `HTTP1Transactions` or `HTTP1TransactionsFromReaderAt` to list requests.
