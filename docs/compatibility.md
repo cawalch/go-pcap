@@ -42,6 +42,7 @@ be added compatibly.
 | `HTTP1RequestEvidence`, `HTTP1RequestEvidenceFromReaderAt` | The returned headers and body survive reuse of the supplied input. |
 | `HTTP1Transactions`, `HTTP1TransactionsFromReaderAt` | Returned headers, bodies and packet indices survive reuse of the input. Transaction IDs apply to the original capture. |
 | `KeyedHTTP1Transactions`, `KeyedHTTP1TransactionsFromReaderAt` | Caller-owned HTTP and TLS record evidence survives input reuse. IDs apply to the original capture. See [key inputs and coverage](parsing.md#select-http1-transactions-inside-tls). |
+| `ExtractKeyedHTTP1TransactionPCAPNG`, `ExtractKeyedHTTP1TransactionPCAPNGFromReaderAt` | The source ID and matching keys select original ciphertext packets. Reopening the packet-only output requires separate secrets. [Export coverage](parsing.md#export-an-http1-exchange-as-ciphertext) |
 | `DecompressCapture` | Plain input passes through by reference. A successful gzip decode returns decompressed bytes. |
 | `LiveCapture.ReadPacket` | For portable code, copy a packet that must survive the next read. The macOS backend reuses its buffer. |
 

@@ -757,6 +757,54 @@ and packet references share a further 262,144-entry budget. A record used by
 two transactions charges its references twice. Exceeding an aggregate HTTP
 limit returns `ErrHTTPLimit` and no rows.
 
+### Export an HTTP/1 exchange as ciphertext
+
+Pass a row's `ID` to `ExtractKeyedHTTP1TransactionPCAPNG` or
+`ExtractKeyedHTTP1TransactionPCAPNGFromReaderAt`. Use the same source bytes,
+TCP interface-separation setting and TLS keys used for selection. The
+exporter reads embedded TLS key logs and accepts extra NSS key log bytes.
+An invalid ID or a request that the supplied keys cannot recover returns
+`ErrOutOfBounds` before the first write. ReaderAt selection, TLS framing and
+copying share `MaxReaderAtScanBytes`. A read-limit or writer error can leave
+partial output. Discard the output on error.
+
+The packet-only PcapNG keeps the original timestamps, lengths, captured
+bytes, interface properties used for dissection, and frame check sequence
+information. It omits all secrets, comments and process metadata. Supply the
+matching secrets separately when reopening the export. Packet numbering can
+change, so enumerate its keyed transactions to obtain a new capture-local ID.
+
+For a confirmed response, the export covers the client and server TCP
+prefixes through the selected messages' last TLS records. It includes TCP
+opening packets, applicable controls, handshakes, earlier TLS key epochs
+and earlier HTTP exchanges required for ordered pairing. Capture order is
+preserved even when an earlier record arrived after the selected response.
+A whole packet can carry later records or other messages. For a request
+without a confirmed response, the export can retain its entire opening
+to preserve conflicting or incomplete reverse evidence. Unrelated
+connections and other openings on the same tuple are excluded.
+
+For a partial body, the exporter can include its direction's remaining
+traffic to preserve a gap, truncation or authentication failure. A TCP or TLS
+limit reached by the selected opening alone can require the entire opening. If a
+source-wide TLS limit cut the body or prevented response pairing, an original
+packet containing part of the next TLS record can demonstrate the incomplete
+tail. If the required whole packets would expose a complete record beyond the
+limit, or cannot preserve the incomplete tail, the exporter returns
+`ErrReassemblyLimit` before writing. It also checks the TCP reassembly byte
+limit when a packet was cut by both reassembly and capture truncation.
+
+The [selection example](../examples/keyed-http1-export/main.go) uses a
+ReaderAt and embedded keys to write the first confirmed exchange whose
+request target matches the argument. Run it on the synthetic TLS 1.3 fixture:
+
+```sh
+go run ./examples/keyed-http1-export testdata/keyed-http1-export.pcapng /second > selected.pcapng
+```
+
+The [offline verification](../testdata/tls-provenance.md#packet-only-export-across-a-tls-13-keyupdate)
+shows how to reopen that file with a separate key log.
+
 ### Read DNS messages from decrypted HTTP/2
 
 Call `capture.HTTP2(data)` and select records with `IsDecrypted`. For each
