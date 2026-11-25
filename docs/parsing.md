@@ -974,9 +974,11 @@ and TCP payload offset also survive. Capture packet ordinals and flow indices
 can change. Use the reopened row's ID for subsequent selection in the subset.
 
 An absent or invalid ID returns `ErrOutOfBounds` before the first write.
-Earlier openings on the same tuple share a TCP reassembly limit. If isolating
-the opening changes a truncated TCP prefix or its anomaly flags, the export
-returns `ErrReassemblyLimit` before the first write. The ReaderAt method
+TCP openings on the same tuple share a reassembly limit. When isolating the
+opening changes a truncated prefix, the exporter checks the selected row
+again. It can also try the whole packets supplying the original prefix if
+the cutoff falls between packets. If neither selection reproduces the
+evidence, it returns `ErrReassemblyLimit` before the first write. The ReaderAt method
 shares one `MaxReaderAtScanBytes` budget across selection, framing and copying.
 A read or write failure during output can leave a partial PcapNG file.
 

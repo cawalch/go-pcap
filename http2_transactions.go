@@ -111,10 +111,14 @@ func scanHTTP2Transactions(source ipFrameSource, export *http2TransactionExportS
 	if export != nil {
 		interfaces = export.interfaces
 	}
-	dirs, err := collectHTTPTransactionDirections(source, interfaces)
+	dirs, err := collectHTTPTransactionDirections(source, interfaces, nil)
 	if err != nil {
 		return nil, err
 	}
+	return selectHTTP2Transactions(dirs, export)
+}
+
+func selectHTTP2Transactions(dirs []http1Direction, export *http2TransactionExportSelection) ([]HTTP2Transaction, error) {
 	budget := http2TransactionBudget{
 		headers: MaxHTTP2DecodedHeaderBytes, transactions: MaxHTTPMessagesPerScan,
 		packetRefs: MaxPackets, bodyBytes: MaxTotalStreamBytes,
@@ -176,7 +180,7 @@ func scanHTTP2Transactions(source ipFrameSource, export *http2TransactionExportS
 			slices.Sort(row.PacketIndices)
 			rows = append(rows, *row)
 			if export != nil && row.ID() == export.id {
-				export.indices, err = http2ExportPackets(row, client, server)
+				export.indices, err = http2ExportPackets(export.source, row, client, server)
 				if err != nil {
 					return nil, err
 				}

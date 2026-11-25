@@ -302,3 +302,135 @@ func TestExtractHTTP2TransactionReorderedInterfaces(t *testing.T) {
 		t.Fatalf("reopened = %+v", rows)
 	}
 }
+
+func TestExtractHTTP2TransactionLaterFramesAtSharedCutoff(t *testing.T) {
+	// The first opening consumes 60 KiB of the tuple's client-side budget.
+	// Both the source and the isolated second opening remain TCP-truncated.
+	// The extra frames recovered on reopen may or may not change stream 1.
+	prior := newH2TestOpening(100)
+	extension := buildHTTP2Frame(0xee, 0, 0, bytes.Repeat([]byte{'x'}, 60000))
+	prior.packet(0, TCPFlagACK, extension)
+	for _, changed := range []bool{false, true} {
+		current := newH2TestOpening(10000000)
+		flags := uint8(5)
+		if changed {
+			flags = 4
+		}
+		current.frame(0, HTTP2FrameHeaders, flags, 1, []byte{0x82, 0x86, 0x84})
+		current.frame(1, HTTP2FrameHeaders, 5, 1, []byte{0x89})
+		for range MaxFlowStreamBytes / len(extension) {
+			current.packet(0, TCPFlagACK, extension)
+		}
+		if changed {
+			current.frame(0, HTTP2FrameData, 1, 1, []byte("after source cutoff"))
+		}
+		current.packet(0, TCPFlagACK, extension)
+		raw := buildClassicPCAP(binary.LittleEndian, false, LinkTypeEthernet, 65535, slices.Concat(prior.frames, current.frames))
+		c, err := New(raw)
+		if err != nil {
+			t.Fatal(err)
+		}
+		source, err := c.HTTP2Transactions(raw)
+		if err != nil || len(source) != 1 || !source[0].Request.TCPAnomalies.Truncated || source[0].Request.EndStream == changed || source[0].StatusCode != 204 {
+			t.Fatalf("source = %+v, %v", source, err)
+		}
+		var out, other bytes.Buffer
+		err = c.ExtractHTTP2TransactionPCAPNG(raw, &out, source[0].ID())
+		readerErr := c.ExtractHTTP2TransactionPCAPNGFromReaderAt(bytes.NewReader(raw), &other, source[0].ID())
+		if changed {
+			if !errors.Is(err, ErrReassemblyLimit) || !errors.Is(readerErr, ErrReassemblyLimit) || out.Len() != 0 || other.Len() != 0 {
+				t.Fatalf("changed row: errors %v, %v; lengths %d, %d", err, readerErr, out.Len(), other.Len())
+			}
+			continue
+		}
+		if err != nil || readerErr != nil || !bytes.Equal(out.Bytes(), other.Bytes()) {
+			t.Fatalf("reproducible row: %v, %v", err, readerErr)
+		}
+		sub, packets := readWrittenPackets(t, out.Bytes())
+		if len(packets) != len(current.frames) {
+			t.Fatalf("got %d packets, want %d", len(packets), len(current.frames))
+		}
+		got := checkReaderParity(t, out.Bytes(), sub.HTTP2Transactions, sub.HTTP2TransactionsFromReaderAt)
+		want := source[0]
+		want.Request.PacketIndex -= len(prior.frames)
+		want.Response.PacketIndex -= len(prior.frames)
+		for i := range want.PacketIndices {
+			want.PacketIndices[i] -= len(prior.frames)
+		}
+		if len(got) != 1 || !reflect.DeepEqual(got[0], want) {
+			t.Fatalf("reopened = %+v, want %+v", got, want)
+		}
+	}
+}
+
+func TestExtractHTTP2MidstreamPrefix(t *testing.T) {
+	o := newH2TestOpening(100)
+	for _, id := range []uint32{1, 3} {
+		o.frame(0, HTTP2FrameHeaders, 5, id, []byte{0x82, 0x86, 0x84})
+		o.frame(1, HTTP2FrameHeaders, 5, id, []byte{0x89})
+	}
+	raw := buildClassicPCAP(binary.LittleEndian, false, LinkTypeEthernet, 65535, o.frames[2:])
+	c, _ := readWrittenPackets(t, raw)
+	rows, err := c.HTTP2Transactions(raw)
+	if err != nil || len(rows) != 2 || !rows[0].Request.TCPAnomalies.MidstreamPickup {
+		t.Fatalf("source %+v, %v", rows, err)
+	}
+	var out bytes.Buffer
+	if err := c.ExtractHTTP2TransactionPCAPNG(raw, &out, rows[0].ID()); err != nil {
+		t.Fatal(err)
+	}
+	sub, packets := readWrittenPackets(t, out.Bytes())
+	got := checkReaderParity(t, out.Bytes(), sub.HTTP2Transactions, sub.HTTP2TransactionsFromReaderAt)
+	if len(packets) != 4 || len(got) != 1 || !reflect.DeepEqual(got[0], rows[0]) {
+		t.Fatalf("%d exported packets, rows %+v", len(packets), got)
+	}
+}
+
+func TestExtractHTTP2TransactionCutoffBetweenPackets(t *testing.T) {
+	// The server's reassembly allowance ends after the first six bytes of the
+	// final HEADERS frame. Its last four bytes occupy a later, removable packet.
+	prior := newH2TestOpening(100)
+	fill := bytes.Repeat([]byte{'x'}, 60000)
+	for n := MaxFlowStreamBytes - 9 - 15; n > 0; {
+		take := min(len(fill), n)
+		prior.packet(1, TCPFlagACK, fill[:take])
+		n -= take
+	}
+	current := newH2TestOpening(9000)
+	current.frame(0, HTTP2FrameHeaders, 5, 1, []byte{0x82, 0x86, 0x84})
+	status := buildHTTP2Frame(HTTP2FrameHeaders, 5, 1, []byte{0x89})
+	current.packet(1, TCPFlagACK, status[:6])
+	current.packet(1, TCPFlagACK, status[6:])
+	raw := buildClassicPCAP(binary.LittleEndian, false, LinkTypeEthernet, 65535, slices.Concat(prior.frames, current.frames))
+	c, _ := readWrittenPackets(t, raw)
+	rows, err := c.HTTP2Transactions(raw)
+	if err != nil || len(rows) != 1 || rows[0].Response != nil || rows[0].Pairing != HTTP2ResponseAmbiguous {
+		t.Fatalf("source rows %+v, %v", rows, err)
+	}
+	var out, other bytes.Buffer
+	want := rows[0]
+	if err := c.ExtractHTTP2TransactionPCAPNG(raw, &out, want.ID()); err != nil {
+		t.Fatal(err)
+	}
+	if err := c.ExtractHTTP2TransactionPCAPNGFromReaderAt(bytes.NewReader(raw), &other, want.ID()); err != nil || !bytes.Equal(out.Bytes(), other.Bytes()) {
+		t.Fatalf("ReaderAt differs: %v", err)
+	}
+	sub, pkts := readWrittenPackets(t, out.Bytes())
+	if len(pkts) != len(current.frames)-1 {
+		t.Fatalf("exported %d packets, want %d", len(pkts), len(current.frames)-1)
+	}
+	for i, pkt := range pkts {
+		frame, err := sub.PacketPayload(out.Bytes(), pkt)
+		if err != nil || !bytes.Equal(frame, current.frames[i]) {
+			t.Fatalf("packet %d differs: %v", i, err)
+		}
+	}
+	got := checkReaderParity(t, out.Bytes(), sub.HTTP2Transactions, sub.HTTP2TransactionsFromReaderAt)
+	want.Request.PacketIndex -= len(prior.frames)
+	for i := range want.PacketIndices {
+		want.PacketIndices[i] -= len(prior.frames)
+	}
+	if len(got) != 1 || !reflect.DeepEqual(got[0], want) {
+		t.Fatalf("reopened = %+v, want %+v", got, want)
+	}
+}
