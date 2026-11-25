@@ -77,18 +77,21 @@ func (c *Capture) extractHTTP1TransactionPCAPNG(source flowExportSource, w io.Wr
 	if _, err := scanHTTP1Transactions(frames, &selection); err != nil {
 		return err
 	}
-	indices := selection.packetIndices
+	return c.writeSelectedPackets(&source, w, selection.packetIndices, selection.interfaces)
+}
+
+func (c *Capture) writeSelectedPackets(source *flowExportSource, w io.Writer, indices []int, interfaces map[int]uint32) error {
 	if len(indices) == 0 {
 		return ErrOutOfBounds
 	}
 	if c.Format == FormatPCAP {
-		return c.writeSelectedClassicPackets(&source, w, indices)
+		return c.writeSelectedClassicPackets(source, w, indices)
 	}
 	var used [MaxInterfaces]bool
 	selected := make([]uint64, indices[len(indices)-1]/64+1)
 	for _, index := range indices {
 		selected[index/64] |= uint64(1) << uint(index%64)
-		used[selection.interfaces[index]] = true
+		used[interfaces[index]] = true
 	}
 	return source.writeSelectedBlocks(w, &used, selected, true)
 }

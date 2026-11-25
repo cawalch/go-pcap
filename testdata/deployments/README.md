@@ -186,7 +186,8 @@ offsets, decoded headers, and stream completion without invoking TShark.
 
 ## HTTP/2 transaction fixture
 
-`http2-transactions.pcapng` contains 14 Ethernet frames. Frame 7 starts POST
+`http2-transactions.pcapng` contains 14 Ethernet frames. Frame 3 belongs to a separate TCP connection
+on the `unrelated` interface. Frame 7 starts POST
 requests on streams 1 and 3 at TCP payload offsets 0 and 50. Stream 3
 references the authority inserted by stream 1. TShark 4.6.10 (commit
 `eac916f07299`) reports the following fields. Run from the repository root.
@@ -212,3 +213,29 @@ The request bodies are `alpha` and `beta`. The server returns `201` and `two`
 on stream 3 before sending `103`, then `200` and `one`, on stream 1. The
 last frame carries the trailer `x-end: ok`. With two-pass dissection, TShark
 reports the reassembled entity at completion, including on the trailer frame.
+
+### Reopen the stream 3 export
+
+`ExtractHTTP2TransactionPCAPNG` for the request at packet 6, TCP payload
+offset 50, stream 3, writes nine original frames (one-based frame numbers
+1, 2, 4–9 and 11). Frames 7–9 and 11 contribute directly to this exchange.
+The additional frames supply the TCP opening, preface and SETTINGS. Frame 7
+also contains stream 1's indexed authority. Source comments and the synthetic
+secrets block are omitted.
+
+Run the same TShark 4.6.10 command on the source and the exported file, here
+named `selected.pcapng`.
+
+```sh
+for capture in testdata/deployments/http2-transactions.pcapng selected.pcapng; do
+  tshark -2 -n -d tcp.port==80,http2 -r "$capture" \
+    -Y 'http2.streamid == 3' -T fields -e frame.number -e http2.streamid \
+    -e http2.header.name -e http2.header.value -e http2.data.data
+done
+```
+
+The source yields frames 7, 8, 9 and 11. The export yields frames 6, 7, 8 and
+9, with the same decoded fields. Stream 3 has method `POST`, path `/two`,
+authority `trace.example`, request DATA `62657461` (`beta`), final status
+`201` and response DATA `74776f` (`two`). The shared frames also show stream
+1's `/one` headers and DATA `616c`.

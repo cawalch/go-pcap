@@ -82,13 +82,13 @@ func (t HTTP2Transaction) ID() HTTP2TransactionID {
 // [MaxHTTPMessagesPerScan], [MaxHTTP2DecodedHeaderBytes], [MaxHTTPBodyBytes]
 // and [MaxHTTPDecodedBodyBytesPerScan] for scan and message limits.
 func (c *Capture) HTTP2Transactions(data []byte) ([]HTTP2Transaction, error) {
-	return scanHTTP2Transactions(ipFrameSource{capture: c, data: data})
+	return scanHTTP2Transactions(ipFrameSource{capture: c, data: data}, nil)
 }
 
 // HTTP2TransactionsFromReaderAt is the bounded ReaderAt equivalent of
 // [Capture.HTTP2Transactions]. All packet reads share [MaxReaderAtScanBytes].
 func (c *Capture) HTTP2TransactionsFromReaderAt(r io.ReaderAt) ([]HTTP2Transaction, error) {
-	return scanHTTP2Transactions(ipFrameSource{capture: c, reader: r, needsPayload: func(f Frame, _ []byte) bool { return f.IPProtocol == IPProtoTCP }})
+	return scanHTTP2Transactions(ipFrameSource{capture: c, reader: r, needsPayload: func(f Frame, _ []byte) bool { return f.IPProtocol == IPProtoTCP }}, nil)
 }
 
 type http2TransactionBudget struct {
@@ -106,8 +106,12 @@ type http2Exchange struct {
 	requestInvalid, responseInvalid bool
 }
 
-func scanHTTP2Transactions(source ipFrameSource) ([]HTTP2Transaction, error) {
-	dirs, err := collectHTTPTransactionDirections(source, nil)
+func scanHTTP2Transactions(source ipFrameSource, export *http2TransactionExportSelection) ([]HTTP2Transaction, error) {
+	var interfaces map[int]uint32
+	if export != nil {
+		interfaces = export.interfaces
+	}
+	dirs, err := collectHTTPTransactionDirections(source, interfaces)
 	if err != nil {
 		return nil, err
 	}
@@ -131,8 +135,9 @@ func scanHTTP2Transactions(source ipFrameSource) ([]HTTP2Transaction, error) {
 			return nil, err
 		}
 		var responses http2TransactionFrames
+		var server *http1Direction
 		if client.peer != 0 {
-			server := &dirs[client.peer-1]
+			server = &dirs[client.peer-1]
 			if server.hasPayload {
 				responses.incomplete = true
 				if consistentHTTPOpening(client, server) && hasHTTP2InitialSettings(server.data) && server.data[4] == 0 {
@@ -170,6 +175,12 @@ func scanHTTP2Transactions(source ipFrameSource) ([]HTTP2Transaction, error) {
 			}
 			slices.Sort(row.PacketIndices)
 			rows = append(rows, *row)
+			if export != nil && row.ID() == export.id {
+				export.indices, err = http2ExportPackets(row, client, server)
+				if err != nil {
+					return nil, err
+				}
+			}
 		}
 	}
 	slices.SortFunc(rows, func(a, b HTTP2Transaction) int {
