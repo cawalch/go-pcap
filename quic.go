@@ -210,19 +210,19 @@ func deriveQUICInitialKeys(dcid []byte, version uint32, isClient bool) (quicInit
 	if isClient {
 		dirLabel = "client in"
 	}
-	trafficSecret, err := tls13ExpandLabelSHA256(initialSecret, dirLabel, nil, 32)
+	trafficSecret, err := tls13ExpandLabelHash(sha256.New, initialSecret, dirLabel, nil, 32)
 	if err != nil {
 		return quicInitialKeys{}, err
 	}
-	key, err := tls13ExpandLabelSHA256(trafficSecret, keyLabel, nil, 16)
+	key, err := tls13ExpandLabelHash(sha256.New, trafficSecret, keyLabel, nil, 16)
 	if err != nil {
 		return quicInitialKeys{}, err
 	}
-	ivSlice, err := tls13ExpandLabelSHA256(trafficSecret, ivLabel, nil, 12)
+	ivSlice, err := tls13ExpandLabelHash(sha256.New, trafficSecret, ivLabel, nil, 12)
 	if err != nil {
 		return quicInitialKeys{}, err
 	}
-	hpKey, err := tls13ExpandLabelSHA256(trafficSecret, hpLabel, nil, 16)
+	hpKey, err := tls13ExpandLabelHash(sha256.New, trafficSecret, hpLabel, nil, 16)
 	if err != nil {
 		return quicInitialKeys{}, err
 	}
@@ -245,22 +245,6 @@ func deriveQUICInitialKeys(dcid []byte, version uint32, isClient bool) (quicInit
 	out.hp = hpBlock
 	copy(out.iv[:], ivSlice)
 	return out, nil
-}
-
-func tls13ExpandLabelSHA256(secret []byte, label string, context []byte, length int) ([]byte, error) {
-	// RFC 8446 §7.1 HkdfLabel structure:
-	// uint16 length
-	// opaque label<7..255> = "tls13 " + label
-	// opaque context<0..255>
-	fullLabel := "tls13 " + label
-	var info [64]byte
-	b := info[:0]
-	b = append(b, byte(length>>8), byte(length))
-	b = append(b, byte(len(fullLabel)))
-	b = append(b, fullLabel...)
-	b = append(b, byte(len(context)))
-	b = append(b, context...)
-	return hkdf.Expand(sha256.New, secret, string(b), length)
 }
 
 func decryptSingleQUICInitial(pkt []byte, hdr QUICInitialHeader, keys quicInitialKeys) ([]byte, error) {
@@ -293,10 +277,7 @@ func decryptSingleQUICInitial(pkt []byte, hdr QUICInitialHeader, keys quicInitia
 		pn = (pn << 8) | uint64(aad[hdr.PayloadOffset+i])
 	}
 
-	nonce := keys.iv
-	for i := range 8 {
-		nonce[11-i] ^= byte(pn >> (8 * i))
-	}
+	nonce := xorTLS13Nonce(keys.iv, pn)
 
 	ciphertext := pkt[hdr.PayloadOffset+pnLen : hdr.PacketLength]
 	plaintext, err := keys.aead.Open(work[headerLen:][:0], nonce[:], ciphertext, aad)
@@ -324,47 +305,30 @@ func extractQUICCryptoFrames(plaintext []byte, chunks *[]quicCryptoChunk) error 
 		case 0x00, 0x01:
 			// PADDING (0x00) or PING (0x01): 1 byte, already consumed.
 		case 0x02, 0x03:
-			// ACK frame (0x02 or 0x03 with ECN counts).
-			_, n1, ok1 := ReadQUICVarint(plaintext[i:])
-			if !ok1 {
-				return ErrInvalidQUIC
-			}
-			i += n1
-			_, n2, ok2 := ReadQUICVarint(plaintext[i:])
-			if !ok2 {
-				return ErrInvalidQUIC
-			}
-			i += n2
-			ackRangeCount, n3, ok3 := ReadQUICVarint(plaintext[i:])
-			if !ok3 || ackRangeCount > 256 {
-				return ErrInvalidQUIC
-			}
-			i += n3
-			_, n4, ok4 := ReadQUICVarint(plaintext[i:])
-			if !ok4 {
-				return ErrInvalidQUIC
-			}
-			i += n4
-			for range ackRangeCount {
-				_, ng, okg := ReadQUICVarint(plaintext[i:])
-				if !okg {
+			// Skip Largest Acknowledged and ACK Delay before reading ACK Range Count.
+			for range 2 {
+				_, n, ok := ReadQUICVarint(plaintext[i:])
+				if !ok {
 					return ErrInvalidQUIC
 				}
-				i += ng
-				_, nr, okr := ReadQUICVarint(plaintext[i:])
-				if !okr {
-					return ErrInvalidQUIC
-				}
-				i += nr
+				i += n
 			}
+			ackRangeCount, n, ok := ReadQUICVarint(plaintext[i:])
+			if !ok || ackRangeCount > 256 {
+				return ErrInvalidQUIC
+			}
+			i += n
+			// Skip First ACK Range, then a Gap and ACK Range Length for each range.
+			fields := 1 + 2*int(ackRangeCount)
 			if frameType == 0x03 {
-				for range 3 {
-					_, ne, oke := ReadQUICVarint(plaintext[i:])
-					if !oke {
-						return ErrInvalidQUIC
-					}
-					i += ne
+				fields += 3 // ECT(0), ECT(1), and ECN-CE counts.
+			}
+			for range fields {
+				_, n, ok := ReadQUICVarint(plaintext[i:])
+				if !ok {
+					return ErrInvalidQUIC
 				}
+				i += n
 			}
 		case 0x06:
 			// CRYPTO frame: Offset (varint), Length (varint), Crypto Data.
