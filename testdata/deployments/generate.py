@@ -271,13 +271,14 @@ def http1_transactions():
     write_pcapng("http1-transactions", ["unrelated", "http-client"], packets)
 
 
+def h2(kind, flags, stream, payload=b""):
+    return len(payload).to_bytes(3, "big") + pack("!BBI", kind, flags, stream) + payload
+
+
 def http2_frames():
     conn = TCP("192.0.2.14", "198.51.100.80", 50000, 1000, 2000)
     conn.ports = (50000, 80)
     data = PSH | ACK
-
-    def h2(kind, flags, stream, payload=b""):
-        return len(payload).to_bytes(3, "big") + pack("!BBI", kind, flags, stream) + payload
 
     preface = b"PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n"
     # The first request inserts :authority. The second indexes it across streams.
@@ -295,6 +296,34 @@ def http2_frames():
         conn.send(True, data, h2(0, 1, 1, b"ok")),
     ]
     write_pcapng("http2-frames", ["http-client"], [(0, packet, None, b"") for packet in frames])
+
+
+
+def http2_transactions():
+    conn = TCP("192.0.2.14", "198.51.100.80", 50000, 1000, 2000)
+    conn.ports = (50000, 80)
+    data = PSH | ACK
+    preface = b"PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n"
+    # Incremental indexing inserts :authority on stream 1. Stream 3 indexes it.
+    first = b"\x83\x86\x04\x04/one\x41\x0dtrace.example\x00\x05x-tag\x01a\x00\x05x-tag\x01b"
+    second = b"\x83\x86\x04\x04/two\xbe"
+    frames = [
+        conn.send(False, SYN),
+        conn.send(True, SYN | ACK),
+        conn.send(False, ACK),
+        conn.send(False, data, preface + h2(4, 0, 0)),
+        conn.send(True, data, h2(4, 0, 0) + h2(4, 1, 0)),
+        conn.send(False, data, h2(4, 1, 0)),
+        conn.send(False, data, h2(1, 4, 1, first) + h2(1, 0, 3, second[:2])),
+        conn.send(False, data, h2(9, 4, 3, second[2:]) + h2(0, 0, 1, b"al")),
+        conn.send(False, data, h2(0, 1, 3, b"beta")),
+        conn.send(False, data, h2(0, 1, 1, b"pha")),
+        conn.send(True, data, h2(1, 4, 3, b"\x08\x03201") + h2(0, 1, 3, b"two")),
+        conn.send(True, data, h2(1, 4, 1, b"\x08\x03103")),
+        conn.send(True, data, h2(1, 4, 1, b"\x88") + h2(0, 0, 1, b"one")),
+        conn.send(True, data, h2(1, 5, 1, b"\x00\x05x-end\x02ok")),
+    ]
+    write_pcapng("http2-transactions", ["http-client"], [(0, pkt, None, b"") for pkt in frames])
 
 
 def darwin_pktap():
@@ -328,4 +357,5 @@ if __name__ == "__main__":
     dns_transactions()
     http1_transactions()
     http2_frames()
+    http2_transactions()
     darwin_pktap()

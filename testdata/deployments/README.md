@@ -183,3 +183,32 @@ and stream 1 with the DATA `ok` in frame 10.
 
 The [Go tests](../../http2_frame_test.go) check directional frame and DATA
 offsets, decoded headers, and stream completion without invoking TShark.
+
+## HTTP/2 transaction fixture
+
+`http2-transactions.pcapng` contains 14 Ethernet frames. Frame 7 starts POST
+requests on streams 1 and 3 at TCP payload offsets 0 and 50. Stream 3
+references the authority inserted by stream 1. TShark 4.6.10 (commit
+`eac916f07299`) reports the following fields. Run from the repository root.
+
+```sh
+tshark -2 -n -d tcp.port==80,http2 -r testdata/deployments/http2-transactions.pcapng \
+  -Y 'http2.streamid > 0' -T fields -e frame.number -e http2.streamid \
+  -e http2.header.name -e http2.header.value -e http2.data.data
+```
+
+```text
+7   1,3  :method,:scheme,:path,:authority,x-tag,x-tag,:method,:scheme  POST,http,/one,trace.example,a,b,POST,http
+8   3,1  :path,:authority  /two,trace.example  616c
+9   3                                          62657461
+10  1                                          616c706861
+11  3,3  :status  201                          74776f
+12  1    :status  103
+13  1,1  :status  200                          6f6e65
+14  1    x-end    ok                           6f6e65
+```
+
+The request bodies are `alpha` and `beta`. The server returns `201` and `two`
+on stream 3 before sending `103`, then `200` and `one`, on stream 1. The
+last frame carries the trailer `x-end: ok`. With two-pass dissection, TShark
+reports the reassembled entity at completion, including on the trailer frame.

@@ -103,7 +103,9 @@ func (d *http1Direction) observe(f Frame, index, size int) {
 	}
 }
 
-func scanHTTP1Transactions(source ipFrameSource, export *http1TransactionExportSelection) ([]HTTP1Transaction, error) {
+// Collect both contiguous directions of each observed TCP opening, with the
+// packet ownership and control evidence used by the HTTP transaction readers.
+func collectHTTPTransactionDirections(source ipFrameSource, export *http1TransactionExportSelection) ([]http1Direction, error) {
 	collector := tcpMessageCollector{separateInterfaces: source.capture != nil && source.capture.SeparateTCPInterfaces}
 	var dirs []http1Direction
 	err := walkHTTPPackets(source, func(pkt PacketRecord, frame Frame, flow int, payload []byte) error {
@@ -155,6 +157,14 @@ func scanHTTP1Transactions(source ipFrameSource, export *http1TransactionExportS
 		if err != nil {
 			return nil, err
 		}
+	}
+	return dirs, nil
+}
+
+func scanHTTP1Transactions(source ipFrameSource, export *http1TransactionExportSelection) ([]HTTP1Transaction, error) {
+	dirs, err := collectHTTPTransactionDirections(source, export)
+	if err != nil {
+		return nil, err
 	}
 	var rows []HTTP1Transaction
 	budget := newHTTP1EvidenceBudget()
@@ -240,12 +250,18 @@ func (d *http1Direction) packetsFor(indices []int, start, end int) ([]int, bool,
 }
 
 func http1Anchored(client, server *http1Direction) bool {
-	if client.syn == 0 || server.syn == 0 || client.inconsistent || server.inconsistent || client.anomalies.OverlapConflict || server.anomalies.OverlapConflict {
+	return client.syn != 0 && server.syn != 0 && consistentHTTPOpening(client, server)
+}
+
+func consistentHTTPOpening(client, server *http1Direction) bool {
+	if client.inconsistent || server.inconsistent || client.anomalies.OverlapConflict || server.anomalies.OverlapConflict {
 		return false
 	}
-	cs, ss := client.dir.segments[client.syn-1], server.dir.segments[server.syn-1]
-	if cs.Flags&TCPFlagACK != 0 || ss.Flags&TCPFlagACK == 0 || server.acks[server.syn-1]-(cs.Seq+1) > uint32(len(cs.Payload)) {
-		return false
+	if client.syn != 0 && server.syn != 0 {
+		cs, ss := client.dir.segments[client.syn-1], server.dir.segments[server.syn-1]
+		if cs.Flags&TCPFlagACK != 0 || ss.Flags&TCPFlagACK == 0 || server.acks[server.syn-1]-(cs.Seq+1) > uint32(len(cs.Payload)) {
+			return false
+		}
 	}
 	for _, d := range []*http1Direction{client, server} {
 		if d.reset != 0 && max(client.lastPayload, server.lastPayload) > d.dir.packets[d.reset-1].index+1 {
