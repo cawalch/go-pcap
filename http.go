@@ -184,7 +184,7 @@ func parseHTTPRequest(stream []byte, decodedBudget *httpDecodeBudget) (HTTPReque
 
 	body := framing.body(stream, bodyStart, true)
 	req.Anomalies.TruncatedBody = body.truncated
-	req.Body, req.IsDecompressed, err = decodeHTTPContent(body.data, framing.encoding, framing.chunked, decodedBudget, &req.Anomalies)
+	req.Body, req.IsDecompressed, err = decodeHTTPContent(body.data, framing.encoding, body.ownedData, decodedBudget, &req.Anomalies)
 	if err != nil {
 		return HTTPRequest{}, 0, err
 	}
@@ -239,7 +239,7 @@ func parseHTTPResponse(stream []byte, method string, decodedBudget *httpDecodeBu
 
 	body := framing.body(stream, bodyStart, false)
 	resp.Anomalies.TruncatedBody = body.truncated
-	resp.Body, resp.IsDecompressed, err = decodeHTTPContent(body.data, framing.encoding, framing.chunked, decodedBudget, &resp.Anomalies)
+	resp.Body, resp.IsDecompressed, err = decodeHTTPContent(body.data, framing.encoding, body.ownedData, decodedBudget, &resp.Anomalies)
 	if err != nil {
 		return HTTPResponse{}, 0, err
 	}
@@ -493,7 +493,7 @@ func (b *httpDecodeBudget) read(r io.Reader) ([]byte, error) {
 	return b.scratch.Bytes(), err
 }
 
-func decodeHTTPContent(body []byte, encoding string, chunked bool, budget *httpDecodeBudget, anomalies *HTTPAnomalies) ([]byte, bool, error) {
+func decodeHTTPContent(body []byte, encoding string, owned bool, budget *httpDecodeBudget, anomalies *HTTPAnomalies) ([]byte, bool, error) {
 	if len(body) == 0 {
 		return body, false, nil
 	}
@@ -520,7 +520,7 @@ func decodeHTTPContent(body []byte, encoding string, chunked bool, budget *httpD
 		anomalies.InvalidContentEncoding = err != nil
 	}
 
-	if !chunked {
+	if !owned {
 		body = bytes.Clone(body)
 	}
 	return body, false, nil
@@ -568,7 +568,7 @@ func httpContentReader(body []byte, encoding string) (io.ReadCloser, error) {
 
 func decodeChunkedBody(raw []byte, strict bool) httpFramedBody {
 	var out bytes.Buffer
-	body := httpFramedBody{consumed: len(raw), truncated: true}
+	body := httpFramedBody{consumed: len(raw), truncated: true, ownedData: true}
 	offset := 0
 	for offset < len(raw) {
 		lineEnd := bytes.Index(raw[offset:], []byte("\r\n"))
