@@ -83,7 +83,7 @@ These limits apply to capture scans. Streaming writers check individual calls an
 | `MaxTLSHandshakesPerScan` | 16,384 handshakes | Bounds TLS handshakes returned per capture scan |
 | `MaxTLSKeyLogEntries` | 4,096 entries | Bounds NSS keylog entries parsed per `ParseTLSKeyLog` / `TLSKeyLog` call |
 | `MaxQUICCryptoBytes` | 64 KiB | Bounds reassembled QUIC Initial `CRYPTO` stream size |
-| `MaxQUICPacketsPerFlow` | 64 packets | Bounds UDP datagrams inspected per QUIC Initial exchange |
+| `MaxQUICPacketsPerFlow` | 64 datagrams | Bounds UDP datagrams inspected per QUIC Initial exchange |
 | `MaxQUICFlowsPerScan` | 16,384 exchanges | Bounds QUIC Initial exchanges tracked per capture scan |
 | `MaxHTTPHeaders` | 128 headers | Bounds HTTP header lines per request or response |
 | `MaxHTTPBodyBytes` | 4 MiB | Bounds each carved HTTP body before and after content decoding |
@@ -663,6 +663,11 @@ ID. Application traffic uses separate keys. The Initial parser exposes the
 handshake metadata even when application payloads remain opaque.
 [QUIC v1 Initial secrets](https://www.rfc-editor.org/rfc/rfc9001#section-5.2) ·
 [QUIC v2 changes](https://www.rfc-editor.org/rfc/rfc9369#section-3.3)
+
+Pass one UDP payload per slice element to `DecryptQUICInitial`. A datagram can
+hold multiple QUIC packets. Within an Initial packet, the parser skips ACK
+frames with up to 256 additional ranges, including any ECN counters, to reach
+subsequent CRYPTO frames.
 
 `QUIC` and `QUICFromReaderAt` return distinct Initial exchanges on the same
 UDP tuple in first-observed order. They group Initials across a client port
