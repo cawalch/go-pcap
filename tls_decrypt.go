@@ -428,6 +428,16 @@ func decryptTLS13Records(stream []byte, cipherSuite uint16, handshakeSecret, app
 				}
 			}
 		case TLSRecordAlert:
+			if provenance != nil {
+				if authenticatedTLSClose(innerContent) {
+					provenance.captureClose(start, offset, appBuf.Len())
+					return hsBuf.Bytes(), appBuf.Bytes(), nil
+				}
+				if terminalTLSAlert(innerContent, true) {
+					provenance.stopAt(start, tlsStopInvalidRecord)
+					return hsBuf.Bytes(), appBuf.Bytes(), nil
+				}
+			}
 		default:
 			if provenance != nil {
 				provenance.stopAt(start, tlsStopInvalidRecord)
@@ -635,6 +645,16 @@ func decryptTLS12Records(stream []byte, cipherSuite uint16, masterSecret []byte,
 		}
 		inCipherPhase = true
 		seqNum++
+		if provenance != nil && contentType == TLSRecordAlert {
+			if authenticatedTLSClose(plain) {
+				provenance.captureClose(start, offset, appBuf.Len())
+				break
+			}
+			if terminalTLSAlert(plain, false) {
+				provenance.stopAt(start, tlsStopInvalidRecord)
+				break
+			}
+		}
 		if contentType == TLSRecordApplicationData {
 			if provenance != nil && !provenance.application(start, offset, appBuf.Len(), len(plain), false) {
 				break

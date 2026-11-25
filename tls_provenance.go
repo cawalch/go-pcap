@@ -38,7 +38,8 @@ type tlsApplicationRecord struct {
 }
 
 type tlsDirectionProvenance struct {
-	records []tlsApplicationRecord
+	records     []tlsApplicationRecord
+	closeNotify *tlsApplicationRecord
 	// A later TLS 1.3 application epoch can authenticate independently after
 	// opaque records. Its logical offsets start at zero in the recovered bytes.
 	before tlsProvenanceBoundary
@@ -47,8 +48,10 @@ type tlsDirectionProvenance struct {
 
 type tlsProvenanceStream struct {
 	TCPStream
-	openingPacket  int // First observed packet in this opening, including SYN if captured first.
-	client, server tlsDirectionProvenance
+	openingPacket                  int // First observed packet in this opening, including SYN if captured first.
+	client, server                 tlsDirectionProvenance
+	confirmedOpening, earlyOffered bool
+	wire                           [2]tcpWireDirection
 }
 
 type tlsProvenanceBudget struct {
@@ -93,14 +96,22 @@ func (p *tlsRecordMapper) inspect(offset int) bool {
 }
 
 func (p *tlsRecordMapper) application(start, end, plainStart, n int, early bool) bool {
+	r, ok := p.mapRecord(start, end, plainStart, n, early)
+	if ok {
+		p.records = append(p.records, r)
+	}
+	return ok
+}
+
+func (p *tlsRecordMapper) mapRecord(start, end, plainStart, n int, early bool) (tlsApplicationRecord, bool) {
 	if n > MaxFlowStreamBytes-plainStart {
 		p.stopAt(start, tlsStopLimit)
-		return false
+		return tlsApplicationRecord{}, false
 	}
 	wireStart, wireEnd := p.prefix+start, p.prefix+end
 	if len(p.spans) == 0 || int(p.spans[len(p.spans)-1].end) < wireEnd {
 		p.stopAt(start, tlsStopTruncated)
-		return false
+		return tlsApplicationRecord{}, false
 	}
 	for int(p.spans[p.spanIndex].end) <= wireStart {
 		p.spanIndex++
@@ -109,7 +120,7 @@ func (p *tlsRecordMapper) application(start, end, plainStart, n int, early bool)
 	for ; ; last++ {
 		if last-p.spanIndex >= p.budget.ranges {
 			p.stopAt(start, tlsStopLimit)
-			return false
+			return tlsApplicationRecord{}, false
 		}
 		if int(p.spans[last].end) >= wireEnd {
 			break
@@ -122,11 +133,27 @@ func (p *tlsRecordMapper) application(start, end, plainStart, n int, early bool)
 	}
 	p.spanIndex = last
 	slices.Sort(packets)
-	p.records = append(p.records, tlsApplicationRecord{
+	return tlsApplicationRecord{
 		plainStart: plainStart, plainEnd: plainStart + n, wireStart: wireStart, wireEnd: wireEnd,
 		packets: slices.Compact(packets), early: early,
-	})
-	return true
+	}, true
+}
+
+func authenticatedTLSClose(alert []byte) bool {
+	return len(alert) == 2 && alert[0] == 1 && alert[1] == 0
+}
+
+// Fatal alerts and malformed alerts end the authenticated prefix without a
+// graceful close. TLS 1.3 also treats non-closure alerts as errors regardless
+// of their legacy level, except for user_canceled.
+func terminalTLSAlert(alert []byte, tls13 bool) bool {
+	return len(alert) != 2 || alert[0] != 1 || tls13 && alert[1] != 90 && alert[1] != 0
+}
+
+func (p *tlsRecordMapper) captureClose(start, end, plainEnd int) {
+	if record, ok := p.mapRecord(start, end, plainEnd, 0, false); ok {
+		p.closeNotify = &record
+	}
 }
 
 // Read the declared length of the IP datagram carrying TCP. The observed
@@ -178,6 +205,21 @@ func truncatedTCPPayload(source ipFrameSource, pkt PacketRecord, frame *Frame) (
 // Reassemble the contiguous TCP prefix and recover record provenance for each
 // TLS opening. The source supplies either capture bytes or a ReaderAt.
 func scanTLSProvenance(source ipFrameSource, extraKeyLog []byte) ([]tlsProvenanceStream, error) {
+	if err := source.capture.validateContainer(); err != nil {
+		return nil, err
+	}
+	if len(extraKeyLog) > MaxDecryptionSecretBytes || len(source.capture.Secrets) > MaxDecryptionSecrets {
+		return nil, ErrSecretLimit
+	}
+	remainingKeys := MaxDecryptionSecretBytes - len(extraKeyLog)
+	for _, block := range source.capture.Secrets {
+		if block.SecretsType == SecretsTypeTLSKeyLog {
+			if len(block.Data) > remainingKeys {
+				return nil, ErrSecretLimit
+			}
+			remainingKeys -= len(block.Data)
+		}
+	}
 	keys, err := source.capture.TLSKeyLog(extraKeyLog)
 	if err != nil {
 		return nil, err
@@ -221,7 +263,11 @@ func scanTLSProvenance(source ipFrameSource, extraKeyLog []byte) ([]tlsProvenanc
 		dirs[0].prefix, dirs[1].prefix = co, so
 		decoded, ok := decryptTLSStream(inner, keys, &dirs)
 		if ok {
+			if decoded.SrcAddr != wire.SrcAddr || decoded.SrcPort != wire.SrcPort {
+				info.wire[0], info.wire[1] = info.wire[1], info.wire[0]
+			}
 			out = append(out, tlsProvenanceStream{TCPStream: decoded, openingPacket: info.firstPacket,
+				confirmedOpening: info.confirmedOpening, earlyOffered: dirs[0].earlyOffered, wire: info.wire,
 				client: dirs[0].tlsDirectionProvenance, server: dirs[1].tlsDirectionProvenance})
 		}
 	}

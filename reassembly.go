@@ -379,6 +379,7 @@ type streamMetadata struct {
 	firstPacket                int
 	clientPrefix, serverPrefix int
 	wire                       [2]tcpWireDirection
+	confirmedOpening           bool
 }
 
 // A packet index and its TCP acknowledgement describe a captured payload.
@@ -413,17 +414,39 @@ type tcpWireCapture struct {
 }
 
 type tcpWireTail struct {
-	fin, declaredEnd    uint32
-	hasFIN, isTruncated bool
-	unknownTruncation   bool
+	fin, declaredEnd, lastEnd  uint32
+	hasFIN, isTruncated        bool
+	unknownTruncation          bool
+	synSeq, synAck, synPayload uint32
+	synFlags                   uint8
+	inconsistent               bool
+	reset, lastPayload         int // One-based packet indices.
 }
 
 func (wire *tcpWireCapture) observe(dir, segment int, index int, frame *Frame, hasPayload bool, mode tcpWireMode, missing int64) {
 	if mode == tcpWireAll {
 		tail := &wire.tails[dir]
+		flags := frame.TCPFlags
+		if flags&TCPFlagSYN != 0 {
+			if tail.synFlags == 0 {
+				tail.synSeq, tail.synAck, tail.synPayload, tail.synFlags = frame.TCPSeq, frame.TCPAck, frame.PayloadLength, flags
+			} else if tail.synSeq != frame.TCPSeq || (flags^tail.synFlags)&TCPFlagACK != 0 || flags&TCPFlagACK != 0 && frame.TCPAck != tail.synAck {
+				tail.inconsistent = true
+			}
+		}
 		end := frame.TCPSeq + frame.PayloadLength
-		if frame.TCPFlags&TCPFlagSYN != 0 {
+		if flags&TCPFlagSYN != 0 {
 			end++
+		}
+		if hasPayload {
+			if tail.lastPayload == 0 || int32(end-tail.lastEnd) > 0 {
+				tail.lastEnd = end
+			}
+			tail.lastPayload = index + 1
+			tail.inconsistent = tail.inconsistent || flags&(TCPFlagACK|TCPFlagSYN) == 0
+		}
+		if flags&TCPFlagRST != 0 && tail.reset == 0 {
+			tail.reset = index + 1
 		}
 		switch {
 		case missing < 0:
@@ -433,7 +456,8 @@ func (wire *tcpWireCapture) observe(dir, segment int, index int, frame *Frame, h
 			if !tail.isTruncated || int32(end-tail.declaredEnd) > 0 {
 				tail.declaredEnd, tail.isTruncated = end, true
 			}
-		case frame.TCPFlags&TCPFlagFIN != 0 && !tail.hasFIN:
+		case flags&TCPFlagFIN != 0:
+			tail.inconsistent = tail.inconsistent || tail.hasFIN && end != tail.fin
 			tail.fin, tail.hasFIN = end, true
 		}
 	}
@@ -452,6 +476,22 @@ func (wire *tcpWireCapture) observe(dir, segment int, index int, frame *Frame, h
 		packets[segment].ack = frame.TCPAck
 	}
 	wire.packets[dir] = packets
+}
+
+func (wire *tcpWireCapture) confirmedOpening() bool {
+	a, b := &wire.tails[0], &wire.tails[1]
+	if a.synFlags&TCPFlagACK != 0 {
+		a, b = b, a
+	}
+	for _, t := range wire.tails {
+		if t.hasFIN && t.lastPayload != 0 && int32(t.lastEnd-t.fin) > 0 {
+			return false
+		}
+	}
+	last := max(a.lastPayload, b.lastPayload)
+	return a.synFlags&(TCPFlagSYN|TCPFlagACK) == TCPFlagSYN && b.synFlags&(TCPFlagSYN|TCPFlagACK) == TCPFlagSYN|TCPFlagACK &&
+		b.synAck-(a.synSeq+1) <= a.synPayload && !a.inconsistent && !b.inconsistent &&
+		(a.reset == 0 || last <= a.reset) && (b.reset == 0 || last <= b.reset)
 }
 
 func (wire *tcpWireDirection) add(end int, seq uint32, packet tcpPacketEvidence) {
@@ -564,6 +604,9 @@ func collectStreams(source ipFrameSource, port uint16, meta *[]streamMetadata, t
 			SrcPort: entry.srcPort, DstPort: entry.dstPort,
 		}
 		info := streamMetadata{firstPacket: entry.firstPacket}
+		if trackWire == tcpWireAll {
+			info.confirmedOpening = wire[i].confirmedOpening()
+		}
 		state := &usage[entry.flowIndex]
 		for dir, segments := range [2][]TCPSegmentInput{entry.client, entry.server} {
 			side := tcpSide(entry.canonical)

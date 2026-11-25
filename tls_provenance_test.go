@@ -20,6 +20,7 @@ const (
 type tlsProofFixture struct {
 	client, server, first, control, second, reverse, keys []byte
 	clientProtected, serverProtected                      int
+	seal                                                  func(server bool, seq uint64, kind uint8, payload string) []byte
 }
 
 func makeTLSProofFixture(t *testing.T, version uint16) tlsProofFixture {
@@ -39,6 +40,13 @@ func makeTLSProofFixture(t *testing.T, version uint16) tlsProofFixture {
 		}
 		random := client[11:43]
 		return tlsProofFixture{
+			seal: func(server bool, seq uint64, kind uint8, payload string) []byte {
+				secret := clientApp
+				if server {
+					secret = serverApp
+				}
+				return encryptTLS13AppDataRecord(t, secret[:], suite, seq, kind, []byte(payload))
+			},
 			client: client, server: server,
 			clientProtected: clientProtected, serverProtected: serverProtected,
 			first:   encryptTLS13AppDataRecord(t, clientApp[:], suite, 0, TLSRecordApplicationData, []byte(tlsProofFirst)),
@@ -66,6 +74,13 @@ func makeTLSProofFixture(t *testing.T, version uint16) tlsProofFixture {
 	ccs := []byte{TLSRecordChangeCipherSpec, 3, 3, 0, 1, 1}
 	finished := []byte{20, 0, 0, 12, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12}
 	return tlsProofFixture{
+		seal: func(server bool, seq uint64, kind uint8, payload string) []byte {
+			key, salt := ck, ci
+			if server {
+				key, salt = sk, si
+			}
+			return encryptTLS12Record(t, kind, key, salt, seq+1, []byte(payload))
+		},
 		clientProtected: len(client) + len(ccs), serverProtected: len(server) + len(ccs),
 		client:  append(append(client, ccs...), encryptTLS12Record(t, TLSRecordHandshake, ck, ci, 0, finished)...),
 		server:  append(append(server, ccs...), encryptTLS12Record(t, TLSRecordHandshake, sk, si, 0, finished)...),
