@@ -121,6 +121,27 @@ func (b *http1EvidenceBudget) charge(headers int) error {
 // Visit each request with its known wire interval in stream sequence order.
 func walkHTTP1Evidence(dir *tcpMessageDirection, stream []byte, spans []packetSpan, anomalies StreamAnomalies, budget *http1EvidenceBudget, visit func(HTTP1RequestEvidence, int, int, bool)) error {
 	spanIndex, spanStart := 0, 0
+	return walkHTTP1PlainRequests(stream, budget, func(row HTTP1RequestEvidence, off, end int, known bool) error {
+		for spans[spanIndex].end <= off {
+			spanStart = spans[spanIndex].end
+			spanIndex++
+		}
+		span := spans[spanIndex]
+		packet := dir.packets[span.segment]
+		segment := dir.segments[span.segment]
+		seq := segment.Seq
+		if segment.Flags&TCPFlagSYN != 0 {
+			seq++
+		}
+		row.PacketIndex, row.PacketPayloadOffset = packet.index, int(span.seq-seq)+off-spanStart
+		row.FlowIndex, row.TimestampNs = dir.flowIndex, packet.timestamp
+		row.Source, row.Destination, row.TCPAnomalies = dir.src, dir.dst, anomalies
+		visit(row, off, end, known)
+		return nil
+	})
+}
+
+func walkHTTP1PlainRequests(stream []byte, budget *http1EvidenceBudget, visit func(HTTP1RequestEvidence, int, int, bool) error) error {
 	for off := 0; off < len(stream); {
 		data := stream[off:]
 		req, lineEnd, err := parseHTTPRequestLine(data)
@@ -138,22 +159,10 @@ func walkHTTP1Evidence(dir *tcpMessageDirection, stream []byte, spans []packetSp
 		if err := budget.charge(bodyStart); err != nil {
 			return err
 		}
-		for spans[spanIndex].end <= off {
-			spanStart = spans[spanIndex].end
-			spanIndex++
-		}
-		span := spans[spanIndex]
-		packet := dir.packets[span.segment]
-		segment := dir.segments[span.segment]
-		seq := segment.Seq
-		if segment.Flags&TCPFlagSYN != 0 {
-			seq++
-		}
 		row := HTTP1RequestEvidence{
-			PacketIndex: packet.index, PacketPayloadOffset: int(span.seq-seq) + off - spanStart,
-			FlowIndex: dir.flowIndex, TimestampNs: packet.timestamp, Source: dir.src, Destination: dir.dst,
+			PacketIndex: -1, PacketPayloadOffset: -1,
 			Method: req.Method, Target: req.Path, Version: req.Version, Headers: headers,
-			Anomalies: framing.anomalies, TCPAnomalies: anomalies,
+			Anomalies: framing.anomalies,
 		}
 		var host string
 		var hostSeen, upgrade bool
@@ -173,7 +182,9 @@ func walkHTTP1Evidence(dir *tcpMessageDirection, stream []byte, spans []packetSp
 		if !known {
 			end = max(bodyStart, body.invalidEnd)
 		}
-		visit(row, off, off+end, known)
+		if err := visit(row, off, off+end, known); err != nil {
+			return err
+		}
 		if req.Method == "CONNECT" || upgrade || body.malformed {
 			break
 		}

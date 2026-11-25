@@ -43,3 +43,40 @@ with the early traffic key leaves server acceptance unknown.
 Run the Go checks without TShark using `go test -run '^TestTLSRecordProvenance' .`.
 The split-record tests build TLS 1.2 and TLS 1.3 captures in memory with test-only
 keys.
+
+## Pipelined HTTP/1 over TLS
+
+`keyed-http1.pcapng` contains a synthetic TLS 1.2 AES-GCM exchange and a DSB
+holding its test-only master secret. `keyed-http1-tls13.pcapng` uses TLS 1.3
+with HTTP/1.1 in EncryptedExtensions and embedded test traffic secrets.
+`TestKeyedHTTP1Pipeline` reconstructs both files and checks each record's
+wire range, logical application range and
+original packet indices. Run both versions without TShark:
+
+```sh
+go test -run '^TestKeyedHTTP1|^ExampleCapture_KeyedHTTP1' .
+```
+
+With TShark 4.6.10 (commit `eac916f07299`), use the embedded keys to decode
+request paths, status codes and the response body. Both captures produce the
+same results:
+
+```sh
+for capture in testdata/keyed-http1.pcapng testdata/keyed-http1-tls13.pcapng; do
+  tshark -n -o tls.keylog_file: -r "$capture" \
+    -Y http.request -T fields -e frame.number -e http.request.uri
+  tshark -n -o tls.keylog_file: -r "$capture" \
+    -Y http.response -T fields -e frame.number -e http.response.code -e http.file_data
+done
+```
+
+```text
+6	/first,/second
+7	103,204
+11	201	7265706c79
+```
+
+Both requests start in the record carried by packet index 5. Their offsets
+inside the plaintext record are 0 and 46. The 103 and final 204 share packet
+index 6. The 201 response spans three records in packets 7, 8–9, and 10. Its
+body is `reply`.

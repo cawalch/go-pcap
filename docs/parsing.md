@@ -701,6 +701,62 @@ secret until it sends its own authenticated update. After 32 updates in one
 direction, the next update ends decryption for that direction and the parser
 returns the plaintext recovered so far. [TLS 1.3 traffic key updates](https://www.rfc-editor.org/rfc/rfc8446#section-7.2)
 
+### Select HTTP/1 transactions inside TLS
+
+Call `KeyedHTTP1Transactions` with the capture bytes or
+`KeyedHTTP1TransactionsFromReaderAt` with the indexed reader. Supply an NSS key
+log as the second argument, or pass `nil` to use only the embedded PcapNG TLS
+Decryption Secrets Blocks. The scan accepts the AES-GCM suites supported by the
+offline TLS 1.2 and 1.3 decryptors. TLS 1.2 uses the `CLIENT_RANDOM` master
+secret. TLS 1.3 uses directional application traffic secrets, optional handshake
+secrets, and optional client early traffic secrets. Both key sources together
+can supply up to `MaxDecryptionSecretBytes` bytes and `MaxTLSKeyLogEntries`
+client randoms. The caller owns all returned headers, bodies, and record and
+packet lists. Results retain no secrets.
+
+Each row has complete authenticated request headers. An incomplete request
+header produces no row. A request or paired response with complete headers can
+carry a partial body. Check `BodyState` and `BodyLimitExceeded` before using
+entity bytes. An authenticated `close_notify` can complete a close-delimited
+response. A TCP FIN alone leaves that body partial. A final response requires
+complete authenticated headers, a confirmed TCP opening, consistent packet
+acknowledgements, and unambiguous request order. Informational responses
+preceding that final response contribute to its record evidence. When pairing
+is unseen or ambiguous, the row includes only request evidence.
+
+`ClientCoverage` and `ServerCoverage` report the length of the recovered
+directional application stream, skipped protected records before its start,
+and an incomplete tail. A gap, authentication failure, incomplete record, or
+TLS work limit stops that direction at its authenticated prefix. Subsequent
+records cannot repair the interrupted entity. Without an early-data offer,
+TLS 1.3 application keys can establish sequence zero after opaque handshake
+records. When a client offers early data, the scan retains authenticated
+requests and leaves response association ambiguous because acceptance is
+unknown. Early and regular application data are parsed separately so that a
+partial early request cannot consume regular-epoch bytes. With no matching keys or no authenticated request headers the result
+is empty. An empty result cannot distinguish those cases.
+
+The rows follow capture opening order, then request order within the opening.
+The capture-local ID includes the opening's first packet, the client TLS
+record's directional TCP byte offset, and the request's plaintext offset
+inside that record. The same record can contain several request lines.
+`RequestPlaintextOffset` and `ResponsePlaintextOffset` count bytes in the
+recovered application streams. Each record reference covers the entire TLS
+record, including its five-byte header, and lists its original zero-based
+packets. Individual plaintext bytes have no TCP payload offset. The HTTP
+evidence uses -1 for capture locations and zero for timestamps. To look up a
+ciphertext packet's timestamp, use its index in `Capture.Packets` or
+`PacketsFromReaderAt`. The [runnable consumer examples](../keyed_http1_example_test.go)
+show this lookup and select a complete response from the keyed fixture.
+
+The TLS walk shares the TCP stream limits, 65,536 inspected TLS records, and
+262,144 packet span intersections across the capture. ReaderAt reads share
+`MaxReaderAtScanBytes`. HTTP decoding uses the same request, response, header,
+body, and message limits as cleartext transaction selection. Returned record
+and packet references share a further 262,144-entry budget. A record used by
+two transactions charges its references twice. Exceeding an aggregate HTTP
+limit returns `ErrHTTPLimit` and no rows.
+
 ### Read DNS messages from decrypted HTTP/2
 
 Call `capture.HTTP2(data)` and select records with `IsDecrypted`. For each
@@ -737,6 +793,7 @@ returns both input slices and `false`.
 | --- | --- |
 | Which packet started each request? | `HTTPRequests` for cleartext HTTP/1 and HTTP/2. [Request timeline](#locate-individual-http-requests-in-a-capture) |
 | What headers and entity bytes belong to this request? | `HTTP1RequestEvidence` for cleartext HTTP/1, including body completeness. [Request evidence](#inspect-cleartext-http1-request-evidence) |
+| Which authenticated HTTP/1 exchanges can I select with TLS keys? | Use `KeyedHTTP1Transactions` to inspect requests, paired responses, TLS records and original ciphertext packets. [Keyed transaction selection](#select-http1-transactions-inside-tls) |
 | Which response belongs to this request, and which packets carry the exchange? | Use `HTTP1Transactions` to select a cleartext HTTP/1 exchange, then export it to PcapNG. [Transaction selection](#select-and-export-a-cleartext-http1-transaction) |
 | What did the client and server exchange? | `HTTP` for HTTP/1 requests, responses, JA4H and carved bodies. `HTTP2` for frames and stream headers. Both support cleartext and keyed TLS. |
 | Do I need TLS and both HTTP versions? | `Web` shares reassembly and decryption across all three results. |

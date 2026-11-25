@@ -289,46 +289,32 @@ func (d *http1Direction) closedAtEnd(peer *http1Direction) bool {
 func pairHTTP1Requests(rows []HTTP1Transaction, ranges []http1RequestRange, client, server *http1Direction, budget *http1EvidenceBudget, export *http1TransactionExportSelection) error {
 	missing := server != nil && server.missingBeforeFIN()
 	haveReverse := server != nil && (server.hasPayload || missing)
-	canPair := haveReverse && http1Anchored(client, server)
-	gracefulEnd := canPair && server.closedAtEnd(client)
-	off := 0
+	cursor := http1ResponseCursor{canPair: haveReverse && http1Anchored(client, server), haveReverse: haveReverse}
+	if server != nil {
+		cursor.data = server.data
+		cursor.gracefulEnd = cursor.canPair && server.closedAtEnd(client)
+		cursor.uncertainEnd = missing || server.anomalies.SequenceGap || server.anomalies.Truncated || len(server.data) == 0
+	}
 	for i := range rows {
 		row, req := &rows[i], ranges[i]
 		var leading bool
 		row.PacketIndices, row.SharedPackets, leading = client.packetsFor(nil, req.start, req.end)
 		row.ExportIncludesPriorMessages = leading && req.start > 0
-		start := off
-		var fin bool
-		canPair = canPair && req.known
-		for canPair && off < len(server.data) {
-			// A response can precede the request body (Expect: 100-continue).
-			// Both first-byte packets must agree that the request has started.
-			if !http1Acknowledged(client, server, req.start, off) {
-				canPair = false
-				break
-			}
-			response, boundary, err := parseHTTP1ResponseEvidence(server, off, row.Request.Method, gracefulEnd, budget)
-			if errors.Is(err, ErrHTTPLimit) {
-				return err
-			}
-			if err != nil {
-				canPair = false
-				break
-			}
-			off += boundary.end
-			if response.StatusCode/100 == 1 && response.StatusCode != 101 {
-				continue
-			}
-			row.Response, row.Pairing, fin = response, HTTP1ResponseConfirmed, boundary.closed
+		start := cursor.offset
+		response, finalStart, fin, pairing, err := cursor.next(row.Request.Method, req.known, budget, func(off int) bool {
+			return http1Acknowledged(client, server, req.start, off)
+		})
+		if err != nil {
+			return err
+		}
+		row.Pairing, row.Response = pairing, response
+		if response != nil {
+			pkt, offset := server.location(finalStart)
+			response.PacketIndex, response.TimestampNs, response.PacketPayloadOffset = pkt.index, pkt.timestamp, offset
+			response.TCPAnomalies = server.anomalies
 			row.ExportIncludesPriorMessages = req.start > 0 || start > 0
-			if boundary.indeterminate || response.StatusCode == 101 || row.Request.Method == "CONNECT" && response.StatusCode/100 == 2 {
-				canPair = false
-			}
-			break
 		}
-		if row.Response == nil && haveReverse && (!canPair || missing || off < len(server.data) || server.anomalies.SequenceGap || server.anomalies.Truncated || len(server.data) == 0) {
-			row.Pairing = HTTP1ResponseAmbiguous
-		}
+		off := cursor.offset
 		if off > start && row.Response != nil {
 			var shared bool
 			row.PacketIndices, shared, _ = server.packetsFor(row.PacketIndices, start, off)
@@ -368,13 +354,51 @@ func pairHTTP1Requests(rows []HTTP1Transaction, ranges []http1RequestRange, clie
 	return nil
 }
 
+// Match final responses in request order across informational messages. Each
+// source supplies its own start-line acknowledgement and end-of-stream proof.
+type http1ResponseCursor struct {
+	data                                            []byte
+	offset                                          int
+	canPair, haveReverse, gracefulEnd, uncertainEnd bool
+}
+
+func (c *http1ResponseCursor) next(method string, known bool, budget *http1EvidenceBudget, acknowledged func(int) bool) (*HTTP1ResponseEvidence, int, bool, HTTP1Pairing, error) {
+	c.canPair = c.canPair && known
+	for c.canPair && c.offset < len(c.data) {
+		start := c.offset
+		if !acknowledged(start) {
+			c.canPair = false
+			break
+		}
+		r, boundary, err := parseHTTP1ResponseEvidence(c.data[start:], method, c.gracefulEnd, budget)
+		if errors.Is(err, ErrHTTPLimit) {
+			return nil, 0, false, HTTP1ResponseUnseen, err
+		}
+		if err != nil {
+			c.canPair = false
+			break
+		}
+		c.offset += boundary.end
+		if r.StatusCode/100 == 1 && r.StatusCode != 101 {
+			continue
+		}
+		if boundary.indeterminate || r.StatusCode == 101 || method == "CONNECT" && r.StatusCode/100 == 2 {
+			c.canPair = false
+		}
+		return r, start, boundary.closed, HTTP1ResponseConfirmed, nil
+	}
+	if c.haveReverse && (!c.canPair || c.uncertainEnd || c.offset < len(c.data)) {
+		return nil, 0, false, HTTP1ResponseAmbiguous, nil
+	}
+	return nil, 0, false, HTTP1ResponseUnseen, nil
+}
+
 type http1ResponseBoundary struct {
 	end                   int // Number of wire bytes known to belong to this message.
 	closed, indeterminate bool
 }
 
-func parseHTTP1ResponseEvidence(server *http1Direction, offset int, method string, gracefulEnd bool, budget *http1EvidenceBudget) (*HTTP1ResponseEvidence, http1ResponseBoundary, error) {
-	stream := server.data[offset:]
+func parseHTTP1ResponseEvidence(stream []byte, method string, gracefulEnd bool, budget *http1EvidenceBudget) (*HTTP1ResponseEvidence, http1ResponseBoundary, error) {
 	version, code, _, lineEnd, err := parseHTTPStatusLine(stream)
 	if err != nil {
 		return nil, http1ResponseBoundary{}, err
@@ -389,8 +413,7 @@ func parseHTTP1ResponseEvidence(server *http1Direction, offset int, method strin
 	if err := budget.charge(start); err != nil {
 		return nil, http1ResponseBoundary{}, err
 	}
-	packet, payloadOffset := server.location(offset)
-	r := &HTTP1ResponseEvidence{PacketIndex: packet.index, PacketPayloadOffset: payloadOffset, TimestampNs: packet.timestamp, Version: version, StatusCode: code, Headers: headers, Anomalies: framing.anomalies, TCPAnomalies: server.anomalies}
+	r := &HTTP1ResponseEvidence{PacketIndex: -1, PacketPayloadOffset: -1, Version: version, StatusCode: code, Headers: headers, Anomalies: framing.anomalies}
 	if httpResponseHasNoBody(method, code) {
 		r.BodyState = HTTPBodyComplete
 		return r, http1ResponseBoundary{end: start}, nil
