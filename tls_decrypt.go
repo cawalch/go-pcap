@@ -163,6 +163,8 @@ func deriveTLS13TrafficAEAD(secret []byte, cipherSuite uint16) (cipher.AEAD, [12
 	return aead, iv, nil
 }
 
+// tls13ExpandLabelHash encodes the RFC 8446 §7.1 HkdfLabel used by both TLS 1.3
+// and QUIC Initial key derivation.
 func tls13ExpandLabelHash(hashFn func() hash.Hash, secret []byte, label string, context []byte, length int) ([]byte, error) {
 	fullLabel := "tls13 " + label
 	var info [64]byte
@@ -449,6 +451,8 @@ func decryptTLS13Records(stream []byte, cipherSuite uint16, handshakeSecret, app
 	return hsBuf.Bytes(), appBuf.Bytes(), nil
 }
 
+// xorTLS13Nonce XORs the IV with the padded TLS record sequence number or
+// QUIC packet number.
 func xorTLS13Nonce(iv [12]byte, seq uint64) [12]byte {
 	out := iv
 	for i := range 8 {
