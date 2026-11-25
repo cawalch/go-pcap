@@ -84,35 +84,48 @@ func (d *tlsDirectionProvenance) recordAt(offset int) int {
 	return sort.Search(len(d.records), func(i int) bool { return d.records[i].plainEnd > offset })
 }
 
+func (r *tlsApplicationRecord) appendEvidence(out *[]TLSRecordEvidence, packets *[]int, remaining *int, closeNotify bool) error {
+	cost := len(r.packets) + 1
+	if cost > *remaining {
+		return ErrHTTPLimit
+	}
+	*remaining -= cost
+	*out = append(*out, TLSRecordEvidence{WireStart: r.wireStart, WireEnd: r.wireEnd, PlaintextStart: r.plainStart, PlaintextEnd: r.plainEnd,
+		PacketIndices: slices.Clone(r.packets), EarlyData: r.early, CloseNotify: closeNotify})
+	*packets = append(*packets, r.packets...)
+	return nil
+}
+
 // Charge repeated intersections, including a shared record's entire packet
 // list each time it contributes to a different request or response.
 func (d *tlsDirectionProvenance) evidence(start, end int, closed bool, packets *[]int, remaining *int) ([]TLSRecordEvidence, error) {
 	var out []TLSRecordEvidence
-	add := func(r *tlsApplicationRecord, closeNotify bool) error {
-		cost := len(r.packets) + 1
-		if cost > *remaining {
-			return ErrHTTPLimit
-		}
-		*remaining -= cost
-		out = append(out, TLSRecordEvidence{WireStart: r.wireStart, WireEnd: r.wireEnd, PlaintextStart: r.plainStart, PlaintextEnd: r.plainEnd,
-			PacketIndices: slices.Clone(r.packets), EarlyData: r.early, CloseNotify: closeNotify})
-		*packets = append(*packets, r.packets...)
-		return nil
-	}
 	for i := d.recordAt(start); i < len(d.records) && d.records[i].plainStart < end; i++ {
 		r := &d.records[i]
 		if r.plainEnd > r.plainStart {
-			if err := add(r, false); err != nil {
+			if err := r.appendEvidence(&out, packets, remaining, false); err != nil {
 				return nil, err
 			}
 		}
 	}
 	if closed {
-		if err := add(d.closeNotify, true); err != nil {
+		if err := d.closeNotify.appendEvidence(&out, packets, remaining, true); err != nil {
 			return nil, err
 		}
 	}
 	return out, nil
+}
+
+func (s *tlsProvenanceStream) firstRegularRecord() int {
+	return sort.Search(len(s.client.records), func(i int) bool { return !s.client.records[i].early })
+}
+
+func (s *tlsProvenanceStream) canPairHTTP(firstRegular int) bool {
+	// Application-only keys can authenticate both regular epochs from
+	// sequence zero after opaque handshakes on connections without 0-RTT.
+	return s.confirmedOpening && !s.earlyOffered && firstRegular == 0 &&
+		s.client.before.reason != tlsStopAuthentication && s.server.before.reason != tlsStopAuthentication &&
+		!s.Client.Anomalies.OverlapConflict && !s.Server.Anomalies.OverlapConflict
 }
 
 func (s *tlsProvenanceStream) acknowledged(request tlsApplicationRecord, response int) bool {
@@ -120,12 +133,11 @@ func (s *tlsProvenanceStream) acknowledged(request tlsApplicationRecord, respons
 	client, server := &s.wire[0], &s.wire[1]
 	// The peer needs the complete request record to authenticate any request
 	// byte in it. The first response-record packet supplies the peer's ACK.
-	ackAt := func(d *tcpWireDirection, offset int) uint32 {
-		i := sort.Search(len(d.spans), func(i int) bool { return int(d.spans[i].end) > offset })
-		return d.spans[i].packet.ack
-	}
-	return int32(ackAt(server, reply.wireStart)-(client.seq+uint32(request.wireEnd))) >= 0 &&
-		ackAt(client, request.wireStart)-server.seq <= uint32(reply.wireStart)
+
+	c, haveClient := client.packetAt(request.wireStart)
+	sPacket, haveServer := server.packetAt(reply.wireStart)
+	return haveClient && haveServer && int32(sPacket.ack-(client.seq+uint32(request.wireEnd))) >= 0 &&
+		c.ack-server.seq <= uint32(reply.wireStart)
 }
 
 func scanKeyedHTTP1(source ipFrameSource, keys []byte) ([]KeyedHTTP1Transaction, error) {
@@ -145,16 +157,12 @@ func keyedHTTP1Transactions(streams []tlsProvenanceStream) ([]KeyedHTTP1Transact
 		if len(s.Client.Data) == 0 {
 			continue
 		}
-		firstRegular := sort.Search(len(s.client.records), func(i int) bool { return !s.client.records[i].early })
+		firstRegular := s.firstRegularRecord()
 		clientCoverage, serverCoverage := s.client.coverage(len(s.Client.Data)), s.server.coverage(len(s.Server.Data))
 		cursor := http1ResponseCursor{data: s.Server.Data, gracefulEnd: s.server.closeNotify != nil,
 			haveReverse:  len(s.Server.Data) > 0 || serverCoverage.IncompleteTail || serverCoverage.OpaquePrefix,
 			uncertainEnd: serverCoverage.IncompleteTail,
-			// Without an early-data offer, app-only keys can recover both regular
-			// application epochs starting at sequence zero after opaque handshakes.
-			canPair: s.confirmedOpening && !s.earlyOffered && firstRegular == 0 &&
-				s.client.before.reason != tlsStopAuthentication && s.server.before.reason != tlsStopAuthentication &&
-				!s.Client.Anomalies.OverlapConflict && !s.Server.Anomalies.OverlapConflict}
+			canPair:      s.canPairHTTP(firstRegular)}
 		base := 0
 		visit := func(req HTTP1RequestEvidence, start, end int, known bool) error {
 			start, end = base+start, base+end

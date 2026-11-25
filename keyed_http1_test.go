@@ -27,18 +27,26 @@ type keyedFixture struct {
 
 func newKeyedFixture(t *testing.T, v uint16) *keyedFixture {
 	t.Helper()
+	return newKeyedProtocolFixture(t, v, "http/1.1")
+}
+
+func newKeyedProtocolFixture(t *testing.T, v uint16, alpn string) *keyedFixture {
+	t.Helper()
 	f := &keyedFixture{tlsProofFixture: makeTLSProofFixture(t, v), seq: [2]uint32{100, 200}}
 	if v == TLSVersion13 {
-		// Negotiate http/1.1 in EncryptedExtensions, then send Finished
+		// Negotiate the fixture protocol in EncryptedExtensions, then send Finished
 		// before switching to the sequence-zero application traffic keys.
 		serverHello := wrapTLSHandshakeRecord(TLSHandshakeServerHello, bytes.Join([][]byte{
 			{3, 3}, bytes.Repeat([]byte{0x24}, 32), {0, 0x13, 1, 0, 0, 6, 0, 43, 0, 2, 3, 4},
 		}, nil))
-		extensions := []byte{8, 0, 0, 17, 0, 15, 0, 16, 0, 11, 0, 9, 8, 'h', 't', 't', 'p', '/', '1', '.', '1'}
+		size := byte(len(alpn))
+		extensions := append([]byte{8, 0, 0, size + 9, 0, size + 7, 0, 16, 0, size + 3, 0, size + 1, size}, alpn...)
 		finished := append([]byte{20, 0, 0, 32}, make([]byte, 32)...)
 		sh, ch := [32]byte{2}, [32]byte{1}
 		f.server = append(serverHello, encryptTLS13AppDataRecord(t, sh[:], TLS_AES_128_GCM_SHA256, 0, TLSRecordHandshake, append(extensions, finished...))...)
-		f.client = append(f.client[:f.clientProtected], encryptTLS13AppDataRecord(t, ch[:], TLS_AES_128_GCM_SHA256, 0, TLSRecordHandshake, finished)...)
+		hello := buildTLS13ClientHelloRecord("provenance.example", alpn)
+		f.clientProtected = len(hello)
+		f.client = append(hello, encryptTLS13AppDataRecord(t, ch[:], TLS_AES_128_GCM_SHA256, 0, TLSRecordHandshake, finished)...)
 	}
 	f.send(false, TCPFlagSYN, nil)
 	f.send(true, TCPFlagSYN|TCPFlagACK, nil)

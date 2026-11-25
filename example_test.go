@@ -546,3 +546,42 @@ func ExampleCapture_HTTP2Transactions() {
 	}
 	// Output: packet 6 + 50, stream 3: POST /two → 201 "two"
 }
+
+func ExampleCapture_ExtractHTTP2TransactionPCAPNG() {
+	data, err := os.ReadFile("testdata/deployments/http2-transactions.pcapng")
+	if err != nil {
+		log.Fatal(err)
+	}
+	c, err := pcap.New(data)
+	if err != nil {
+		log.Fatal(err)
+	}
+	rows, err := c.HTTP2Transactions(data)
+	if err != nil {
+		log.Fatal(err)
+	}
+	for _, row := range rows {
+		if row.StreamID != 3 || row.Request.Path != "/two" {
+			continue
+		}
+		var subset bytes.Buffer
+		if err := c.ExtractHTTP2TransactionPCAPNG(data, &subset, row.ID()); err != nil {
+			log.Fatal(err)
+		}
+		reopened, err := pcap.New(subset.Bytes())
+		if err != nil {
+			log.Fatal(err)
+		}
+		txs, err := reopened.HTTP2Transactions(subset.Bytes())
+		if err != nil {
+			log.Fatal(err)
+		}
+		for _, tx := range txs {
+			if tx.StreamID == row.StreamID && tx.Response != nil {
+				fmt.Printf("stream %d, %s %s → %d %q (%d packets)\n", tx.StreamID,
+					tx.Request.Method, tx.Request.Path, tx.StatusCode, tx.Response.Body, reopened.PacketCount)
+			}
+		}
+	}
+	// Output: stream 3, POST /two → 201 "two" (9 packets)
+}
