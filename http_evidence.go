@@ -219,11 +219,13 @@ func (r *HTTP1RequestEvidence) retainBody(body httpFramedBody, framing httpFrami
 		return nil
 	}
 	data := body.data
+	owned := body.ownedData
 	partial := body.truncated || body.capped
 	if framing.encoding != "" && !strings.EqualFold(framing.encoding, "identity") {
 		reader, err := httpContentReader(data, framing.encoding)
 		if reader != nil {
 			data, err = readHTTPContent(reader, budget)
+			owned = budget == nil // A scan budget reuses its decoding scratch.
 		} else if err == nil {
 			r.BodyState = HTTPBodyUnsupported
 			return nil
@@ -251,7 +253,10 @@ func (r *HTTP1RequestEvidence) retainBody(body httpFramedBody, framing httpFrami
 		return ErrHTTPLimit
 	}
 	*remaining -= len(data)
-	r.Body = bytes.Clone(data)
+	if !owned {
+		data = bytes.Clone(data)
+	}
+	r.Body = data
 	r.BodyState = HTTPBodyComplete
 	if partial {
 		r.BodyState = HTTPBodyPartial

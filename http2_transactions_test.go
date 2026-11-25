@@ -229,6 +229,42 @@ func TestHTTP2TransactionBodies(t *testing.T) {
 	}
 }
 
+func TestHTTP2TransactionBodyOwnership(t *testing.T) {
+	opening := newH2TestOpening(100)
+	bodies := []string{"plain", "first", "other"}
+	for i, body := range bodies {
+		id := uint32(2*i + 1)
+		opening.frame(0, HTTP2FrameHeaders, 5, id, []byte{0x82, 0x86, 0x84})
+		fields, data := []byte{0x88}, []byte(body)
+		if i > 0 {
+			fields = append(fields, 0x0f, 11, 4, 'g', 'z', 'i', 'p') // content-encoding
+			data = gzipTestBytes(t, data, 1)
+		}
+		opening.frame(1, HTTP2FrameHeaders, 4, id, fields)
+		opening.frame(1, HTTP2FrameData, 1, id, data)
+	}
+	raw := buildClassicPCAP(binary.LittleEndian, false, LinkTypeEthernet, 65535, opening.frames)
+	original := bytes.Clone(raw)
+	c, err := New(raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rows := checkReaderParity(t, raw, c.HTTP2Transactions, c.HTTP2TransactionsFromReaderAt)
+	if len(rows) != len(bodies) {
+		t.Fatalf("got %d transactions, want %d", len(rows), len(bodies))
+	}
+	for i, want := range bodies {
+		r := rows[i].Response
+		if r == nil || r.BodyState != HTTPBodyComplete || string(r.Body) != want {
+			t.Fatalf("stream %d response = %+v, want body %q", rows[i].StreamID, r, want)
+		}
+		r.Body[0] = '!'
+	}
+	if !bytes.Equal(raw, original) {
+		t.Fatal("editing the returned bodies changed the source capture")
+	}
+}
+
 func TestHTTP2TransactionLimits(t *testing.T) {
 	for _, tc := range []struct {
 		name   string

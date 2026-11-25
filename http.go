@@ -437,6 +437,7 @@ type httpFramedBody struct {
 	consumed                     int
 	invalidEnd                   int // Exclusive wire offset providing the first framing error.
 	truncated, capped, malformed bool
+	ownedData                    bool // The caller can retain data without copying it.
 }
 
 // body consumes the remaining input when framing cannot identify the next message.
