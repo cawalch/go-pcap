@@ -522,3 +522,27 @@ func ExampleTLSHandshake_ServerNameMatch() {
 	fmt.Println(hs.ServerNameMatch())
 	// Output: true true
 }
+
+func ExampleCapture_HTTP2Transactions() {
+	data, err := os.ReadFile("testdata/deployments/http2-transactions.pcapng")
+	if err != nil {
+		log.Fatal(err)
+	}
+	capture, err := pcap.New(data)
+	if err != nil {
+		log.Fatal(err)
+	}
+	rows, err := capture.HTTP2Transactions(data)
+	if err != nil {
+		log.Fatal(err)
+	}
+	for _, row := range rows {
+		if row.Request.Path == "/two" && row.Response != nil {
+			id := row.ID()
+			fmt.Printf("packet %d + %d, stream %d: %s %s → %d %q\n",
+				id.PacketIndex, id.PacketPayloadOffset, id.StreamID, row.Request.Method,
+				row.Request.Path, row.StatusCode, row.Response.Body)
+		}
+	}
+	// Output: packet 6 + 50, stream 3: POST /two → 201 "two"
+}
