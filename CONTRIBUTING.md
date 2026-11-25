@@ -101,7 +101,10 @@ path and inode fixed. Separate executable files produced different timings in
 an unchanged-source control.
 
 CI tests the Go 1.26 compatibility floor and the current stable toolchain.
-Use the patched release for each line when reproducing a result. The Linux
+Use the patched release for each line when reproducing a result. To preview
+standard-library and language simplifications, run `go fix -diff ./...` with
+the stable toolchain. Review its suggestions against the module’s Go version.
+The Linux
 jobs cover race detection and 32-bit arithmetic. The stable job discovers
 fuzz targets with `go test -list '^Fuzz' .` and runs each for a bounded time.
 To exercise the ReaderAt parity target locally:
