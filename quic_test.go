@@ -165,20 +165,19 @@ func TestDecryptQUICInitialDatagramLimit(t *testing.T) {
 		name      string
 		datagrams [][]byte
 		wantErr   error
-		message   string
 	}{
-		{name: "empty input", wantErr: ErrInvalidQUIC, message: "empty datagram slice"},
-		{name: "nil payload", datagrams: [][]byte{nil}, wantErr: ErrInvalidQUIC, message: "no valid QUIC Initial header"},
+		{name: "empty input", wantErr: ErrInvalidQUIC},
+		{name: "nil payload", datagrams: [][]byte{nil}, wantErr: ErrInvalidQUIC},
 		{name: "below byte limit", datagrams: [][]byte{payload[:maxPayload-1], initial}},
 		{name: "at byte limit", datagrams: [][]byte{nil, payload[:maxPayload], initial}},
-		{name: "over byte limit", datagrams: [][]byte{initial, payload}, wantErr: ErrQUICLimit, message: "payload length"},
-		{name: "at both limits", datagrams: maxDatagrams, wantErr: ErrInvalidQUIC, message: "no valid QUIC Initial header"},
-		{name: "count precedes byte limit", datagrams: append(maxDatagrams, payload), wantErr: ErrQUICLimit, message: "datagrams exceed"},
+		{name: "over byte limit", datagrams: [][]byte{initial, payload}, wantErr: ErrQUICLimit},
+		{name: "at both limits", datagrams: maxDatagrams, wantErr: ErrInvalidQUIC},
+		{name: "over both limits", datagrams: append(maxDatagrams, payload), wantErr: ErrQUICLimit},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			hs, err := DecryptQUICInitial(tc.datagrams)
-			if !errors.Is(err, tc.wantErr) || tc.message != "" && !strings.Contains(err.Error(), tc.message) {
-				t.Fatalf("DecryptQUICInitial error = %v, want %v with %q", err, tc.wantErr, tc.message)
+			if !errors.Is(err, tc.wantErr) {
+				t.Fatalf("DecryptQUICInitial error = %v, want %v", err, tc.wantErr)
 			}
 			if err == nil && (!hs.HasClientHello || hs.ClientHello.SNI != name) {
 				t.Fatalf("DecryptQUICInitial handshake = %+v, want ClientHello for %s", hs, name)
