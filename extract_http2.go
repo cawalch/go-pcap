@@ -56,11 +56,7 @@ func (c *Capture) extractHTTP2TransactionPCAPNG(source flowExportSource, w io.Wr
 		return ErrInvalidHeader
 	}
 	source.size = c.fileSize
-	frames := ipFrameSource{capture: c, data: source.data.data}
-	if source.budget != nil {
-		frames.reader = source.budget
-		frames.needsPayload = func(f Frame, _ []byte) bool { return f.IPProtocol == IPProtoTCP }
-	}
+	frames := source.transactionFrames(c)
 	selection := http2TransactionExportSelection{id: id, source: frames}
 	if c.Format == FormatPCAPNG && len(c.Interfaces) > 1 {
 		selection.interfaces = make(map[int]uint32)

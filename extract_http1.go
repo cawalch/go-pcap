@@ -64,12 +64,7 @@ func (c *Capture) extractHTTP1TransactionPCAPNG(source flowExportSource, w io.Wr
 		return ErrInvalidHeader
 	}
 	source.size = c.fileSize
-	frames := ipFrameSource{capture: c, data: source.data.data}
-	if source.budget != nil {
-		// Charge selection reads to the same budget as framing and copying.
-		frames.reader = source.budget
-		frames.needsPayload = func(f Frame, _ []byte) bool { return f.IPProtocol == IPProtoTCP }
-	}
+	frames := source.transactionFrames(c)
 	selection := http1TransactionExportSelection{id: id}
 	if c.Format == FormatPCAPNG && len(c.Interfaces) > 1 {
 		selection.interfaces = make(map[int]uint32)
@@ -78,6 +73,14 @@ func (c *Capture) extractHTTP1TransactionPCAPNG(source flowExportSource, w io.Wr
 		return err
 	}
 	return c.writeSelectedPackets(&source, w, selection.packetIndices, selection.interfaces)
+}
+
+// transactionFrames charges selection reads against the same budget as packet output.
+func (s *flowExportSource) transactionFrames(c *Capture) ipFrameSource {
+	if s.budget != nil {
+		return c.tcpReaderAt(s.budget)
+	}
+	return ipFrameSource{capture: c, data: s.data.data}
 }
 
 func (c *Capture) writeSelectedPackets(source *flowExportSource, w io.Writer, indices []int, interfaces map[int]uint32) error {

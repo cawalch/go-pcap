@@ -160,7 +160,7 @@ func tlsProofScan(t *testing.T, raw, keys []byte) []tlsProvenanceStream {
 	if err != nil {
 		t.Fatal(err)
 	}
-	b, err := scanTLSProvenance(ipFrameSource{capture: index, reader: r, needsPayload: func(f Frame, _ []byte) bool { return f.IPProtocol == IPProtoTCP }}, keys)
+	b, err := scanTLSProvenance(index.tcpReaderAt(r), keys)
 	if err != nil || !reflect.DeepEqual(a, b) {
 		t.Fatalf("ReaderAt = %+v, %v, want %+v", b, err, a)
 	}
@@ -391,7 +391,7 @@ func TestTLSRecordProvenancePhysicalReadBudget(t *testing.T) {
 		t.Fatal(err)
 	}
 	reader.bytesRead = 0
-	rows, err := scanTLSProvenance(ipFrameSource{capture: c, reader: reader, needsPayload: func(f Frame, _ []byte) bool { return f.IPProtocol == IPProtoTCP }}, nil)
+	rows, err := scanTLSProvenance(c.tcpReaderAt(reader), nil)
 	if err != nil || len(rows) != 0 || reader.bytesRead > MaxReaderAtScanBytes {
 		t.Fatalf("got %d TLS rows, err %v, read %d bytes with a limit of %d", len(rows), err, reader.bytesRead, MaxReaderAtScanBytes)
 	}

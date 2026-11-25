@@ -188,42 +188,12 @@ func TestExtractHTTP2TransactionErrors(t *testing.T) {
 }
 
 func TestExtractHTTP2TransactionReadBudget(t *testing.T) {
-	// Four large captured frames fit the copy budget by themselves. The
-	// selection pass consumes part of it before the copy starts.
 	o := newH2TestOpening(100)
 	o.frame(0, HTTP2FrameHeaders, 5, 1, []byte{0x82, 0x86, 0x84})
 	o.frame(1, HTTP2FrameHeaders, 5, 1, []byte{0x88})
-	order := binary.LittleEndian
-	header := buildClassicPCAP(order, true, LinkTypeEthernet, MaxSnapLen, nil)
-	f := tempCaptureFile(t, header)
-	offset := int64(len(header))
-	for i, frame := range o.frames {
-		length := len(frame)
-		if i < 4 {
-			length = MaxSnapLen - 256
-		}
-		var record [16]byte
-		order.PutUint32(record[:4], uint32(i))
-		order.PutUint32(record[8:12], uint32(length))
-		order.PutUint32(record[12:], uint32(length))
-		if _, err := f.WriteAt(record[:], offset); err != nil {
-			t.Fatal(err)
-		}
-		if _, err := f.WriteAt(frame, offset+16); err != nil {
-			t.Fatal(err)
-		}
-		offset += 16 + int64(length)
-	}
-	if err := f.Truncate(offset); err != nil {
-		t.Fatal(err)
-	}
-	c, err := NewFromReaderAt(f, offset)
-	if err != nil {
-		t.Fatal(err)
-	}
-	r := &measuredFile{File: f}
+	c, r := transactionExportBudgetCapture(t, o.frames, MaxSnapLen-256)
 	w := &incompleteCaptureWrite{}
-	err = c.ExtractHTTP2TransactionPCAPNGFromReaderAt(r, w, HTTP2TransactionID{4, 0, 1})
+	err := c.ExtractHTTP2TransactionPCAPNGFromReaderAt(r, w, HTTP2TransactionID{4, 0, 1})
 	if !errors.Is(err, ErrPacketLimit) || w.writes == 0 || r.bytesRead > MaxReaderAtScanBytes || r.bytesRead < MaxReaderAtScanBytes-32<<10 {
 		t.Fatalf("shared read budget: err=%v, read=%d, writes=%d", err, r.bytesRead, w.writes)
 	}

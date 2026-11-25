@@ -65,7 +65,7 @@ func (c *Capture) KeyedHTTP2Transactions(data, extraKeyLog []byte) ([]KeyedHTTP2
 // KeyedHTTP2TransactionsFromReaderAt is the bounded ReaderAt equivalent of
 // [Capture.KeyedHTTP2Transactions]. Packet reads share [MaxReaderAtScanBytes].
 func (c *Capture) KeyedHTTP2TransactionsFromReaderAt(r io.ReaderAt, extraKeyLog []byte) ([]KeyedHTTP2Transaction, error) {
-	return scanKeyedHTTP2(ipFrameSource{capture: c, reader: r, needsPayload: func(f Frame, _ []byte) bool { return f.IPProtocol == IPProtoTCP }}, extraKeyLog)
+	return scanKeyedHTTP2(c.tcpReaderAt(r), extraKeyLog)
 }
 
 type keyedHTTP2Evidence struct {

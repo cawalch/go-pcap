@@ -311,6 +311,35 @@ func BenchmarkHTTP1TransactionsFromReaderAt(b *testing.B) {
 	}
 }
 
+func BenchmarkHTTP2TransactionBody(b *testing.B) {
+	const chunkSize = 16 << 10
+	const chunks = 16
+	opening := newH2TestOpening(100)
+	opening.frame(0, HTTP2FrameHeaders, 5, 1, []byte{0x82, 0x86, 0x84})
+	opening.frame(1, HTTP2FrameHeaders, 4, 1, []byte{0x88})
+	chunk := bytes.Repeat([]byte("x"), chunkSize)
+	for i := range chunks {
+		flags := uint8(0)
+		if i == chunks-1 {
+			flags = 1
+		}
+		opening.frame(1, HTTP2FrameData, flags, 1, chunk)
+	}
+	raw := buildClassicPCAP(binary.LittleEndian, false, LinkTypeEthernet, 65535, opening.frames)
+	c, err := New(raw)
+	if err != nil {
+		b.Fatal(err)
+	}
+	b.SetBytes(chunkSize * chunks)
+	b.ReportAllocs()
+	for b.Loop() {
+		rows, err := c.HTTP2Transactions(raw)
+		if err != nil || len(rows) != 1 || rows[0].Response == nil || len(rows[0].Response.Body) != chunkSize*chunks {
+			b.Fatalf("HTTP/2 transactions = %d, error = %v", len(rows), err)
+		}
+	}
+}
+
 func BenchmarkCaptureWeb(b *testing.B) {
 	for _, h2 := range []bool{false, true} {
 		for _, keyed := range []bool{false, true} {

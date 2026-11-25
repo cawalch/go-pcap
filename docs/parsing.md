@@ -1026,7 +1026,9 @@ positions. Inspect `BodyState` for complete (including empty), partial,
 unknown or unsupported content. `BodyLimitExceeded` distinguishes a capped
 prefix. `EndStream` reports a captured END_STREAM on DATA, initial headers or
 trailers. HEAD, 204 and 304 responses can establish an empty entity at the
-final headers.
+final headers. You can modify a returned body independently of other messages
+and the input capture. This also applies when several messages draw from the
+same decrypted TLS record. [Keyed HTTP/2 selection](#select-http2-transactions-inside-tls)
 
 `PacketIndices` lists the sorted distinct packet indices supplying selected
 frames in either direction, including informational headers, continuations

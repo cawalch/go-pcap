@@ -376,35 +376,9 @@ func TestExtractKeyedHTTP1RecordBudget(t *testing.T) {
 func TestExtractKeyedHTTP1ReadBudget(t *testing.T) {
 	f := newKeyedFixture(t, TLSVersion13)
 	f.pipeline()
-	order := binary.LittleEndian
-	header := buildClassicPCAP(order, true, LinkTypeEthernet, MaxSnapLen, nil)
-	file := tempCaptureFile(t, header)
-	offset := int64(len(header))
-	for i, frame := range f.packets {
-		n := uint32(len(frame))
-		if i < 4 {
-			n = MaxSnapLen - 128
-		}
-		var hdr [16]byte
-		order.PutUint32(hdr[:4], uint32(i))
-		order.PutUint32(hdr[8:], n)
-		order.PutUint32(hdr[12:], n)
-		if _, err := file.WriteAt(hdr[:], offset); err != nil {
-			t.Fatal(err)
-		}
-		if _, err := file.WriteAt(frame, offset+16); err != nil {
-			t.Fatal(err)
-		}
-		offset += int64(n) + 16
-	}
-	r := &measuredFile{File: file}
-	c, err := NewFromReaderAt(r, offset)
-	if err != nil {
-		t.Fatal(err)
-	}
-	r.bytesRead = 0
+	c, r := transactionExportBudgetCapture(t, f.packets, MaxSnapLen-128)
 	w := &incompleteCaptureWrite{}
-	err = c.ExtractKeyedHTTP1TransactionPCAPNGFromReaderAt(r, f.keys, w, KeyedHTTP1TransactionID{0, len(f.client), len(keyedFirst)})
+	err := c.ExtractKeyedHTTP1TransactionPCAPNGFromReaderAt(r, f.keys, w, KeyedHTTP1TransactionID{0, len(f.client), len(keyedFirst)})
 	if !errors.Is(err, ErrPacketLimit) || w.writes == 0 || r.bytesRead > MaxReaderAtScanBytes || r.bytesRead < MaxReaderAtScanBytes-32<<10 {
 		t.Fatalf("shared budget: %v; reads %d, writes %d", err, r.bytesRead, w.writes)
 	}

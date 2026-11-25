@@ -90,7 +90,7 @@ func (c *Capture) HTTP2Transactions(data []byte) ([]HTTP2Transaction, error) {
 // HTTP2TransactionsFromReaderAt is the bounded ReaderAt equivalent of
 // [Capture.HTTP2Transactions]. All packet reads share [MaxReaderAtScanBytes].
 func (c *Capture) HTTP2TransactionsFromReaderAt(r io.ReaderAt) ([]HTTP2Transaction, error) {
-	return scanHTTP2Transactions(ipFrameSource{capture: c, reader: r, needsPayload: func(f Frame, _ []byte) bool { return f.IPProtocol == IPProtoTCP }}, nil)
+	return scanHTTP2Transactions(c.tcpReaderAt(r), nil)
 }
 
 type http2TransactionBudget struct {
@@ -523,7 +523,7 @@ func finishHTTP2Body(msg *HTTP2MessageEvidence, invalid, bodyless bool, budget *
 		msg.BodyState = HTTPBodyUnknown
 		return nil
 	}
-	body := httpFramedBody{data: wire, truncated: !msg.EndStream, capped: msg.BodyLimitExceeded}
+	body := httpFramedBody{data: wire, ownedData: true, truncated: !msg.EndStream, capped: msg.BodyLimitExceeded}
 	var decoded HTTP1RequestEvidence
 	if err := decoded.retainBody(body, framing, &budget.decode, &budget.bodyBytes); err != nil {
 		return err

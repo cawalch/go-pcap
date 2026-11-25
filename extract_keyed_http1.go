@@ -48,11 +48,7 @@ func (c *Capture) extractKeyedHTTP1Transaction(source flowExportSource, keys []b
 		return ErrInvalidHeader
 	}
 	source.size = c.fileSize
-	frames := ipFrameSource{capture: c, data: source.data.data}
-	if source.budget != nil {
-		frames.reader = source.budget
-		frames.needsPayload = func(f Frame, _ []byte) bool { return f.IPProtocol == IPProtoTCP }
-	}
+	frames := source.transactionFrames(c)
 	streams, err := scanTLSProvenance(frames, keys)
 	if err != nil {
 		return err

@@ -73,7 +73,7 @@ func (c *Capture) HTTP1RequestEvidence(data []byte) ([]HTTP1RequestEvidence, err
 // HTTP1RequestEvidenceFromReaderAt is the bounded ReaderAt equivalent of
 // [Capture.HTTP1RequestEvidence]. Reads share [MaxReaderAtScanBytes].
 func (c *Capture) HTTP1RequestEvidenceFromReaderAt(r io.ReaderAt) ([]HTTP1RequestEvidence, error) {
-	return scanHTTP1RequestEvidence(ipFrameSource{capture: c, reader: r, needsPayload: func(f Frame, _ []byte) bool { return f.IPProtocol == IPProtoTCP }})
+	return scanHTTP1RequestEvidence(c.tcpReaderAt(r))
 }
 
 func scanHTTP1RequestEvidence(source ipFrameSource) ([]HTTP1RequestEvidence, error) {
@@ -224,6 +224,7 @@ func (r *HTTP1RequestEvidence) retainBody(body httpFramedBody, framing httpFrami
 		reader, err := httpContentReader(data, framing.encoding)
 		if reader != nil {
 			data, err = readHTTPContent(reader, budget)
+			body.ownedData = false // The decoder reuses its scratch across messages.
 		} else if err == nil {
 			r.BodyState = HTTPBodyUnsupported
 			return nil
@@ -251,7 +252,10 @@ func (r *HTTP1RequestEvidence) retainBody(body httpFramedBody, framing httpFrami
 		return ErrHTTPLimit
 	}
 	*remaining -= len(data)
-	r.Body = bytes.Clone(data)
+	if !body.ownedData {
+		data = bytes.Clone(data)
+	}
+	r.Body = data
 	r.BodyState = HTTPBodyComplete
 	if partial {
 		r.BodyState = HTTPBodyPartial
