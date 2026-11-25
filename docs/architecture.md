@@ -58,6 +58,7 @@ the consuming repository. [HTTP/3 proposal](https://github.com/cawalch/go-pcap/i
 | Flow counters, direction, or handshake fields | [flow.go](../flow.go) for aggregation on both inputs | Check complete summaries with `TestReaderAtFlowParity`. Benchmark `BenchmarkFlows` and the flow cases in `BenchmarkReaderAtScan`. |
 | Reassembly or protocol metadata | Start in the protocol file, such as [dns.go](../dns.go). Shared TCP ordering lives in [reassembly.go](../reassembly.go). [tcp_messages.go](../tcp_messages.go) adds length framing and packet attribution for DNS and Kerberos. | Test the direct parser and the capture method. For DNS, TLS, or QUIC, include the ReaderAt path. Fingerprint changes also have [reference fixtures](../testdata/foxio/README.md). |
 | Capture output or live I/O | [writer.go](../writer.go), [extract.go](../extract.go), or the `live_*.go` file for the target OS | Reopen written bytes and compare packet metadata. Exercise live reads, filters, and counters on the target OS. |
+| HTTP transaction export | [extract_http1.go](../extract_http1.go), [extract_http2.go](../extract_http2.go), or [extract_keyed_http1.go](../extract_keyed_http1.go) | Reopen the export and check the selected packets and decoded transactions. The ReaderAt budget tests use a sparse capture to check that packet selection and copying share one read budget. |
 
 Use `types.go` for shared constants, limits, and sentinel errors. Put a
 protocol-specific result type beside the parser that produces it. Most

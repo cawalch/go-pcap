@@ -146,6 +146,42 @@ func TestExtractClassicFlow(t *testing.T) {
 	}
 }
 
+// transactionExportBudgetCapture pads the first four frames to near the
+// snapshot limit. Copying those packets fits into a fresh ReaderAt budget.
+// The reads used to select them leave too little budget to finish copying.
+func transactionExportBudgetCapture(t *testing.T, frames [][]byte, paddedLen uint32) (*Capture, *measuredFile) {
+	t.Helper()
+	order := binary.LittleEndian
+	header := buildClassicPCAP(order, true, LinkTypeEthernet, MaxSnapLen, nil)
+	file := tempCaptureFile(t, header)
+	offset := int64(len(header))
+	for i, frame := range frames {
+		length := uint32(len(frame))
+		if i < 4 {
+			length = paddedLen
+		}
+		var record [16]byte
+		order.PutUint32(record[:4], uint32(i))
+		order.PutUint32(record[8:12], length)
+		order.PutUint32(record[12:], length)
+		if _, err := file.WriteAt(record[:], offset); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := file.WriteAt(frame, offset+int64(len(record))); err != nil {
+			t.Fatal(err)
+		}
+		offset += int64(len(record)) + int64(length)
+	}
+	if err := file.Truncate(offset); err != nil {
+		t.Fatal(err)
+	}
+	c, err := NewFromReaderAt(file, offset)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return c, &measuredFile{File: file}
+}
+
 func sparseExportFixture() []byte {
 	a, b := [4]byte{192, 0, 2, 1}, [4]byte{192, 0, 2, 2}
 	large := buildEthernetIPv4UDPFrame(a, b, 12345, 9999, make([]byte, 60<<10))

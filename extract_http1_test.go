@@ -117,37 +117,10 @@ func TestExtractHTTP1TransactionPCAPNGErrors(t *testing.T) {
 }
 
 func TestExtractHTTP1TransactionPCAPNGReaderAtBudget(t *testing.T) {
-	order := binary.LittleEndian
-	header := buildClassicPCAP(order, true, LinkTypeEthernet, MaxSnapLen, nil)
-	f := tempCaptureFile(t, header)
 	frames := http1TransactionExportFrames()
-	// The four packets fit into a fresh copying budget. The packet prefixes
-	// already read to select them consume more than the available margin.
-	const captureLen = MaxSnapLen - 128
-	offset := int64(len(header))
-	for i, index := range []int{1, 2, 4, 5} {
-		var record [16]byte
-		order.PutUint32(record[:4], uint32(i))
-		order.PutUint32(record[8:12], captureLen)
-		order.PutUint32(record[12:], captureLen)
-		if _, err := f.WriteAt(record[:], offset); err != nil {
-			t.Fatal(err)
-		}
-		if _, err := f.WriteAt(frames[index], offset+int64(len(record))); err != nil {
-			t.Fatal(err)
-		}
-		offset += int64(len(record)) + captureLen
-	}
-	if err := f.Truncate(offset); err != nil {
-		t.Fatal(err)
-	}
-	c, err := NewFromReaderAt(f, offset)
-	if err != nil {
-		t.Fatal(err)
-	}
-	r := &measuredFile{File: f}
+	c, r := transactionExportBudgetCapture(t, [][]byte{frames[1], frames[2], frames[4], frames[5]}, MaxSnapLen-128)
 	writer := &incompleteCaptureWrite{}
-	err = c.ExtractHTTP1TransactionPCAPNGFromReaderAt(r, writer, HTTP1TransactionID{PacketIndex: 2})
+	err := c.ExtractHTTP1TransactionPCAPNGFromReaderAt(r, writer, HTTP1TransactionID{PacketIndex: 2})
 	if !errors.Is(err, ErrPacketLimit) || writer.writes == 0 || r.bytesRead > MaxReaderAtScanBytes || r.bytesRead < MaxReaderAtScanBytes-32<<10 {
 		t.Fatalf("shared read budget: err=%v read=%d writes=%d", err, r.bytesRead, writer.writes)
 	}
