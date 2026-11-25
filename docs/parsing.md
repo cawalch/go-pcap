@@ -757,6 +757,55 @@ and packet references share a further 262,144-entry budget. A record used by
 two transactions charges its references twice. Exceeding an aggregate HTTP
 limit returns `ErrHTTPLimit` and no rows.
 
+### Select HTTP/2 transactions inside TLS
+
+Call `KeyedHTTP2Transactions` with capture bytes, or
+`KeyedHTTP2TransactionsFromReaderAt` with the indexed reader. Pass NSS key log
+bytes as the second argument or pass `nil` to use embedded PcapNG keys. Both
+methods use the [key inputs and TLS coverage](#select-http1-transactions-inside-tls)
+of keyed HTTP/1 and the [header, body, and stream semantics](#select-a-prior-knowledge-cleartext-http2-transaction)
+of cleartext HTTP/2. The caller owns the results.
+
+Selection requires an authenticated client preface, initial SETTINGS, and
+complete request HEADERS. ALPN negotiation alone yields no rows. The server
+needs its own initial SETTINGS to supply a response. Pairing checks the TCP
+opening, stream ID, and acknowledgements of the TLS record that completes the
+opening request header block. Each direction maintains its own HPACK state.
+A gap or authentication failure stops that direction at its recovered prefix.
+`ClientCoverage` and `ServerCoverage` report skipped protected prefixes and
+incomplete tails. A previous final status can remain confirmed while its body
+is partial. A stream reset is separate from a completed body.
+
+Early and regular TLS 1.3 application data each need their own observed preface
+for independent decoding across the uncertain early-data boundary. An early
+data offer leaves response association ambiguous. Supported authenticated
+traffic key updates within the regular application stream preserve HTTP/2
+state.
+
+The capture-local ID contains the TCP opening's first packet index, the
+client TLS record's wire offset, the HEADERS frame's plaintext offset in that
+record, and the stream ID. Rows follow opening order and client plaintext
+order. Use the following fields to inspect the evidence.
+
+| Field | Meaning |
+| --- | --- |
+| `RequestPlaintextOffset`, `ResponsePlaintextOffset` | Start of the initial request or final response HEADERS in recovered directional plaintext. An absent final response has offset -1. |
+| `RequestRanges`, `ResponseRanges` | Half-open plaintext byte ranges covering the selected HEADERS, CONTINUATION, DATA and reset frames, including padding, trailers and informational responses. Adjacent selected frames share a range. |
+| `RequestRecords`, `ResponseRecords` | Whole TLS records in directional wire order. A record can carry frames for multiple streams. A frame can span multiple records. |
+| `PacketIndices` | Sorted distinct original capture packets supplying the selected TLS records. Use these indices for timestamps. The HTTP message evidence has packet coordinates -1 and timestamp zero. |
+| `SharedRecords`, `SharedPackets` | `SharedRecords` indicates additional plaintext outside this row's selected frames in a contributing record. `SharedPackets` indicates that another returned transaction uses a listed packet. A packet may also contain control traffic or an unselected stream when this flag is false. |
+
+Body offsets count logical decoded entity bytes. TLS records give the finest
+available mapping to ciphertext. Header, body, TLS record and ReaderAt
+budgets apply across the scan. The per-direction frame cap applies to each
+independently parsed early or regular application stream. Up to
+262,144 retained ranges, record references and packet references share a
+capture-wide budget. A record used by two streams counts for each stream.
+An aggregate HTTP limit returns `ErrHTTPLimit` and discards the result.
+
+Run `go test -run '^ExampleCapture_KeyedHTTP2Transactions$' .` to select an
+exchange from the [keyed fixture](../testdata/tls-provenance.md#http2-over-tls).
+
 ### Read DNS messages from decrypted HTTP/2
 
 Call `capture.HTTP2(data)` and select records with `IsDecrypted`. For each
@@ -793,6 +842,7 @@ returns both input slices and `false`.
 | --- | --- |
 | Which packet started each request? | `HTTPRequests` for cleartext HTTP/1 and HTTP/2. [Request timeline](#locate-individual-http-requests-in-a-capture) |
 | What headers and entity bytes belong to this request? | `HTTP1RequestEvidence` for cleartext HTTP/1, including body completeness. [Request evidence](#inspect-cleartext-http1-request-evidence) |
+| Which TLS records carry a multiplexed HTTP/2 exchange? | Use `KeyedHTTP2Transactions` for streams, logical frame ranges and original ciphertext packets. [Keyed HTTP/2 selection](#select-http2-transactions-inside-tls) |
 | Which authenticated HTTP/1 exchanges can I select with TLS keys? | Use `KeyedHTTP1Transactions` to inspect requests, paired responses, TLS records and original ciphertext packets. [Keyed transaction selection](#select-http1-transactions-inside-tls) |
 | Which response belongs to this request, and which packets carry the exchange? | Use `HTTP1Transactions` to select a cleartext HTTP/1 exchange, then export it to PcapNG. [Transaction selection](#select-and-export-a-cleartext-http1-transaction) |
 | What did the client and server exchange? | `HTTP` for HTTP/1 requests, responses, JA4H and carved bodies. `HTTP2` for frames and stream headers. Both support cleartext and keyed TLS. |

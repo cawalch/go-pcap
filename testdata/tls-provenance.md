@@ -80,3 +80,28 @@ Both requests start in the record carried by packet index 5. Their offsets
 inside the plaintext record are 0 and 46. The 103 and final 204 share packet
 index 6. The 201 response spans three records in packets 7, 8–9, and 10. Its
 body is `reply`.
+
+## HTTP/2 over TLS
+
+`keyed-http2.pcapng` contains a TLS 1.3 AES-GCM connection with embedded
+test keys and negotiated ALPN `h2`. The two requests share a TLS record. The
+upload DATA frame spans two records. The response trailer's record spans two
+packets. `TestKeyedHTTP2Transactions` reconstructs this file, verifies
+the same frame and record relationships for TLS 1.2, and checks slice and
+ReaderAt parity. Run `go test -run '^TestKeyedHTTP2' .` for the Go checks.
+
+Run TShark 4.6.10 (commit `eac916f07299`) from the repository root.
+
+```sh
+tshark -2 -n -o tls.keylog_file: -r testdata/keyed-http2.pcapng \
+  -Y 'http2.streamid > 0' -T fields -e frame.number -e http2.streamid \
+  -e http2.header.name -e http2.header.value -e http2.data.data
+```
+
+| Frame | Stream IDs | Decoded headers or DATA |
+| --- | --- | --- |
+| 8 | 1, 3 | POST `/one`, GET `/two`, both with scheme `https` and authority `test` |
+| 10 | 1 | `75706c6f6164` (`upload`) |
+| 11 | 3, 1, 1 | Status 204, then interim 103 and final 200 |
+| 12 | 1 | `646f776e6c6f6164` (`download`) |
+| 14 | 1 | Trailer `x-end: ok` and reassembled `download` |
