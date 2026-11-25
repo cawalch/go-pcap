@@ -31,7 +31,7 @@ func (c *Capture) HTTPRequests(data []byte) ([]HTTPRequestObservation, error) {
 // HTTPRequestsFromReaderAt is the bounded ReaderAt equivalent of [Capture.HTTPRequests].
 // Frame and TCP payload reads share [MaxReaderAtScanBytes].
 func (c *Capture) HTTPRequestsFromReaderAt(r io.ReaderAt) ([]HTTPRequestObservation, error) {
-	return scanHTTPRequests(ipFrameSource{capture: c, reader: r, needsPayload: func(f Frame, _ []byte) bool { return f.IPProtocol == IPProtoTCP }})
+	return scanHTTPRequests(c.tcpReaderAt(r))
 }
 
 func collectHTTPRequestStreams(source ipFrameSource) (tcpMessageCollector, error) {

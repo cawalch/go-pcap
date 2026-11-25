@@ -73,7 +73,7 @@ func (c *Capture) KeyedHTTP1Transactions(data, extraKeyLog []byte) ([]KeyedHTTP1
 // KeyedHTTP1TransactionsFromReaderAt is the bounded ReaderAt equivalent of
 // [Capture.KeyedHTTP1Transactions]. Its reads share [MaxReaderAtScanBytes].
 func (c *Capture) KeyedHTTP1TransactionsFromReaderAt(r io.ReaderAt, extraKeyLog []byte) ([]KeyedHTTP1Transaction, error) {
-	return scanKeyedHTTP1(ipFrameSource{capture: c, reader: r, needsPayload: func(f Frame, _ []byte) bool { return f.IPProtocol == IPProtoTCP }}, extraKeyLog)
+	return scanKeyedHTTP1(c.tcpReaderAt(r), extraKeyLog)
 }
 
 func (d *tlsDirectionProvenance) coverage(size int) TLSPlaintextCoverage {

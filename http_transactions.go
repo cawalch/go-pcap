@@ -70,7 +70,7 @@ func (c *Capture) HTTP1Transactions(data []byte) ([]HTTP1Transaction, error) {
 // HTTP1TransactionsFromReaderAt is the bounded ReaderAt equivalent of
 // [Capture.HTTP1Transactions]. All packet reads share [MaxReaderAtScanBytes].
 func (c *Capture) HTTP1TransactionsFromReaderAt(r io.ReaderAt) ([]HTTP1Transaction, error) {
-	return scanHTTP1Transactions(ipFrameSource{capture: c, reader: r, needsPayload: func(f Frame, _ []byte) bool { return f.IPProtocol == IPProtoTCP }}, nil)
+	return scanHTTP1Transactions(c.tcpReaderAt(r), nil)
 }
 
 type http1Direction struct {

@@ -381,10 +381,15 @@ func (c *Capture) DNSFromReaderAt(r io.ReaderAt) ([]DNSRecord, error) {
 	}})
 }
 
+// tcpReaderAt visits all IP frames for flow indexing and reads full payloads only for TCP.
+func (c *Capture) tcpReaderAt(r io.ReaderAt) ipFrameSource {
+	return ipFrameSource{capture: c, reader: r, needsPayload: func(f Frame, _ []byte) bool { return f.IPProtocol == IPProtoTCP }}
+}
+
 // TLSFromReaderAt extracts TLS handshakes and fingerprints from reassembled
 // TCP payloads on any port under [MaxReaderAtScanBytes].
 func (c *Capture) TLSFromReaderAt(r io.ReaderAt) ([]TLSRecord, error) {
-	streams, err := collectStreams(ipFrameSource{capture: c, reader: r, needsPayload: func(f Frame, _ []byte) bool { return f.IPProtocol == IPProtoTCP }}, 0, nil, tcpWireNone)
+	streams, err := collectStreams(c.tcpReaderAt(r), 0, nil, tcpWireNone)
 	if err != nil {
 		return nil, err
 	}
