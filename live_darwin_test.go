@@ -7,10 +7,38 @@ import (
 	"encoding/binary"
 	"errors"
 	"os"
+	"slices"
 	"syscall"
 	"testing"
 	"time"
 )
+
+func TestLiveDevicesDarwinLoopback(t *testing.T) {
+	devices, err := LiveDevices()
+	if err != nil {
+		t.Fatal(err)
+	}
+	i := slices.IndexFunc(devices, func(dev LiveDevice) bool { return dev.Name == "lo0" })
+	if i < 0 {
+		t.Fatal("lo0 missing from device list")
+	}
+	loopback := devices[i]
+	capture, err := OpenLive("lo0", LiveOptions{})
+	if errors.Is(err, syscall.EPERM) || errors.Is(err, syscall.EACCES) {
+		if loopback.HasLinkType || loopback.LinkType != LinkTypeUnknown {
+			t.Fatalf("unprivileged loopback framing = %+v", loopback)
+		}
+		t.Log("verified discovery without BPF access")
+		return
+	}
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = capture.Close() }()
+	if !loopback.HasLinkType || loopback.LinkType != capture.LinkType() {
+		t.Fatalf("listed lo0 = %+v, OpenLive datalink = %d", loopback, capture.LinkType())
+	}
+}
 
 func TestDarwinBPFLinkType(t *testing.T) {
 	for native, want := range map[uint32]LinkType{

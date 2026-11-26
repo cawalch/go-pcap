@@ -102,6 +102,14 @@ func OpenLive(ifaceName string, opts LiveOptions) (*LiveCapture, error) {
 	}, nil
 }
 
+func liveDeviceLinkTypes(devices []LiveDevice) error {
+	for i := range devices {
+		devices[i].LinkType = LinkTypeIPv4
+		devices[i].HasLinkType = true
+	}
+	return nil
+}
+
 // ReadPacket reads the next live IPv4 packet from the Windows raw socket,
 // evaluating any configured BPF filter in userspace via [EvalBPF].
 // It timestamps accepted packets with the wall clock at read time.

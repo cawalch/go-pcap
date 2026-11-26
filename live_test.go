@@ -4,10 +4,58 @@ import (
 	"bytes"
 	"encoding/binary"
 	"errors"
+	"fmt"
+	"net"
 	"net/netip"
 	"runtime"
 	"testing"
 )
+
+func TestLiveDevices(t *testing.T) {
+	devices, err := LiveDevices()
+	switch runtime.GOOS {
+	case "darwin", "linux", "windows":
+		if err != nil {
+			t.Fatal(err)
+		}
+	default:
+		if !errors.Is(err, ErrLiveCaptureUnsupported) {
+			t.Fatalf("LiveDevices error = %v", err)
+		}
+		return
+	}
+	var loopback bool
+	for i, device := range devices {
+		if device.Name == "" || device.Index <= 0 || (i > 0 && devices[i-1].Index >= device.Index) {
+			t.Fatalf("unexpected interface order or metadata: %+v", devices)
+		}
+		if (device.LinkType == LinkTypeUnknown) == device.HasLinkType {
+			t.Errorf("inconsistent datalink flags: %+v", device)
+		}
+		if runtime.GOOS == "windows" && device.LinkType != LinkTypeIPv4 {
+			t.Errorf("unexpected Windows framing: %+v", device)
+		}
+		if device.Flags&net.FlagLoopback != 0 {
+			loopback = true
+			if runtime.GOOS == "linux" && device.LinkType != LinkTypeEthernet {
+				t.Errorf("unexpected Linux loopback framing: %+v", device)
+			}
+		}
+	}
+	if !loopback {
+		t.Fatal("no loopback device")
+	}
+}
+
+func ExampleLiveDevices() {
+	devices, err := LiveDevices()
+	if err != nil {
+		panic(err)
+	}
+	for _, device := range devices {
+		fmt.Println(device.Name, device.HasLinkType, device.LinkType)
+	}
+}
 
 func TestParseBPFBufferBatch(t *testing.T) {
 	f1 := buildEthernetIPv4TCPFrame([4]byte{10, 0, 0, 1}, [4]byte{10, 0, 0, 2}, 1111, 80, 1, 0, TCPFlagSYN, []byte("a"))

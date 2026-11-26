@@ -23,6 +23,10 @@ func OpenLive(ifaceName string, opts LiveOptions) (*LiveCapture, error) {
 	return nil, ErrLiveCaptureUnsupported
 }
 
+func liveDeviceLinkTypes([]LiveDevice) error {
+	return ErrLiveCaptureUnsupported
+}
+
 // ReadPacket returns [ErrLiveCaptureUnsupported].
 func (lc *LiveCapture) ReadPacket() (PacketRecord, []byte, error) {
 	return PacketRecord{}, nil, ErrLiveCaptureUnsupported

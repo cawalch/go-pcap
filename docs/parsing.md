@@ -1387,10 +1387,16 @@ interface using standard-library `syscall` descriptors (`/dev/bpf*` on macOS,
 and `BPFFilterIPv4Host` to construct classic BPF filter programs, or `EvalBPF`
 to evaluate a classic BPF program in memory.
 
-On Linux, `OpenLive` accepts Ethernet and loopback interfaces and reports
-`LinkTypeEthernet` for both. Linux presents loopback packets with a synthetic
+Call `LiveDevices()` to discover interface names, indexes, MTUs and flags
+before opening a capture. The list is sorted by index. Use `HasLinkType`
+to check whether the backend resolved a supported datalink. Linux resolves
+it without capture privileges. macOS returns the names even when BPF access
+is unavailable. Windows reports the IPv4 framing of its capture socket.
+
+On Linux, `OpenLive` accepts Ethernet, loopback and Metricom interfaces and
+reports `LinkTypeEthernet` for those devices. Linux presents loopback packets with a synthetic
 Ethernet header. Other interface hardware types return an error wrapping
-`ErrInvalidHeader`. `Promiscuous` requests membership for the capture socket
+`ErrUnsupportedDataLink`. `Promiscuous` requests membership for the capture socket
 until it closes. `OriginalLen` retains the wire length when the socket filter or
 `SnapLen` shortens a packet. `TimestampNs` comes from the kernel when it
 captures the packet and uses nanosecond resolution. The receive ring holds at
