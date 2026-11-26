@@ -480,7 +480,8 @@ func (c *Capture) validateContainer() error {
 func isKnownLinkType(lt LinkType) bool {
 	switch lt {
 	case LinkTypeNull, LinkTypeEthernet, LinkTypeRaw, LinkTypeLinuxSLL, LinkTypeIPv4, LinkTypeIPv6, LinkTypeLinuxSLL2,
-		LinkTypeIEEE80211, LinkTypeIEEE80211RadioTap, LinkTypeApplePktap:
+		LinkTypeIEEE80211, LinkTypeIEEE80211RadioTap, LinkTypeApplePktap,
+		LinkTypePPP, LinkTypePPPHDLC, LinkTypePPPPPPD, LinkTypePPPWithDir, LinkTypePFLOG:
 		return true
 	default:
 		return false
