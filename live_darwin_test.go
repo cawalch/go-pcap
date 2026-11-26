@@ -25,6 +25,9 @@ func TestLiveDevicesDarwinLoopback(t *testing.T) {
 	loopback := devices[i]
 	capture, err := OpenLive("lo0", LiveOptions{})
 	if errors.Is(err, syscall.EPERM) || errors.Is(err, syscall.EACCES) {
+		if os.Getenv("GO_PCAP_TEST_REQUIRE_BPF") == "1" {
+			t.Fatalf("BPF access required: %v", err)
+		}
 		if loopback.HasLinkType || loopback.LinkType != LinkTypeUnknown {
 			t.Fatalf("unprivileged loopback framing = %+v", loopback)
 		}
@@ -38,6 +41,7 @@ func TestLiveDevicesDarwinLoopback(t *testing.T) {
 	if !loopback.HasLinkType || loopback.LinkType != capture.LinkType() {
 		t.Fatalf("listed lo0 = %+v, OpenLive datalink = %d", loopback, capture.LinkType())
 	}
+	t.Logf("verified discovery with BPF access: lo0 link type %d", loopback.LinkType)
 }
 
 func TestDarwinBPFLinkType(t *testing.T) {
