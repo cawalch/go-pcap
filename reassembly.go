@@ -54,9 +54,10 @@ type TCPStream struct {
 
 // TCPSegmentInput represents one directional TCP packet for [ReassembleTCP].
 type TCPSegmentInput struct {
-	Seq     uint32
-	Flags   uint8
-	Payload []byte
+	Seq             uint32
+	Flags           uint8
+	InvalidChecksum bool // Caller-observed mismatch. Unchecked and offloaded segments use false.
+	Payload         []byte
 }
 
 type normSegment struct {
@@ -66,14 +67,12 @@ type normSegment struct {
 	order    int
 }
 
-// ReassembleTCP reassembles directional TCP segments in sequence order using
-// first-seen-wins overlap resolution.
-//
-// If overlapping segments contain differing payload bytes at the same sequence
-// position, ReassembleTCP retains the first-seen bytes and sets
-// [StreamAnomalies.OverlapConflict]. If sequence gaps exist between segments,
-// it sets [StreamAnomalies.SequenceGap] and concatenates the available ranges
-// without zero-filling the gap.
+// ReassembleTCP reassembles directional TCP segments in sequence order.
+// Each overlapping range uses the first captured segment with no caller-reported
+// checksum mismatch, or the first captured segment when every copy is marked
+// invalid. Unique bytes are retained regardless of checksum evidence. Differing
+// copies set [StreamAnomalies.OverlapConflict]. Sequence gaps set
+// [StreamAnomalies.SequenceGap] and the available ranges are concatenated.
 func ReassembleTCP(segments []TCPSegmentInput) (StreamBuffer, error) {
 	out, _, err := reassembleTCPWithBudget(segments, MaxFlowStreamBytes, nil)
 	return out, err
@@ -224,7 +223,7 @@ func reassembleTCPWithBudget(segments []TCPSegmentInput, remainingBudget int64, 
 				if written != nil {
 					written(seg.order, buf.Len(), baseSeq+uint32(seg.relStart), gap)
 				}
-			} else if appendTCPOverlap(&buf, norm[i:j], length, baseSeq, gap, written) {
+			} else if appendTCPOverlap(&buf, norm[i:j], segments, length, baseSeq, gap, written) {
 				out.Anomalies.OverlapConflict = true
 			}
 		}
@@ -240,9 +239,9 @@ func reassembleTCPWithBudget(segments []TCPSegmentInput, remainingBudget int64, 
 	return out, int64(len(out.Data)), nil
 }
 
-// appendTCPOverlap emits each range from the first captured segment covering it.
+// appendTCPOverlap assigns each range by checksum evidence and capture order.
 // The heap changes only at segment boundaries, independent of the sequence span.
-func appendTCPOverlap(buf *bytes.Buffer, group []normSegment, length int64, baseSeq uint32, gap bool, written tcpWriteObserver) bool {
+func appendTCPOverlap(buf *bytes.Buffer, group []normSegment, segments []TCPSegmentInput, length int64, baseSeq uint32, gap bool, written tcpWriteObserver) bool {
 	start := group[0].relStart
 	limit := start + length
 	offset := buf.Len()
@@ -250,7 +249,12 @@ func appendTCPOverlap(buf *bytes.Buffer, group []normSegment, length int64, base
 	next := 0
 	for pos := start; pos < limit; {
 		for next < len(group) && group[next].relStart <= pos {
-			heap.Push(&active, group[next])
+			candidate := group[next]
+			// The second rank range keeps flagged copies behind all other copies.
+			if segments[candidate.order].InvalidChecksum {
+				candidate.order += MaxSegmentsPerFlow
+			}
+			heap.Push(&active, candidate)
 			next++
 		}
 		for active[0].relEnd <= pos {
@@ -263,7 +267,7 @@ func appendTCPOverlap(buf *bytes.Buffer, group []normSegment, length int64, base
 		}
 		buf.Write(owner.payload[pos-owner.relStart : end-owner.relStart])
 		if written != nil {
-			written(owner.order, buf.Len(), baseSeq+uint32(pos), gap)
+			written(owner.order%MaxSegmentsPerFlow, buf.Len(), baseSeq+uint32(pos), gap)
 		}
 		gap = false
 		pos = end
