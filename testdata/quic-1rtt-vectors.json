@@ -1,0 +1,92 @@
+[
+  {
+    "name": "version_1-client",
+    "version": 1,
+    "cipher_suite": 4865,
+    "key_log": "CLIENT_TRAFFIC_SECRET_0 20242192972b2547afb4d86c7e631a42bc23fe8cdd8f536eb9c840d848bab8ef de004a765fcd5b9a40f573cf352b8d26876a3e4466fe3cf1eb30026066fd8beb",
+    "destination_cid": "SVZv75+vgzI=",
+    "expected_number": 4,
+    "packet_number": 5,
+    "packet": "bElWb++fr4My6Wx/DX0yl+/sC0fM7wrAuAUJSnEZgpjxqNmmYhnBHqUkOHxnTXJalwqYb+oKKw==",
+    "plaintext": "CwBAGGZpeHR1cmUtdmVyc2lvbl8xLWNsaWVudA=="
+  },
+  {
+    "name": "version_1-server",
+    "version": 1,
+    "cipher_suite": 4865,
+    "key_log": "SERVER_TRAFFIC_SECRET_0 20242192972b2547afb4d86c7e631a42bc23fe8cdd8f536eb9c840d848bab8ef 90625ebb68ae838094e14c116e654abe25efbac89d045356aa11ff2ee829cdb6",
+    "destination_cid": "QgH8B3/1RiA=",
+    "expected_number": 3,
+    "packet_number": 3,
+    "packet": "fEIB/Ad/9UYgy42tV6VU4JE714XIVAWkXjvrv5/glLgjyIvIU9Azo59D7GwgwLldW8T6Li2xpoJpkXGHag==",
+    "plaintext": "AgVYagABCwBAGGZpeHR1cmUtdmVyc2lvbl8xLXNlcnZlcg=="
+  },
+  {
+    "name": "version_2-client",
+    "version": 1798521807,
+    "cipher_suite": 4866,
+    "key_log": "CLIENT_TRAFFIC_SECRET_0 f498e1a921c9af2c4eae480e3357d3bdab458d10a08ab5e56cf54b9d41ffe230 2c6f72f889579a3eeb44ef2641b2d494d27743a831b717c0f8bd5af4c449b7eead99579767a21b79719ab1d6398c825a",
+    "destination_cid": "SdzxF2sfPBE=",
+    "expected_number": 4,
+    "packet_number": 5,
+    "packet": "bknc8RdrHzwRj5etL6DFT+O+JM06fxXfDrdALicP8nGtAje3LXM3++gHPryA4CcXEVPLp1JnPQ==",
+    "plaintext": "CwBAGGZpeHR1cmUtdmVyc2lvbl8yLWNsaWVudA=="
+  },
+  {
+    "name": "version_2-server",
+    "version": 1798521807,
+    "cipher_suite": 4866,
+    "key_log": "SERVER_TRAFFIC_SECRET_0 f498e1a921c9af2c4eae480e3357d3bdab458d10a08ab5e56cf54b9d41ffe230 ad411f8da0883c4f473856b5c9b5675bc5b2243f29991719272b3279f626dbec9e7d501a6f4a9658b244b579d3f040b8",
+    "destination_cid": "9Pgo49tPEwg=",
+    "expected_number": 3,
+    "packet_number": 3,
+    "packet": "bvT4KOPbTxMIhDwLZdwlBtXAlAdAOvAHyqayGmxRxPx7zFcRO4Q5i31bTlUYTGhNLBMH++x1LPd0S7aIVg==",
+    "plaintext": "AgVYagABCwBAGGZpeHR1cmUtdmVyc2lvbl8yLXNlcnZlcg=="
+  },
+  {
+    "name": "zero-cid-wrap",
+    "version": 1,
+    "cipher_suite": 4865,
+    "key_log": "CLIENT_TRAFFIC_SECRET_0 000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f 000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f",
+    "destination_cid": "",
+    "expected_number": 250,
+    "packet_number": 257,
+    "packet": "CV76D2Lv9ppkUYzNZtd7qYsDW3QI",
+    "plaintext": "AQAA"
+  },
+  {
+    "name": "maximum-packet-number",
+    "version": 1798521807,
+    "cipher_suite": 4866,
+    "key_log": "CLIENT_TRAFFIC_SECRET_0 000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f 000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f202122232425262728292a2b2c2d2e2f",
+    "destination_cid": "AAECAwQFBgcICQoLDA0ODxAREhM=",
+    "expected_number": 4611686018427387904,
+    "packet_number": 4611686018427387903,
+    "packet": "XAABAgMEBQYHCAkKCwwNDg8QERIT2eKoQrI/Y4sg6vDJEjMAgAxWzjabX1c=",
+    "plaintext": "AQAA"
+  },
+  {
+    "name": "reserved-bit",
+    "version": 1,
+    "cipher_suite": 4865,
+    "key_log": "CLIENT_TRAFFIC_SECRET_0 000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f 000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f",
+    "destination_cid": "AAECAwQFBgc=",
+    "expected_number": 5,
+    "packet_number": 5,
+    "packet": "RAABAgMEBQYHu+ersSZOFHRp64Iiw0vOavKwuxMp",
+    "plaintext": "AQAA",
+    "invalid_header": true
+  },
+  {
+    "name": "phase-bit",
+    "version": 1,
+    "cipher_suite": 4865,
+    "key_log": "CLIENT_TRAFFIC_SECRET_0 000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f 000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f",
+    "destination_cid": "AAECAwQFBgc=",
+    "expected_number": 5,
+    "packet_number": 5,
+    "packet": "TAABAgMEBQYH66qrsSaymZLeqU3NiwqVAZxO0s7f",
+    "plaintext": "AQAA",
+    "invalid_header": true
+  }
+]

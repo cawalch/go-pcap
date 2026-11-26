@@ -578,8 +578,9 @@ var (
 	ErrInvalidDNS = errors.New("invalid DNS message")
 	// ErrInvalidTLS indicates a malformed TLS record, handshake, or certificate structure.
 	ErrInvalidTLS = errors.New("invalid TLS record or handshake")
-	// ErrInvalidQUIC indicates a malformed or undecryptable QUIC Initial packet.
-	ErrInvalidQUIC = errors.New("invalid QUIC Initial packet")
+	// ErrInvalidQUIC indicates malformed QUIC input, invalid decryption context,
+	// or a packet authentication failure.
+	ErrInvalidQUIC = errors.New("invalid QUIC packet")
 	// ErrInvalidHTTP indicates a malformed HTTP/1.x request or response.
 	ErrInvalidHTTP = errors.New("invalid HTTP message")
 	// ErrInvalidSSH indicates a malformed SSH version banner or KEXINIT packet.
@@ -617,8 +618,8 @@ var (
 	ErrDNSLimit = errors.New("DNS record or jump count exceeds limit")
 	// ErrTLSLimit indicates a TLS handshake or capture exceeds TLS size or item limits.
 	ErrTLSLimit = errors.New("TLS handshake exceeds limit")
-	// ErrQUICLimit indicates that QUIC Initial input or capture scanning exceeds a resource limit.
-	ErrQUICLimit = errors.New("QUIC Initial flow exceeds limit")
+	// ErrQUICLimit indicates that QUIC packet input or capture scanning exceeds a resource limit.
+	ErrQUICLimit = errors.New("QUIC input exceeds limit")
 	// ErrInvalidWebSocket indicates invalid or incomplete WebSocket framing.
 	ErrInvalidWebSocket = errors.New("invalid WebSocket frame")
 	// ErrWebSocketLimit indicates a WebSocket count or size limit was exceeded.

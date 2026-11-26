@@ -9,6 +9,7 @@ import (
 	"crypto/sha256"
 	"encoding/binary"
 	"fmt"
+	"hash"
 	"math"
 	"net/netip"
 	"slices"
@@ -185,27 +186,21 @@ func quicConnectionIDs(datagram []byte) (dcid, scid []byte, offset int, ok bool)
 	return dcid, scid, offset, true
 }
 
-type quicInitialKeys struct {
+type quicPacketKeys struct {
 	aead cipher.AEAD
 	hp   cipher.Block
 	iv   [12]byte
 }
 
-func deriveQUICInitialKeys(dcid []byte, version uint32, isClient bool) (quicInitialKeys, error) {
+func deriveQUICInitialKeys(dcid []byte, version uint32, isClient bool) (quicPacketKeys, error) {
 	salt := quicV1InitialSalt
-	keyLabel := "quic key"
-	ivLabel := "quic iv"
-	hpLabel := "quic hp"
 	if version == QUICVersion2 {
 		salt = quicV2InitialSalt
-		keyLabel = "quicv2 key"
-		ivLabel = "quicv2 iv"
-		hpLabel = "quicv2 hp"
 	}
 
 	initialSecret, err := hkdf.Extract(sha256.New, dcid, salt)
 	if err != nil {
-		return quicInitialKeys{}, err
+		return quicPacketKeys{}, err
 	}
 	dirLabel := "server in"
 	if isClient {
@@ -213,42 +208,50 @@ func deriveQUICInitialKeys(dcid []byte, version uint32, isClient bool) (quicInit
 	}
 	trafficSecret, err := tls13ExpandLabelHash(sha256.New, initialSecret, dirLabel, nil, 32)
 	if err != nil {
-		return quicInitialKeys{}, err
+		return quicPacketKeys{}, err
 	}
-	key, err := tls13ExpandLabelHash(sha256.New, trafficSecret, keyLabel, nil, 16)
-	if err != nil {
-		return quicInitialKeys{}, err
+	return deriveQUICPacketKeys(trafficSecret, version, sha256.New, 16)
+}
+
+func deriveQUICPacketKeys(trafficSecret []byte, version uint32, hashFn func() hash.Hash, keyLen int) (quicPacketKeys, error) {
+	keyLabel, ivLabel, hpLabel := "quic key", "quic iv", "quic hp"
+	if version == QUICVersion2 {
+		keyLabel, ivLabel, hpLabel = "quicv2 key", "quicv2 iv", "quicv2 hp"
 	}
-	ivSlice, err := tls13ExpandLabelHash(sha256.New, trafficSecret, ivLabel, nil, 12)
+	key, err := tls13ExpandLabelHash(hashFn, trafficSecret, keyLabel, nil, keyLen)
 	if err != nil {
-		return quicInitialKeys{}, err
+		return quicPacketKeys{}, err
 	}
-	hpKey, err := tls13ExpandLabelHash(sha256.New, trafficSecret, hpLabel, nil, 16)
+	ivSlice, err := tls13ExpandLabelHash(hashFn, trafficSecret, ivLabel, nil, 12)
 	if err != nil {
-		return quicInitialKeys{}, err
+		return quicPacketKeys{}, err
+	}
+	hpKey, err := tls13ExpandLabelHash(hashFn, trafficSecret, hpLabel, nil, keyLen)
+	if err != nil {
+		return quicPacketKeys{}, err
 	}
 
 	block, err := aes.NewCipher(key)
 	if err != nil {
-		return quicInitialKeys{}, err
+		return quicPacketKeys{}, err
 	}
 	aead, err := cipher.NewGCM(block)
 	if err != nil {
-		return quicInitialKeys{}, err
+		return quicPacketKeys{}, err
 	}
 	hpBlock, err := aes.NewCipher(hpKey)
 	if err != nil {
-		return quicInitialKeys{}, err
+		return quicPacketKeys{}, err
 	}
 
-	var out quicInitialKeys
+	var out quicPacketKeys
 	out.aead = aead
 	out.hp = hpBlock
 	copy(out.iv[:], ivSlice)
 	return out, nil
 }
 
-func decryptSingleQUICInitial(pkt []byte, hdr QUICInitialHeader, keys quicInitialKeys) ([]byte, error) {
+func decryptSingleQUICInitial(pkt []byte, hdr QUICInitialHeader, keys quicPacketKeys) ([]byte, error) {
 	// Sample starts 4 bytes after the start of the Packet Number field (hdr.PayloadOffset + 4).
 	sampleOffset := hdr.PayloadOffset + 4
 	if sampleOffset+16 > hdr.PacketLength || hdr.PacketLength > len(pkt) {
@@ -422,7 +425,7 @@ func decryptQUICInitial(datagrams [][]byte, observedRetryID []byte, inferRetry b
 	var firstHdr QUICInitialHeader
 	var haveFirst bool
 	var effectiveDCID []byte
-	var keys, retryKeys quicInitialKeys
+	var keys, retryKeys quicPacketKeys
 	var chunks []quicCryptoChunk
 
 	for _, dgram := range datagrams {
