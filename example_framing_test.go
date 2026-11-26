@@ -2,6 +2,7 @@ package pcap_test
 
 import (
 	"fmt"
+	"net/netip"
 
 	pcap "github.com/cawalch/go-pcap"
 )
@@ -24,4 +25,14 @@ func ExampleDecodeFrame_esp() {
 	}
 	// Output:
 	// esp header at byte 20, 4 opaque bytes
+}
+
+func ExampleVerifyUDPChecksum() {
+	src := netip.MustParseAddr("192.0.2.1")
+	dst := netip.MustParseAddr("198.51.100.2")
+	datagram := []byte{0x30, 0x39, 0x27, 0x0f, 0, 13, 0x78, 0x82, 'h', 'e', 'l', 'l', 'o'}
+	valid, likelyOffload := pcap.VerifyUDPChecksum(src, dst, datagram)
+	fmt.Println(valid, likelyOffload)
+	// Output:
+	// true false
 }

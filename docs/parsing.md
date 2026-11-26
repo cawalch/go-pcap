@@ -309,6 +309,20 @@ Atomic IPv6 packets are decoded independently of pending fragment groups.
 The [fingerprint reference fixtures](../testdata/foxio/README.md) identify the
 FoxIO revisions and inputs used for compatibility tests.
 
+### Verify packet checksums
+
+Use `VerifyIPv4HeaderChecksum` on a complete IPv4 header, including its
+options. For TCP and UDP, use `VerifyTCPChecksum` or `VerifyUDPChecksum` with
+the IP pseudo-header addresses and the complete transport header and payload.
+Skip transport verification on capture prefixes and on fragments until
+reassembly supplies the complete transport bytes. UDP verification follows
+the UDP length field and supports ordinary, non-jumbo datagrams.
+
+A valid transport checksum returns `(true, false)`. A zero field or a
+matching offload seed can return `(false, true)`. This reports a possible
+transmit offload or, for zero-checksum IPv4 UDP, an omitted checksum.
+A checksum mismatch or malformed helper input can return `(false, false)`.
+
 ## Observe ARP and IPv6 neighbors
 
 Use `Capture.Neighbors` or `Capture.NeighborsFromReaderAt` to read local-link
