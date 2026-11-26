@@ -534,9 +534,27 @@ func tls12TrafficAEAD(cipherSuite uint16, masterSecret []byte, clientRandom, ser
 	return aead, salt, err
 }
 
+type tls12RecordProtection struct {
+	aead cipher.AEAD
+	salt [4]byte
+	cbc  tls12CBCProtection
+}
+
+func tls12TrafficProtection(suite uint16, master []byte, clientRandom, serverRandom [32]byte, isClient bool, mode tls12CBCMode) (tls12RecordProtection, error) {
+	var protection tls12RecordProtection
+	var err error
+	if params := tls12CBCSuiteParams(suite); params.keyLen != 0 {
+		protection.cbc, err = params.trafficProtection(master, clientRandom, serverRandom, isClient, mode)
+	} else {
+		protection.aead, protection.salt, err = tls12TrafficAEAD(suite, master, clientRandom, serverRandom, isClient)
+	}
+	return protection, err
+}
+
 // DecryptTLS12Records decrypts a directional TLS 1.2 byte stream using the
 // 48-byte masterSecret (from a CLIENT_RANDOM keylog line) and the 32-byte
-// client and server random values.
+// client and server random values. For AES-CBC, it determines the record layout
+// from the first authenticated record and keeps that layout for the direction.
 func DecryptTLS12Records(
 	stream []byte,
 	cipherSuite uint16,
@@ -545,10 +563,10 @@ func DecryptTLS12Records(
 	serverRandom [32]byte,
 	isClient bool,
 ) ([]byte, error) {
-	return decryptTLS12Records(stream, cipherSuite, masterSecret, clientRandom, serverRandom, isClient, nil)
+	return decryptTLS12Records(stream, cipherSuite, masterSecret, clientRandom, serverRandom, isClient, tls12CBCDetectMode, nil)
 }
 
-func decryptTLS12Records(stream []byte, cipherSuite uint16, masterSecret []byte, clientRandom, serverRandom [32]byte, isClient bool, provenance *tlsRecordMapper) (_ []byte, err error) {
+func decryptTLS12Records(stream []byte, cipherSuite uint16, masterSecret []byte, clientRandom, serverRandom [32]byte, isClient bool, mode tls12CBCMode, provenance *tlsRecordMapper) (_ []byte, err error) {
 	offset := 0
 	if provenance != nil {
 		defer func() {
@@ -558,15 +576,16 @@ func decryptTLS12Records(stream []byte, cipherSuite uint16, masterSecret []byte,
 			provenance.finish(offset, stream)
 		}()
 	}
-	var aead cipher.AEAD
-	var salt [4]byte
+	var protection tls12RecordProtection
 	if provenance == nil || len(masterSecret) != 0 {
-		aead, salt, err = tls12TrafficAEAD(cipherSuite, masterSecret, clientRandom, serverRandom, isClient)
+		protection, err = tls12TrafficProtection(cipherSuite, masterSecret, clientRandom, serverRandom, isClient, mode)
 		if err != nil {
 			return nil, err
 		}
 	}
 
+	aead, salt, cbc := protection.aead, protection.salt, protection.cbc
+	isCBC := cbc.block != nil
 	var seqNum uint64
 	var inCipherPhase bool
 	var appBuf bytes.Buffer
@@ -591,13 +610,17 @@ func decryptTLS12Records(stream []byte, cipherSuite uint16, masterSecret []byte,
 		offset += 5 + recLen
 
 		if contentType == TLSRecordChangeCipherSpec {
-			if provenance != nil {
+			if provenance != nil || isCBC {
 				if inCipherPhase {
-					provenance.stopAt(start, tlsStopUnsupported)
+					if provenance != nil {
+						provenance.stopAt(start, tlsStopUnsupported)
+					}
 					break
 				}
 				if len(recordBody) != 1 || recordBody[0] != 1 {
-					provenance.stopAt(start, tlsStopInvalidRecord)
+					if provenance != nil {
+						provenance.stopAt(start, tlsStopInvalidRecord)
+					}
 					break
 				}
 			}
@@ -610,39 +633,52 @@ func decryptTLS12Records(stream []byte, cipherSuite uint16, masterSecret []byte,
 				provenance.stopAt(start, tlsStopInvalidRecord)
 				break
 			}
+			if isCBC && inCipherPhase {
+				break
+			}
 			continue
 		}
-		if aead == nil {
+		if aead == nil && !isCBC {
 			if inCipherPhase || contentType == TLSRecordApplicationData {
 				provenance.stopAt(start, tlsStopMissingKey)
 				break
 			}
 			continue
 		}
-		// TLS 1.2 AES-GCM record payload: 8-byte explicit nonce + ciphertext + 16-byte tag.
-		if len(recordBody) < 8+aead.Overhead() {
-			if provenance != nil && (inCipherPhase || contentType == TLSRecordApplicationData) {
-				provenance.stopAt(start, tlsStopInvalidRecord)
-				break
+		var plain []byte
+		var ok bool
+		if isCBC {
+			plain, ok = cbc.open(seqNum, contentType, recVer, recordBody)
+		} else {
+			// TLS 1.2 AES-GCM record payload: 8-byte explicit nonce + ciphertext + 16-byte tag.
+			if len(recordBody) < 8+aead.Overhead() {
+				if provenance != nil && (inCipherPhase || contentType == TLSRecordApplicationData) {
+					provenance.stopAt(start, tlsStopInvalidRecord)
+					break
+				}
+				continue
 			}
-			continue
+			var nonce [12]byte
+			copy(nonce[:4], salt[:])
+			copy(nonce[4:], recordBody[:8])
+			ciphertext := recordBody[8:]
+			plainLen := len(ciphertext) - aead.Overhead()
+
+			var aad [13]byte
+			binary.BigEndian.PutUint64(aad[:8], seqNum)
+			aad[8] = contentType
+			binary.BigEndian.PutUint16(aad[9:11], recVer)
+			binary.BigEndian.PutUint16(aad[11:13], uint16(plainLen))
+
+			var openErr error
+			plain, openErr = aead.Open(nil, nonce[:], ciphertext, aad[:])
+			ok = openErr == nil
 		}
-		var nonce [12]byte
-		copy(nonce[0:4], salt[:])
-		copy(nonce[4:12], recordBody[:8])
-		ciphertext := recordBody[8:]
-		plainLen := len(ciphertext) - aead.Overhead()
-
-		var aad [13]byte
-		binary.BigEndian.PutUint64(aad[0:8], seqNum)
-		aad[8] = contentType
-		binary.BigEndian.PutUint16(aad[9:11], recVer)
-		binary.BigEndian.PutUint16(aad[11:13], uint16(plainLen))
-
-		plain, decErr := aead.Open(nil, nonce[:], ciphertext, aad[:])
-		if decErr != nil {
-			if provenance != nil && (inCipherPhase || contentType == TLSRecordApplicationData) {
-				provenance.stopAt(start, tlsStopAuthentication)
+		if !ok {
+			if (provenance != nil || isCBC) && (inCipherPhase || contentType == TLSRecordApplicationData) {
+				if provenance != nil {
+					provenance.stopAt(start, tlsStopAuthentication)
+				}
 				break
 			}
 			continue
@@ -745,8 +781,12 @@ func decryptTLSStream(st TCPStream, keyLog *TLSKeyLog, mappers *[2]tlsRecordMapp
 		_, clientApp, _ = decryptTLS13Records(cData, suite, entry.ClientHandshakeSecret, entry.ClientTrafficSecret0, entry.ClientEarlyTrafficSecret, client)
 		_, serverApp, _ = decryptTLS13Records(sData, suite, entry.ServerHandshakeSecret, entry.ServerTrafficSecret0, nil, server)
 	} else if len(entry.MasterSecret) > 0 || mappers != nil {
-		clientApp, _ = decryptTLS12Records(cData, suite, entry.MasterSecret, hsClient.ClientHello.Random, hsServer.ServerHello.Random, true, client)
-		serverApp, _ = decryptTLS12Records(sData, suite, entry.MasterSecret, hsClient.ClientHello.Random, hsServer.ServerHello.Random, false, server)
+		mode := tls12CBCMACThenEncrypt
+		if slices.Contains(hsServer.ServerHello.Extensions, tlsExtEncryptThenMAC) {
+			mode = tls12CBCEncryptThenMAC
+		}
+		clientApp, _ = decryptTLS12Records(cData, suite, entry.MasterSecret, hsClient.ClientHello.Random, hsServer.ServerHello.Random, true, mode, client)
+		serverApp, _ = decryptTLS12Records(sData, suite, entry.MasterSecret, hsClient.ClientHello.Random, hsServer.ServerHello.Random, false, mode, server)
 	}
 	st.Client.Data, st.Server.Data = clientApp, serverApp
 	return st, true

@@ -746,11 +746,18 @@ for resolving ambiguous packets.
 ## Decrypt TLS 1.2 and TLS 1.3 streams offline
 
 Call `capture.DecryptedTLSStreams(data, extraKeyLog)` to decrypt TLS 1.2
-(`CLIENT_RANDOM` master secrets with AES-128-GCM and AES-256-GCM cipher suites)
+(`CLIENT_RANDOM` master secrets with supported AES-GCM and AES-CBC suites)
 and TLS 1.3 (`CLIENT_TRAFFIC_SECRET_0` / `SERVER_TRAFFIC_SECRET_0` with
 `TLS_AES_128_GCM_SHA256` and `TLS_AES_256_GCM_SHA384`) application streams using
 secrets embedded in PcapNG Decryption Secrets Blocks (`DSB`) or supplied in
 `extraKeyLog` (`SSLKEYLOGFILE` format).
+
+TLS 1.2 AES-CBC decryption supports MAC-then-encrypt and encrypt-then-MAC.
+Capture analysis uses the ServerHello extension to select the record layout.
+The directional `DecryptTLS12Records` function selects the layout from the
+first authenticated record. A failed CBC record stops that direction and
+returns the application bytes authenticated so far. See the
+[CBC fixture suite list](../testdata/tls/README.md).
 
 When the key log includes `CLIENT_EARLY_TRAFFIC_SECRET`, the client stream
 includes authenticated 0-RTT application bytes followed by recovered 1-RTT
@@ -771,7 +778,7 @@ returns the plaintext recovered so far. [TLS 1.3 traffic key updates](https://ww
 Call `KeyedHTTP1Transactions` with the capture bytes or
 `KeyedHTTP1TransactionsFromReaderAt` with the indexed reader. Supply an NSS key
 log as the second argument, or pass `nil` to use only the embedded PcapNG TLS
-Decryption Secrets Blocks. The scan accepts the AES-GCM suites supported by the
+Decryption Secrets Blocks. The scan accepts the suites supported by the
 offline TLS 1.2 and 1.3 decryptors. TLS 1.2 uses the `CLIENT_RANDOM` master
 secret. TLS 1.3 uses directional application traffic secrets, optional handshake
 secrets, and optional client early traffic secrets. Both key sources together
