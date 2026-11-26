@@ -414,14 +414,16 @@ func (c *Capture) tcpReaderAt(r io.ReaderAt) ipFrameSource {
 }
 
 // TLSFromReaderAt extracts TLS handshakes and fingerprints from reassembled
-// TCP payloads on any port under [MaxReaderAtScanBytes].
+// TCP payloads on any port under [MaxReaderAtScanBytes]. Parsing in each
+// direction stops at its first known TCP sequence gap.
 // See [Capture.UnsupportedLinkTypePackets] for link-type coverage.
 func (c *Capture) TLSFromReaderAt(r io.ReaderAt) ([]TLSRecord, error) {
-	streams, err := collectStreams(c.tcpReaderAt(r), 0, nil, tcpWireNone)
+	var meta []streamMetadata
+	streams, err := collectStreams(c.tcpReaderAt(r), 0, &meta, tcpWireNone)
 	if err != nil {
 		return nil, err
 	}
-	return c.tlsFromStreams(streams, nil)
+	return c.tlsFromStreams(streams, meta, nil)
 }
 
 // QUICFromReaderAt extracts QUIC v1/v2 Initial handshakes and fingerprints

@@ -229,6 +229,55 @@ func TestTLSHandshakeJA4SuiteAndCaptureTLS(t *testing.T) {
 	}
 }
 
+func TestTLSCaptureTCPGaps(t *testing.T) {
+	client, server := [4]byte{192, 0, 2, 1}, [4]byte{192, 0, 2, 2}
+	const host = "capture.example"
+	hello := buildTLS13ClientHelloRecord(host, "h2")
+	for _, tc := range []struct {
+		name         string
+		first, tail  []byte
+		missingBytes uint32
+		want         int
+	}{
+		{"complete before gap", hello, []byte{TLSRecordApplicationData}, 32, 1},
+		{"gap inside hello", hello[:20], hello[20:], 32, 0},
+		{"gap after SYN", nil, hello, 32, 0},
+		{"contiguous hello", hello[:20], hello[20:], 0, 1},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			const base = 1001
+			raw := buildClassicPCAP(binary.LittleEndian, false, LinkTypeEthernet, 65535, [][]byte{
+				buildEthernetIPv4TCPFrame(client, server, 5000, 443, base-1, 0, TCPFlagSYN, nil),
+				buildEthernetIPv4TCPFrame(client, server, 5000, 443, base, 0, TCPFlagACK, tc.first),
+				buildEthernetIPv4TCPFrame(client, server, 5000, 443, base+uint32(len(tc.first))+tc.missingBytes, 0, TCPFlagACK, tc.tail),
+			})
+			c, err := New(raw)
+			if err != nil {
+				t.Fatal(err)
+			}
+			rows := checkReaderParity(t, raw, c.TLS, c.TLSFromReaderAt)
+			if len(rows) != tc.want {
+				t.Fatalf("TLS got %d handshakes, want %d", len(rows), tc.want)
+			}
+			if len(rows) != 0 && (!rows[0].Handshake.HasClientHello || rows[0].Handshake.ClientHello.SNI != host || rows[0].FlowIndex != 0) {
+				t.Fatalf("TLS handshake = %+v", rows[0])
+			}
+			keyed, err := c.TLSWithKeyLog(raw, nil)
+			if err != nil || !reflect.DeepEqual(keyed, rows) {
+				t.Fatalf("TLSWithKeyLog = %+v, %v; TLS = %+v", keyed, err, rows)
+			}
+			web, err := c.Web(raw)
+			if err != nil || !reflect.DeepEqual(web.TLS, rows) {
+				t.Fatalf("Web.TLS = %+v, %v; TLS = %+v", web.TLS, err, rows)
+			}
+			web, _, err = c.WebWithWebSockets(raw)
+			if err != nil || !reflect.DeepEqual(web.TLS, rows) {
+				t.Fatalf("WebWithWebSockets.TLS = %+v, %v; TLS = %+v", web.TLS, err, rows)
+			}
+		})
+	}
+}
+
 func encryptTLS13AppDataRecord(t testing.TB, secret []byte, cipherSuite uint16, seq uint64, innerType uint8, payload []byte) []byte {
 	t.Helper()
 	aead, iv, err := deriveTLS13TrafficAEAD(secret, cipherSuite)

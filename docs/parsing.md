@@ -728,7 +728,9 @@ independent of capture duration.
 Call `ParseTLSRecords(stream)` on a TCP payload or reassembled stream, or call
 `capture.TLS(data)` (or `capture.TLSWithKeyLog(data, extraKeyLog)`) to
 reassemble TCP flows and decode TLS 1.2 and TLS 1.3 `ClientHello`, `ServerHello`,
-and `Certificate` handshake messages:
+and `Certificate` handshake messages. Capture scans, including the TLS records
+returned by `Web` and `WebWithWebSockets`, parse each direction only through
+its first known TCP sequence gap. They keep complete messages before the gap.
 
 - A hello may span one-byte records. The parser joins the fragments across
   complete, non-closing plaintext warning alerts. Fatal alerts and

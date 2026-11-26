@@ -1101,6 +1101,7 @@ func mergeTLSAnomalies(a, b TLSAnomalies) TLSAnomalies {
 
 // TLS extracts TLS handshakes (ClientHello, ServerHello, X.509 certificates,
 // JA4, JA4S, and JA4X) across all reassembled TCP streams in the capture.
+// Parsing in each direction stops at its first known TCP sequence gap.
 // When the capture contains PcapNG Decryption Secrets Blocks (DSB) with
 // matching TLS 1.3 handshake traffic secrets, TLS also extracts the authenticated
 // handshake messages from each direction for which a secret is available.
@@ -1112,15 +1113,17 @@ func (c *Capture) TLS(data []byte) ([]TLSRecord, error) {
 // TLSWithKeyLog extracts TLS handshakes across all reassembled TCP streams in
 // the capture, using embedded PcapNG Decryption Secrets Blocks (DSB) and
 // optional extraKeyLog bytes to decrypt client and server TLS 1.3 certificate chains.
+// Parsing in each direction stops at its first known TCP sequence gap.
 func (c *Capture) TLSWithKeyLog(data []byte, extraKeyLog []byte) ([]TLSRecord, error) {
-	streams, err := c.Streams(data)
+	var meta []streamMetadata
+	streams, err := collectStreams(ipFrameSource{capture: c, data: data}, 0, &meta, tcpWireNone)
 	if err != nil {
 		return nil, err
 	}
-	return c.tlsFromStreams(streams, extraKeyLog)
+	return c.tlsFromStreams(streams, meta, extraKeyLog)
 }
 
-func (c *Capture) tlsFromStreams(streams []TCPStream, extraKeyLog []byte) ([]TLSRecord, error) {
+func (c *Capture) tlsFromStreams(streams []TCPStream, meta []streamMetadata, extraKeyLog []byte) ([]TLSRecord, error) {
 	if len(streams) == 0 {
 		return nil, nil
 	}
@@ -1130,13 +1133,16 @@ func (c *Capture) tlsFromStreams(streams []TCPStream, extraKeyLog []byte) ([]TLS
 		return nil, err
 	}
 
-	return tlsRecordsFromStreams(streams, keyLog)
+	return tlsRecordsFromStreams(streams, meta, keyLog)
 }
 
-func tlsRecordsFromStreams(streams []TCPStream, keyLog *TLSKeyLog) ([]TLSRecord, error) {
+func tlsRecordsFromStreams(streams []TCPStream, meta []streamMetadata, keyLog *TLSKeyLog) ([]TLSRecord, error) {
 	var records []TLSRecord
 	for i := range streams {
-		st, _, _ := proxyStream(streams[i])
+		st := streams[i]
+		st.Client.Data = st.Client.Data[:meta[i].clientPrefix]
+		st.Server.Data = st.Server.Data[:meta[i].serverPrefix]
+		st, _, _ = proxyStream(st)
 		cData, sData := st.Client.Data, st.Server.Data
 		srcAddr, dstAddr, srcPort, dstPort := st.SrcAddr, st.DstAddr, st.SrcPort, st.DstPort
 		var merged TLSHandshake
