@@ -405,10 +405,12 @@ const (
 	MaxKRB5RecordsPerScan = 16_384
 
 	// Bounds for LDAP request metadata decoding.
-	MaxLDAPPacketBytes = 64 << 10
-	MaxLDAPFilterDepth = 16
-	MaxLDAPFilterBytes = 16 << 10
-	MaxLDAPAttributes  = 64
+	MaxLDAPPacketBytes      = 64 << 10
+	MaxLDAPFilterDepth      = 16
+	MaxLDAPFilterBytes      = 16 << 10
+	MaxLDAPAttributes       = 64
+	MaxLDAPRecordsPerScan   = 16_384
+	MaxLDAPTextBytesPerScan = 16 << 20
 	// MaxDCERPCContexts bounds presentation context offers and acknowledgment results in one DCE/RPC PDU.
 	MaxDCERPCContexts    = 64
 	MaxRDPPacketBytes    = 16 << 10
@@ -627,7 +629,7 @@ var (
 	ErrSMBLimit = errors.New("SMB2 or NTLM message exceeds limit")
 	// ErrKRB5Limit indicates a Kerberos v5 message or capture exceeds limits.
 	ErrKRB5Limit = errors.New("Kerberos v5 message exceeds limit")
-	// ErrLDAPLimit indicates an LDAP packet, filter, or attribute list exceeds a limit.
+	// ErrLDAPLimit indicates an LDAP request or scan exceeds a limit.
 	ErrLDAPLimit = errors.New("LDAP request exceeds limit")
 	// ErrDCERPCLimit indicates a DCE/RPC presentation context list exceeds the limit.
 	ErrDCERPCLimit = errors.New("DCE/RPC fragment exceeds limit")
