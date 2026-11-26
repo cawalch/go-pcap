@@ -27,6 +27,21 @@ func ExampleParseLDAP() {
 	// 1 3 simple
 }
 
+func ExampleParseDCERPC() {
+	// One little-endian DCE/RPC request fragment.
+	wire := []byte{
+		5, 0, 0, 3, 0x10, 0, 0, 0, 24, 0, 0, 0, 7, 0, 0, 0,
+		0, 0, 0, 0, 1, 0, 42, 0,
+	}
+	msg, err := pcap.ParseDCERPC(wire)
+	if err != nil {
+		panic(err)
+	}
+	fmt.Println(msg.CallID, msg.ContextID, msg.Opnum)
+	// Output:
+	// 7 1 42
+}
+
 func buildExampleEthernetUDPFrame() []byte {
 	frame := make([]byte, 14+20+8+4)
 	binary.BigEndian.PutUint16(frame[12:14], pcap.EtherTypeIPv4)

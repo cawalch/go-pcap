@@ -405,10 +405,12 @@ const (
 	MaxKRB5RecordsPerScan = 16_384
 
 	// Bounds for LDAP request metadata decoding.
-	MaxLDAPPacketBytes   = 64 << 10
-	MaxLDAPFilterDepth   = 16
-	MaxLDAPFilterBytes   = 16 << 10
-	MaxLDAPAttributes    = 64
+	MaxLDAPPacketBytes = 64 << 10
+	MaxLDAPFilterDepth = 16
+	MaxLDAPFilterBytes = 16 << 10
+	MaxLDAPAttributes  = 64
+	// MaxDCERPCContexts bounds presentation context offers and acknowledgment results in one DCE/RPC PDU.
+	MaxDCERPCContexts    = 64
 	MaxRDPPacketBytes    = 16 << 10
 	MaxRDPCookieBytes    = 512
 	MaxRDPRecordsPerScan = 16_384
@@ -583,6 +585,8 @@ var (
 	ErrInvalidKRB5 = errors.New("invalid Kerberos v5 message")
 	// ErrInvalidLDAP indicates malformed LDAP request framing or an unsupported operation.
 	ErrInvalidLDAP = errors.New("invalid or unsupported LDAP request")
+	// ErrInvalidDCERPC indicates a malformed or unsupported DCE/RPC fragment.
+	ErrInvalidDCERPC = errors.New("invalid or unsupported DCE/RPC fragment")
 	// ErrInvalidRDP indicates a malformed TPKT/X.224 RDP negotiation PDU.
 	ErrInvalidRDP = errors.New("invalid RDP negotiation packet")
 	// ErrUnsupportedDataLink indicates a live datalink the backend cannot capture.
@@ -625,6 +629,8 @@ var (
 	ErrKRB5Limit = errors.New("Kerberos v5 message exceeds limit")
 	// ErrLDAPLimit indicates an LDAP packet, filter, or attribute list exceeds a limit.
 	ErrLDAPLimit = errors.New("LDAP request exceeds limit")
+	// ErrDCERPCLimit indicates a DCE/RPC presentation context list exceeds the limit.
+	ErrDCERPCLimit = errors.New("DCE/RPC fragment exceeds limit")
 	// ErrRDPLimit indicates an RDP negotiation message or capture exceeds limits.
 	ErrRDPLimit = errors.New("RDP negotiation message exceeds limit")
 )
