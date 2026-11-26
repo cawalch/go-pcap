@@ -254,8 +254,8 @@ without heap allocations:
   (`UDP 6081`).
 - `DecodeFrame` follows IP-in-IP (IP protocols 4 and 41) within the enclosing
   datagram length and `MaxFrameLayers`. Each `LayerIPIP` marks the encapsulated
-  IP header. `Flows` and `FlowsFromReaderAt` key IP-in-IP packets by the
-  enclosing IP addresses and protocol and preserve their Community ID behavior.
+  IP header. Capture-level flow summaries, exports, and protocol scans use the
+  enclosing IP addresses and protocol to preserve flow indices and Community IDs.
 - Supported network headers: `IPv4` (with fragment detection), `IPv6` (with
   bounded extension-header traversal for Hop-by-Hop, Routing, Fragment,
   Destination Options, and Authentication headers), and `ARP`.

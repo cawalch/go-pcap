@@ -113,7 +113,11 @@ func DecodeFrame(data []byte, linkType LinkType) (Frame, error) {
 	return decodeFrame(data, linkType, false)
 }
 
-// Flow summaries keep the enclosing IP header for IP-in-IP tunnels.
+// Capture scans share first-seen flow indices and keep the enclosing IP tuple.
+func decodeCaptureFrame(data []byte, linkType LinkType) (Frame, error) {
+	return decodeFrame(data, linkType, true)
+}
+
 func decodeFrame(data []byte, linkType LinkType, keepIPIPOuter bool) (f Frame, err error) {
 	r := NewSafeReader(data)
 	// Fill the result directly to avoid copying its fixed-size layer array.
@@ -903,13 +907,11 @@ func decodeTransport(r *SafeReader, offset, ipBound int64, proto uint8, f *Frame
 		f.PayloadOffset = uint32(offset + hdrLen)
 		f.PayloadLength = uint32(avail - hdrLen)
 
-	case IPProtoIPv4Encap, IPProtoIPv6:
-		if !f.keepIPIPOuter {
+	default:
+		if (proto == IPProtoIPv4Encap || proto == IPProtoIPv6) && !f.keepIPIPOuter {
 			decodeIPIP(r, offset, ipBound, proto, f)
 			return
 		}
-		fallthrough
-	default:
 		f.PayloadOffset = uint32(offset)
 		f.PayloadLength = uint32(avail)
 	}

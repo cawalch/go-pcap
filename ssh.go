@@ -223,7 +223,7 @@ func (c *Capture) SSH(data []byte) ([]SSHRecord, error) {
 		if err != nil {
 			return err
 		}
-		frame, err := DecodeFrame(payload, pkt.LinkType)
+		frame, err := decodeCaptureFrame(payload, pkt.LinkType)
 		if err != nil || frame.IPVersion == 0 || frame.IPProtocol != IPProtoTCP || !frame.hasPorts || frame.Anomalies.IPFragment {
 			return nil
 		}

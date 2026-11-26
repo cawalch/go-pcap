@@ -141,21 +141,57 @@ func TestIPIPFlowCompatibility(t *testing.T) {
 	}
 }
 
-func TestIPIPReaderAtDNSBeyondPrefix(t *testing.T) {
+func TestIPIPCaptureFlowIndices(t *testing.T) {
 	dns := buildDNSQueryResponsePacket()
 	udp := buildEthernetIPv4UDPFrame([4]byte{192, 0, 2, 1}, [4]byte{192, 0, 2, 2}, 53, 55555, dns)[34:]
+	inner := ipipIPv6(IPProtoUDP, udp)
 	ext := make([]byte, 256)
 	ext[0], ext[1] = IPProtoIPv6, byte(len(ext)/8-1)
-	wire := ipipIPv6(IPProtoHopByHop, append(ext, ipipIPv6(IPProtoUDP, udp)...))
-	raw := buildClassicPCAP(binary.LittleEndian, false, LinkTypeRaw, MaxSnapLen, [][]byte{wire})
-	c, _ := readWrittenPackets(t, raw)
+	tunnel := ipipIPv6(IPProtoHopByHop, append(ext, inner...))
+	second := bytes.Clone(tunnel)
+	second[39] = 3 // A different enclosing destination with the same inner tuple.
+	raw := buildClassicPCAP(binary.LittleEndian, false, LinkTypeRaw, MaxSnapLen, [][]byte{tunnel, second, inner})
+	c, packets := readWrittenPackets(t, raw)
 	r := bytes.NewReader(raw)
 	file, err := NewFromReaderAt(r, r.Size())
 	if err != nil {
 		t.Fatal(err)
 	}
-	if records := checkReaderParity(t, raw, c.DNS, file.DNSFromReaderAt); len(records) != 1 {
-		t.Fatalf("wanted one DNS record, got %+v", records)
+	flows := checkReaderParity(t, raw, c.Flows, file.FlowsFromReaderAt)
+	if len(flows) != 3 || flows[0].CommunityID(0) != "" || flows[1].CommunityID(0) != "" || flows[2].CommunityID(0) == "" {
+		t.Fatalf("flows = %+v", flows)
+	}
+	records := checkReaderParity(t, raw, c.DNS, file.DNSFromReaderAt)
+	if len(records) != 1 || records[0].FlowIndex != 2 || records[0].PacketIndex != 2 {
+		t.Fatalf("DNS records = %+v", records)
+	}
+	for i, want := range [][]byte{tunnel, second} {
+		payload, err := file.PacketPayloadFromReaderAt(r, packets[i])
+		if err != nil {
+			t.Fatal(err)
+		}
+		f, err := DecodeFrame(payload, packets[i].LinkType)
+		if err != nil || f.IPVersion != 6 || f.IPProtocol != IPProtoUDP || f.SrcPort != 53 ||
+			f.PayloadOffset <= 256 || f.PayloadLength != uint32(len(dns)) || f.Anomalies.Any() {
+			t.Fatalf("ReaderAt packet %d = %+v, %v", i, f, err)
+		}
+		var sliceExport, readerExport bytes.Buffer
+		if err := c.ExtractFlowPCAPNG(raw, &sliceExport, i); err != nil {
+			t.Fatal(err)
+		}
+		if err := file.ExtractFlowPCAPNGFromReaderAt(r, &readerExport, i); err != nil {
+			t.Fatal(err)
+		}
+		for _, capture := range [][]byte{sliceExport.Bytes(), readerExport.Bytes()} {
+			export, exported := readWrittenPackets(t, capture)
+			if len(exported) != 1 {
+				t.Fatalf("flow %d exported %d packets", i, len(exported))
+			}
+			data, err := export.PacketPayload(capture, exported[0])
+			if err != nil || !bytes.Equal(data, want) {
+				t.Fatalf("flow %d selected the wrong packet (%v)", i, err)
+			}
+		}
 	}
 }
 

@@ -160,14 +160,14 @@ func (c *Capture) extractFlowPCAPNG(source flowExportSource, w io.Writer, flowIn
 			if err != nil {
 				return err
 			}
-			frame, err := DecodeFrame(payload, pkt.LinkType)
+			frame, err := decodeCaptureFrame(payload, pkt.LinkType)
 			if err != nil || frame.IPVersion == 0 {
 				return nil
 			}
 			return observe(&pkt, &frame, payload)
 		})
 	} else {
-		err = c.walkFlowPrefixes(source.budget, false, func(pkt PacketRecord, frame Frame, prefix []byte) error {
+		err = c.walkFlowPrefixes(source.budget, func(pkt PacketRecord, frame Frame, prefix []byte) error {
 			return observe(&pkt, &frame, prefix)
 		})
 	}
