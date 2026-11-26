@@ -3,6 +3,7 @@ package pcap
 import (
 	"bytes"
 	"encoding/binary"
+	"fmt"
 	"net/netip"
 	"os"
 	"path/filepath"
@@ -291,4 +292,23 @@ func TestOpenFile(t *testing.T) {
 	if cap.PacketCount != 1 || cap.FileSize() != int64(len(raw)) {
 		t.Fatalf("Capture = %+v, fileSize=%d", cap, cap.FileSize())
 	}
+}
+
+func ExampleCapture_UnsupportedLinkTypePackets() {
+	var buf bytes.Buffer
+	writer, err := NewPCAPWriter(&buf, LinkType(9), 64) // LINKTYPE_PPP
+	if err != nil {
+		panic(err)
+	}
+	if err := writer.WritePacket(1, []byte{0xff, 0x03, 0x00, 0x21}); err != nil {
+		panic(err)
+	}
+	capture, err := New(buf.Bytes())
+	if err != nil {
+		panic(err)
+	}
+	count, interfaces := capture.UnsupportedLinkTypePackets()
+	fmt.Printf("%d of %d packets have unsupported link types on interfaces %v\n", count, capture.PacketCount, interfaces)
+	// Output:
+	// 1 of 1 packets have unsupported link types on interfaces [0]
 }

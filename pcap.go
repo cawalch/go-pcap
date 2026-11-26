@@ -167,9 +167,10 @@ type Capture struct {
 	// Flow indices, packet totals and per-tuple reassembly limits are shared.
 	SeparateTCPInterfaces bool
 
-	fileSize       int64
-	declaredExtent uint64
-	anomalies      CaptureAnomalies
+	anomalies                  CaptureAnomalies
+	fileSize                   int64
+	declaredExtent             uint64
+	unsupportedLinkTypePackets map[uint32]int
 }
 
 // Open reads the entire named file into memory and parses its capture container.
@@ -311,6 +312,27 @@ func (c *Capture) Anomalies() CaptureAnomalies {
 		return CaptureAnomalies{}
 	}
 	return c.anomalies
+}
+
+// UnsupportedLinkTypePackets reports the number of complete packet records whose
+// link layer [DecodeFrame] does not support, and their interface IDs in ascending
+// order. The IDs index [Capture.Interfaces]. Unused interface declarations do
+// not contribute. Compare count with [Capture.PacketCount] to identify captures
+// with only unsupported packets. The returned slice belongs to the caller.
+func (c *Capture) UnsupportedLinkTypePackets() (count int, interfaceIDs []uint32) {
+	if c == nil || !c.anomalies.UnknownLinkType || c.PacketCount == 0 {
+		return 0, nil
+	}
+	if c.Format == FormatPCAP {
+		return c.PacketCount, []uint32{0}
+	}
+	for id := range c.Interfaces {
+		if n := c.unsupportedLinkTypePackets[uint32(id)]; n != 0 {
+			count += n
+			interfaceIDs = append(interfaceIDs, uint32(id))
+		}
+	}
+	return count, interfaceIDs
 }
 
 // PacketPayload returns a zero-copy slice of data corresponding to pkt's
@@ -518,6 +540,18 @@ type scanSummary struct {
 	nameRecords          []NameResolutionRecord
 	interfaceStats       []InterfaceStatistics
 	processes            []ProcessEvent
+
+	trackUnsupportedLinkTypes  bool
+	unsupportedLinkTypePackets map[uint32]int
+}
+
+func (s *scanSummary) notePacketInterface(id uint32, link LinkType) {
+	if s.trackUnsupportedLinkTypes && s.anomalies.UnknownLinkType && !isKnownLinkType(link) {
+		if s.unsupportedLinkTypePackets == nil {
+			s.unsupportedLinkTypePackets = make(map[uint32]int)
+		}
+		s.unsupportedLinkTypePackets[id]++
+	}
 }
 
 var errPCAPNGBlockLimit = fmt.Errorf("%w: exceeds %d PcapNG blocks", ErrPacketLimit, MaxPCAPNGBlocks)
@@ -661,6 +695,8 @@ func parsePCAPNG(r *SafeReader, fileSize int64) (*Capture, error) {
 		fileSize:       fileSize,
 		declaredExtent: meta.declaredExtent,
 		anomalies:      meta.anomalies,
+
+		unsupportedLinkTypePackets: meta.unsupportedLinkTypePackets,
 	}, nil
 }
 
@@ -675,7 +711,7 @@ func isCaptureOnlyBlock(kind uint32) bool {
 }
 
 func scanPCAPNGBlocksWithCallback(r *SafeReader, collectPackets bool, hintCount int, cb func(PacketRecord) error) (scanSummary, []PacketRecord, error) {
-	var summary scanSummary
+	summary := scanSummary{trackUnsupportedLinkTypes: !collectPackets && cb == nil}
 	var packets []PacketRecord
 	if collectPackets && hintCount > 0 {
 		packets = make([]PacketRecord, 0, min(hintCount, MaxPackets))
@@ -1053,6 +1089,7 @@ func decodePacketBlockHeader(kind uint32, header []byte, payloadOffset, bodyEnd 
 		return PacketRecord{}, 0, fmt.Errorf("%w: exceeds %d", ErrPacketLimit, MaxPackets)
 	}
 	summary.packetCount++
+	summary.notePacketInterface(iface.ID, iface.LinkType)
 
 	return PacketRecord{
 		Index:         summary.packetCount - 1,
@@ -1207,6 +1244,7 @@ func decodeSPBHeader(header []byte, payloadOffset, bodyEnd int64, order binary.B
 		return PacketRecord{}, fmt.Errorf("%w: exceeds %d", ErrPacketLimit, MaxPackets)
 	}
 	summary.packetCount++
+	summary.notePacketInterface(iface.ID, iface.LinkType)
 
 	return PacketRecord{
 		Index:         summary.packetCount - 1,

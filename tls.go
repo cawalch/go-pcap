@@ -1104,6 +1104,7 @@ func mergeTLSAnomalies(a, b TLSAnomalies) TLSAnomalies {
 // When the capture contains PcapNG Decryption Secrets Blocks (DSB) with
 // matching TLS 1.3 handshake traffic secrets, TLS also extracts the authenticated
 // handshake messages from each direction for which a secret is available.
+// See [Capture.UnsupportedLinkTypePackets] for link-type coverage.
 func (c *Capture) TLS(data []byte) ([]TLSRecord, error) {
 	return c.TLSWithKeyLog(data, nil)
 }

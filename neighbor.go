@@ -50,6 +50,7 @@ const (
 // Neighbors extracts Ethernet/IPv4 ARP requests and replies and IPv6
 // Neighbor Solicitations and Advertisements, in packet order. It uses the
 // same bounded scan and read budget as [Capture.NeighborsFromReaderAt].
+// See [Capture.UnsupportedLinkTypePackets] for link-type coverage.
 func (c *Capture) Neighbors(data []byte) ([]NeighborRecord, error) {
 	return c.NeighborsFromReaderAt(bytes.NewReader(data))
 }
@@ -57,6 +58,7 @@ func (c *Capture) Neighbors(data []byte) ([]NeighborRecord, error) {
 // NeighborsFromReaderAt reads neighbor observations under [MaxReaderAtScanBytes].
 // The scan skips malformed or unsupported messages and returns [ErrNeighborLimit]
 // when the observation count exceeds 4096.
+// See [Capture.UnsupportedLinkTypePackets] for link-type coverage.
 func (c *Capture) NeighborsFromReaderAt(r io.ReaderAt) ([]NeighborRecord, error) {
 	var records []NeighborRecord
 	err := c.scanNeighbors(r, func(rec NeighborRecord, _ neighborScope) {

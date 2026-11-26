@@ -128,6 +128,7 @@ func (t *flowIndexTable) lookupOrInsert(k flowKey) (idx int, exists bool, err er
 // Flows decodes all packets in the capture and aggregates IPv4/IPv6 flows in
 // deterministic first-seen order without allocating intermediate packet slices.
 // Non-IP packets (such as ARP) are skipped.
+// See [Capture.UnsupportedLinkTypePackets] for link-type coverage.
 func (c *Capture) Flows(data []byte) ([]FlowSummary, error) {
 	if err := c.validateContainer(); err != nil {
 		return nil, err

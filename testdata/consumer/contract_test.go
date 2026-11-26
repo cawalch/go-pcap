@@ -227,3 +227,59 @@ func TestBorrowedViews(t *testing.T) {
 		t.Fatal("borrowed views did not track input")
 	}
 }
+
+func TestUnsupportedLinkTypeCoverage(t *testing.T) {
+	// The suite also runs against the original published API.
+	type coverage interface {
+		UnsupportedLinkTypePackets() (int, []uint32)
+	}
+	if _, ok := any(new(pcap.Capture)).(coverage); !ok {
+		t.Skip("link-type coverage is unavailable in this module version")
+	}
+	const unsupported pcap.LinkType = 9 // LINKTYPE_PPP
+	for _, tc := range []struct {
+		name    string
+		links   []pcap.LinkType
+		packets []uint32
+		count   int
+		ids     []uint32
+	}{
+		{"empty", []pcap.LinkType{unsupported}, nil, 0, nil},
+		{"all packets unsupported", []pcap.LinkType{pcap.LinkTypeEthernet, unsupported}, []uint32{1, 1}, 2, []uint32{1}},
+		{"partial coverage", []pcap.LinkType{unsupported, pcap.LinkTypeEthernet, unsupported}, []uint32{2, 1, 0, 2}, 3, []uint32{0, 2}},
+		{"unused unsupported interface", []pcap.LinkType{pcap.LinkTypeEthernet, unsupported}, []uint32{0}, 0, nil},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var buf bytes.Buffer
+			w, err := pcap.NewPCAPNGWriter(&buf, pcap.PCAPNGWriterOptions{LinkType: tc.links[0]})
+			if err != nil {
+				t.Fatal(err)
+			}
+			for _, link := range tc.links[1:] {
+				if _, err := w.AddInterface(pcap.PCAPNGWriterOptions{LinkType: link, SnapLen: 64}); err != nil {
+					t.Fatal(err)
+				}
+			}
+			for _, id := range tc.packets {
+				if err := w.WritePacket(pcap.PacketRecord{InterfaceID: id}, []byte{0}); err != nil {
+					t.Fatal(err)
+				}
+			}
+			raw := buf.Bytes()
+			a, err := pcap.New(raw)
+			if err != nil {
+				t.Fatal(err)
+			}
+			b, err := pcap.NewFromReaderAt(bytes.NewReader(raw), int64(len(raw)))
+			if err != nil {
+				t.Fatal(err)
+			}
+			for _, c := range []*pcap.Capture{a, b} {
+				count, ids := any(c).(coverage).UnsupportedLinkTypePackets()
+				if c.PacketCount != len(tc.packets) || !c.Anomalies().UnknownLinkType || count != tc.count || !reflect.DeepEqual(ids, tc.ids) {
+					t.Fatalf("capture has %d packets, anomalies %+v, unsupported %d on %v", c.PacketCount, c.Anomalies(), count, ids)
+				}
+			}
+		})
+	}
+}
