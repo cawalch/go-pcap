@@ -806,6 +806,34 @@ When authentication is needed to resolve a server-first packet or a changed
 server connection ID, unsuccessful checks count toward the exchange's budget
 for resolving ambiguous packets.
 
+### Authenticate QUIC 1-RTT packets with capture keys
+
+Use `NewQUIC1RTTDecoder` for one sending direction in QUIC v1 or v2 with
+`TLS_AES_128_GCM_SHA256` or `TLS_AES_256_GCM_SHA384`. Use the version and
+cipher suite from the observed Initial exchange. Look up
+`Handshake.ClientHello.Random` in `Capture.TLSKeyLog(extraKeyLog)` and pass
+the sender's `ClientTrafficSecret0` or `ServerTrafficSecret0`. Create a decoder
+for each direction you want to read. Each decoder covers the first
+application key generation.
+
+Pass a complete short-header packet to `Open` with its full destination
+connection ID and the expected packet number for that sender. A short-header
+packet consumes the remainder of its UDP datagram. Supply zero if you start
+at the beginning of the sender's application packet number space. After a
+success, keep the larger of the previous expected number and the returned
+number plus one, so reordered packets leave the number monotonic. A capture
+gap can make the truncated packet number ambiguous if the actual number
+falls outside the reconstruction window.
+
+`Open` returns the authenticated packet number and owned frame bytes for
+one packet, up to 65,527 bytes of wire input. The caller associates packets
+with a connection and interprets the returned frames. A failed call returns
+no frame bytes. [Packet protection](https://www.rfc-editor.org/rfc/rfc9001.html#section-5)
+· [Packet number reconstruction](https://www.rfc-editor.org/rfc/rfc9000.html#appendix-A.3)
+
+Run `go test -run '^ExampleQUIC1RTTDecoder_Open$' .` to exercise the
+[key-log example](../quic_1rtt_test.go).
+
 ## Decrypt TLS 1.2 and TLS 1.3 streams offline
 
 Call `capture.DecryptedTLSStreams(data, extraKeyLog)` to decrypt TLS 1.2
