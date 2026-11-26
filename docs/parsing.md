@@ -132,6 +132,8 @@ These limits apply to capture scans. Streaming writers check individual calls an
 | `MaxLDAPFilterDepth` | 16 levels | Bounds nested LDAP search filters, including the outer filter |
 | `MaxLDAPFilterBytes` | 16 KiB | Bounds the rendered LDAP filter |
 | `MaxLDAPAttributes` | 64 selectors | Bounds the LDAP search attribute list |
+| `MaxLDAPRecordsPerScan` | 16,384 records | Bounds LDAP requests returned per capture scan |
+| `MaxLDAPTextBytesPerScan` | 16 MiB | Bounds decoded LDAP string bytes retained per scan |
 | `MaxDCERPCContexts` | 64 entries | Bounds DCE/RPC presentation context offers and acknowledgment results |
 | `MaxRDPPacketBytes` | 16 KiB | Bounds RDP TPKT/X.224 negotiation PDU length |
 | `MaxRDPRecordsPerScan` | 16,384 records | Bounds RDP negotiation records returned per capture scan |
@@ -1421,6 +1423,15 @@ The parser accepts definite BER lengths with up to four length octets,
 including non-minimal encodings. `ErrInvalidLDAP` covers malformed or
 unsupported input. `ErrLDAPLimit` covers the request size, filter limits,
 and selector count. The returned metadata owns its strings and slices.
+
+Use `Capture.LDAP` or `Capture.LDAPFromReaderAt` for cleartext requests on
+TCP port 389 and complete UDP Search requests in LDAPMessage framing on
+port 389. Both return capture-wide flow indices and sort by packet order.
+For TCP, the record identifies the packet that supplied the message's first
+byte. The parser follows complete BER message boundaries within a contiguous
+direction, stops at a gap or incomplete envelope, and skips unsupported
+messages. The ReaderAt scan reads unrelated packets only through the headers
+and any prefix already fetched by the frame walker.
 
 ## Parse DCE/RPC fragments
 
