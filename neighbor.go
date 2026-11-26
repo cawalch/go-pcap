@@ -251,22 +251,6 @@ func parseNeighborDiscovery(p []byte, src, dst netip.Addr) NeighborRecord {
 
 // validNeighborChecksum covers the IPv6 pseudoheader and ICMPv6 message.
 func validNeighborChecksum(p []byte, src, dst netip.Addr) bool {
-	sum := uint32(len(p)) + uint32(IPProtoIPv6ICMP)
-	for _, a := range []netip.Addr{src, dst} {
-		b := a.As16()
-		for i := 0; i < len(b); i += 2 {
-			sum += uint32(binary.BigEndian.Uint16(b[i:]))
-		}
-	}
-	for len(p) >= 2 {
-		sum += uint32(binary.BigEndian.Uint16(p))
-		p = p[2:]
-	}
-	if len(p) != 0 {
-		sum += uint32(p[0]) << 8
-	}
-	for sum>>16 != 0 {
-		sum = (sum & 0xffff) + (sum >> 16)
-	}
-	return sum == 0xffff
+	sum, ok := checksumPseudoHeader(src, dst, IPProtoIPv6ICMP, uint16(len(p)))
+	return ok && foldChecksum(addChecksumWords(sum, p)) == 0xffff
 }
