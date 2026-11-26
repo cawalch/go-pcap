@@ -214,19 +214,19 @@ func deriveQUICInitialKeys(dcid []byte, version uint32, isClient bool) (quicPack
 }
 
 func deriveQUICPacketKeys(trafficSecret []byte, version uint32, hashFn func() hash.Hash, keyLen int) (quicPacketKeys, error) {
-	prefix := "quic "
+	keyLabel, ivLabel, hpLabel := "quic key", "quic iv", "quic hp"
 	if version == QUICVersion2 {
-		prefix = "quicv2 "
+		keyLabel, ivLabel, hpLabel = "quicv2 key", "quicv2 iv", "quicv2 hp"
 	}
-	key, err := tls13ExpandLabelHash(hashFn, trafficSecret, prefix+"key", nil, keyLen)
+	key, err := tls13ExpandLabelHash(hashFn, trafficSecret, keyLabel, nil, keyLen)
 	if err != nil {
 		return quicPacketKeys{}, err
 	}
-	ivSlice, err := tls13ExpandLabelHash(hashFn, trafficSecret, prefix+"iv", nil, 12)
+	ivSlice, err := tls13ExpandLabelHash(hashFn, trafficSecret, ivLabel, nil, 12)
 	if err != nil {
 		return quicPacketKeys{}, err
 	}
-	hpKey, err := tls13ExpandLabelHash(hashFn, trafficSecret, prefix+"hp", nil, keyLen)
+	hpKey, err := tls13ExpandLabelHash(hashFn, trafficSecret, hpLabel, nil, keyLen)
 	if err != nil {
 		return quicPacketKeys{}, err
 	}
