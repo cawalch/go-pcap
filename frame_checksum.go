@@ -1,22 +1,33 @@
 package pcap
 
-import "encoding/binary"
+import (
+	"encoding/binary"
+	"math"
+)
 
-// DecodeFrameWithChecksums decodes a frame and checks the innermost decoded
-// IPv4 header and complete TCP segment or UDP datagram. It flags observed mismatches
-// in [Frame.Anomalies]. Transport verification skips IP fragments, possible
-// transmit offloads, and routing options that change pseudo-header addresses.
-// Truncated packets leave both checksum flags clear.
-func DecodeFrameWithChecksums(data []byte, linkType LinkType) (Frame, error) {
-	f, err := DecodeFrame(data, linkType)
-	if err == nil && !f.Anomalies.TruncatedLayer && !f.Anomalies.IPTotalLengthExceedsFrame &&
-		!f.Anomalies.InvalidIPHeaderLength {
-		checkFrameChecksums(data, &f)
-	}
-	return f, err
+// FrameChecksumAnomalies reports observed checksum mismatches in a decoded frame.
+type FrameChecksumAnomalies struct {
+	InvalidIPChecksum bool // IPv4 header mismatch.
+	InvalidL4Checksum bool // TCP or UDP mismatch.
 }
 
-func checkFrameChecksums(data []byte, f *Frame) {
+// DecodeFrameWithChecksums decodes a frame and checks the innermost decoded
+// IPv4 header and complete TCP segment or UDP datagram. Transport verification
+// skips IP fragments, possible transmit offloads, and options that change
+// pseudo-header addresses. Truncated packets and inputs larger than the frame
+// offset range leave both checksum flags clear.
+func DecodeFrameWithChecksums(data []byte, linkType LinkType) (Frame, FrameChecksumAnomalies, error) {
+	f, err := DecodeFrame(data, linkType)
+	var checksums FrameChecksumAnomalies
+	if err == nil && !f.Anomalies.TruncatedLayer && !f.Anomalies.IPTotalLengthExceedsFrame &&
+		!f.Anomalies.InvalidIPHeaderLength && uint64(len(data)) <= math.MaxUint32 {
+		checksums = checkFrameChecksums(data, &f)
+	}
+	return f, checksums, err
+}
+
+func checkFrameChecksums(data []byte, f *Frame) FrameChecksumAnomalies {
+	var checksums FrameChecksumAnomalies
 	layers := f.LayerSlices()
 	ipIndex := -1
 	var transport LayerSpan
@@ -30,28 +41,28 @@ func checkFrameChecksums(data []byte, f *Frame) {
 		}
 	}
 	if ipIndex < 0 {
-		return
+		return checksums
 	}
 	network := layers[ipIndex]
 	start, headerEnd := int64(network.Offset), int64(network.Offset)+int64(network.Length)
 	ip := data[start:headerEnd]
 	var end int64
 	if network.Proto == LayerIPv4 {
-		f.Anomalies.InvalidIPChecksum = !VerifyIPv4HeaderChecksum(ip)
+		checksums.InvalidIPChecksum = !VerifyIPv4HeaderChecksum(ip)
 		end = start + int64(binary.BigEndian.Uint16(ip[2:4]))
 	} else {
 		end = headerEnd + int64(binary.BigEndian.Uint16(ip[4:6]))
 	}
 	if transport.Proto != LayerTCP && transport.Proto != LayerUDP || f.Anomalies.IPFragment ||
 		int64(transport.Offset) < headerEnd || int64(transport.Offset)+int64(transport.Length) > end || end > int64(len(data)) {
-		return
+		return checksums
 	}
 	if network.Proto == LayerIPv4 {
 		if !checksumIPv4AddressesKnown(ip[20:]) {
-			return
+			return checksums
 		}
 	} else if !checksumIPv6AddressesKnown(data, ip[6], layers[ipIndex+1:]) {
-		return
+		return checksums
 	}
 	segment := data[transport.Offset:end]
 	var valid, offload bool
@@ -60,11 +71,12 @@ func checkFrameChecksums(data []byte, f *Frame) {
 	} else {
 		// A zero UDP length is only defined for jumbograms.
 		if binary.BigEndian.Uint16(segment[4:6]) == 0 {
-			return
+			return checksums
 		}
 		valid, offload = VerifyUDPChecksum(f.SrcAddr, f.DstAddr, segment)
 	}
-	f.Anomalies.InvalidL4Checksum = !valid && !offload
+	checksums.InvalidL4Checksum = !valid && !offload
+	return checksums
 }
 
 func checksumIPv4AddressesKnown(options []byte) bool {

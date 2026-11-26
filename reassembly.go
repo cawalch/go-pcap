@@ -60,15 +60,11 @@ type TCPSegmentInput struct {
 	Payload         []byte
 }
 
-// Keep all supported input indices representable in normSegment.order.
-const _ = uint16(MaxSegmentsPerFlow - 1)
-
 type normSegment struct {
-	relStart        int64
-	relEnd          int64
-	payload         []byte
-	order           uint16
-	invalidChecksum bool
+	relStart int64
+	relEnd   int64
+	payload  []byte
+	order    int
 }
 
 // ReassembleTCP reassembles directional TCP segments in sequence order.
@@ -142,11 +138,10 @@ func reassembleTCPWithBudget(segments []TCPSegmentInput, remainingBudget int64, 
 				continue
 			}
 			norm = append(norm, normSegment{
-				relStart:        0,
-				relEnd:          int64(len(seg.Payload)) - trim,
-				payload:         seg.Payload[trim:],
-				order:           uint16(i),
-				invalidChecksum: seg.InvalidChecksum,
+				relStart: 0,
+				relEnd:   int64(len(seg.Payload)) - trim,
+				payload:  seg.Payload[trim:],
+				order:    i,
 			})
 			out.Anomalies.Retransmission = true
 			out.OverlapCount++
@@ -154,11 +149,10 @@ func reassembleTCPWithBudget(segments []TCPSegmentInput, remainingBudget int64, 
 			continue
 		}
 		norm = append(norm, normSegment{
-			relStart:        rel,
-			relEnd:          rel + int64(len(seg.Payload)),
-			payload:         seg.Payload,
-			order:           uint16(i),
-			invalidChecksum: seg.InvalidChecksum,
+			relStart: rel,
+			relEnd:   rel + int64(len(seg.Payload)),
+			payload:  seg.Payload,
+			order:    i,
 		})
 	}
 
@@ -227,9 +221,9 @@ func reassembleTCPWithBudget(segments []TCPSegmentInput, remainingBudget int64, 
 			if j == i+1 {
 				buf.Write(seg.payload[:length])
 				if written != nil {
-					written(int(seg.order), buf.Len(), baseSeq+uint32(seg.relStart), gap)
+					written(seg.order, buf.Len(), baseSeq+uint32(seg.relStart), gap)
 				}
-			} else if appendTCPOverlap(&buf, norm[i:j], length, baseSeq, gap, written) {
+			} else if appendTCPOverlap(&buf, norm[i:j], segments, length, baseSeq, gap, written) {
 				out.Anomalies.OverlapConflict = true
 			}
 		}
@@ -247,7 +241,7 @@ func reassembleTCPWithBudget(segments []TCPSegmentInput, remainingBudget int64, 
 
 // appendTCPOverlap assigns each range by checksum evidence and capture order.
 // The heap changes only at segment boundaries, independent of the sequence span.
-func appendTCPOverlap(buf *bytes.Buffer, group []normSegment, length int64, baseSeq uint32, gap bool, written tcpWriteObserver) bool {
+func appendTCPOverlap(buf *bytes.Buffer, group []normSegment, segments []TCPSegmentInput, length int64, baseSeq uint32, gap bool, written tcpWriteObserver) bool {
 	start := group[0].relStart
 	limit := start + length
 	offset := buf.Len()
@@ -255,7 +249,12 @@ func appendTCPOverlap(buf *bytes.Buffer, group []normSegment, length int64, base
 	next := 0
 	for pos := start; pos < limit; {
 		for next < len(group) && group[next].relStart <= pos {
-			heap.Push(&active, group[next])
+			candidate := group[next]
+			// The second rank range keeps flagged copies behind all other copies.
+			if segments[candidate.order].InvalidChecksum {
+				candidate.order += MaxSegmentsPerFlow
+			}
+			heap.Push(&active, candidate)
 			next++
 		}
 		for active[0].relEnd <= pos {
@@ -268,7 +267,7 @@ func appendTCPOverlap(buf *bytes.Buffer, group []normSegment, length int64, base
 		}
 		buf.Write(owner.payload[pos-owner.relStart : end-owner.relStart])
 		if written != nil {
-			written(int(owner.order), buf.Len(), baseSeq+uint32(pos), gap)
+			written(owner.order%MaxSegmentsPerFlow, buf.Len(), baseSeq+uint32(pos), gap)
 		}
 		gap = false
 		pos = end
@@ -288,16 +287,10 @@ func appendTCPOverlap(buf *bytes.Buffer, group []normSegment, length int64, base
 
 type captureOrderHeap []normSegment
 
-func (h captureOrderHeap) Len() int { return len(h) }
-func (h captureOrderHeap) Less(i, j int) bool {
-	first, second := &h[i], &h[j]
-	if first.invalidChecksum != second.invalidChecksum {
-		return !first.invalidChecksum
-	}
-	return first.order < second.order
-}
-func (h captureOrderHeap) Swap(i, j int) { h[i], h[j] = h[j], h[i] }
-func (h *captureOrderHeap) Push(x any)   { *h = append(*h, x.(normSegment)) }
+func (h captureOrderHeap) Len() int           { return len(h) }
+func (h captureOrderHeap) Less(i, j int) bool { return h[i].order < h[j].order }
+func (h captureOrderHeap) Swap(i, j int)      { h[i], h[j] = h[j], h[i] }
+func (h *captureOrderHeap) Push(x any)        { *h = append(*h, x.(normSegment)) }
 func (h *captureOrderHeap) Pop() any {
 	a := *h
 	last := a[len(a)-1]

@@ -14,7 +14,7 @@ type LayerSpan struct {
 	Length uint32
 }
 
-// FrameAnomalies reports non-fatal anomalies in a decoded frame.
+// FrameAnomalies reports non-fatal structural anomalies in a decoded frame.
 type FrameAnomalies struct {
 	TruncatedLayer            bool
 	InvalidIPHeaderLength     bool
@@ -25,8 +25,6 @@ type FrameAnomalies struct {
 	VLANDepthExceeded         bool
 	MPLSDepthExceeded         bool
 	IPv6ExtLimitExceeded      bool
-	InvalidIPChecksum         bool // Observed IPv4 header mismatch from DecodeFrameWithChecksums.
-	InvalidL4Checksum         bool // Observed TCP or UDP mismatch from DecodeFrameWithChecksums.
 }
 
 // Any reports whether any frame anomaly was recorded.
@@ -39,9 +37,7 @@ func (a FrameAnomalies) Any() bool {
 		a.InvalidTCPDataOffset ||
 		a.VLANDepthExceeded ||
 		a.MPLSDepthExceeded ||
-		a.IPv6ExtLimitExceeded ||
-		a.InvalidIPChecksum ||
-		a.InvalidL4Checksum
+		a.IPv6ExtLimitExceeded
 }
 
 // Frame contains the decoded L2–L4 headers and layer offsets of a single packet.

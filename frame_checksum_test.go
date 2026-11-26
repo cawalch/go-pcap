@@ -86,17 +86,14 @@ func TestDecodeFrameWithChecksumsIPIP(t *testing.T) {
 
 func assertChecksumFrame(t *testing.T, data []byte, linkType LinkType, badIP, badL4 bool) {
 	t.Helper()
-	got, err := DecodeFrameWithChecksums(data, linkType)
+	got, checksums, err := DecodeFrameWithChecksums(data, linkType)
 	ordinary, ordinaryErr := DecodeFrame(data, linkType)
 	if err != nil || ordinaryErr != nil {
 		t.Fatalf("decode errors = %v, %v", err, ordinaryErr)
 	}
-	if got.Anomalies.InvalidIPChecksum != badIP || got.Anomalies.InvalidL4Checksum != badL4 ||
-		(got.Anomalies.Any() != (ordinary.Anomalies.Any() || badIP || badL4)) {
-		t.Fatalf("anomalies = %+v, want IP mismatch %t, transport mismatch %t", got.Anomalies, badIP, badL4)
+	if checksums.InvalidIPChecksum != badIP || checksums.InvalidL4Checksum != badL4 {
+		t.Fatalf("checksum anomalies = %+v, want IP mismatch %t, transport mismatch %t", checksums, badIP, badL4)
 	}
-	got.Anomalies.InvalidIPChecksum = false
-	got.Anomalies.InvalidL4Checksum = false
 	if got != ordinary {
 		t.Fatal("checksum verification altered decoded fields")
 	}
@@ -107,8 +104,8 @@ func BenchmarkDecodeFrameWithChecksumsIPv4TCP(b *testing.B) {
 	b.SetBytes(int64(len(data)))
 	b.ReportAllocs()
 	for b.Loop() {
-		f, err := DecodeFrameWithChecksums(data, LinkTypeRaw)
-		if err != nil || f.Anomalies.Any() {
+		f, checksums, err := DecodeFrameWithChecksums(data, LinkTypeRaw)
+		if err != nil || f.Anomalies.Any() || checksums != (FrameChecksumAnomalies{}) {
 			b.Fatalf("decode failed: %v, %+v", err, f.Anomalies)
 		}
 	}
@@ -120,11 +117,11 @@ func ExampleDecodeFrameWithChecksums() {
 		0x45, 0, 0, 29, 0, 0, 0, 0, 64, IPProtoUDP, 0x8e, 0x99, 192, 0, 2, 1, 198, 51, 100, 2,
 		0x30, 0x39, 0x23, 0xab, 0, 9, 0x12, 0x34, 'a',
 	}
-	f, err := DecodeFrameWithChecksums(data, LinkTypeRaw)
+	_, checksums, err := DecodeFrameWithChecksums(data, LinkTypeRaw)
 	if err != nil {
 		panic(err)
 	}
-	fmt.Println(f.Anomalies.InvalidIPChecksum, f.Anomalies.InvalidL4Checksum)
+	fmt.Println(checksums.InvalidIPChecksum, checksums.InvalidL4Checksum)
 	// Output:
 	// false true
 }

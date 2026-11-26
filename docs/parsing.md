@@ -332,8 +332,9 @@ matching offload seed can return `(false, true)`. This reports a possible
 transmit offload or, for zero-checksum IPv4 UDP, an omitted checksum.
 A checksum mismatch or malformed helper input can return `(false, false)`.
 
-Use `DecodeFrameWithChecksums` when you have the frame bytes and want the
-result in `Frame.Anomalies`. The check uses the innermost decoded IP header.
+Use `DecodeFrameWithChecksums` when you have the frame bytes and want
+`FrameChecksumAnomalies` alongside the decoded frame. The check uses the
+innermost decoded IP header.
 It reports an observed IPv4 header mismatch in `InvalidIPChecksum`, and a
 complete TCP or UDP checksum mismatch in `InvalidL4Checksum`. Truncated
 frames leave these flags clear. Transport verification skips fragmented
