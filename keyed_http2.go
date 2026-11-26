@@ -154,9 +154,14 @@ func scanKeyedHTTP2(source ipFrameSource, keys []byte) ([]KeyedHTTP2Transaction,
 	if err != nil {
 		return nil, err
 	}
+	return keyedHTTP2Transactions(streams)
+}
+
+func keyedHTTP2Transactions(streams []tlsProvenanceStream) ([]KeyedHTTP2Transaction, error) {
 	budget := newHTTP2TransactionBudget()
 	budget.packetRefs = maxTLSProvenanceRanges
 	var rows []KeyedHTTP2Transaction
+	var err error
 	for i := range streams {
 		s := &streams[i]
 		firstRegular := s.firstRegularRecord()
