@@ -427,7 +427,7 @@ func (c *Capture) TLSFromReaderAt(r io.ReaderAt) ([]TLSRecord, error) {
 // using bounded UDP datagram and fragment reads under [MaxReaderAtScanBytes].
 // See [Capture.UnsupportedLinkTypePackets] for link-type coverage.
 func (c *Capture) QUICFromReaderAt(r io.ReaderAt) ([]QUICRecord, error) {
-	return scanQUIC(ipFrameSource{capture: c, reader: r, needsPayload: quicInitialPayload})
+	return scanQUIC(ipFrameSource{capture: c, reader: r, needsPayload: quicInitialPayload}, nil)
 }
 
 type scanReadBudget struct {

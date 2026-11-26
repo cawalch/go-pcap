@@ -97,7 +97,7 @@ func scanKeyedQUIC(source ipFrameSource, extraKeyLog []byte) ([]KeyedQUICRecord,
 		return nil, err
 	}
 	var serverIDs []quicCID
-	initials, err := scanQUICInitials(source, &serverIDs)
+	initials, err := scanQUIC(source, &serverIDs)
 	if err != nil {
 		return nil, err
 	}

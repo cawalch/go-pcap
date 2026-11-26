@@ -513,7 +513,7 @@ func decryptQUICInitial(datagrams [][]byte, observedRetryID []byte, inferRetry b
 // reports observed Retry and Version Negotiation responses.
 // See [Capture.UnsupportedLinkTypePackets] for link-type coverage.
 func (c *Capture) QUIC(data []byte) ([]QUICRecord, error) {
-	return scanQUIC(ipFrameSource{capture: c, data: data})
+	return scanQUIC(ipFrameSource{capture: c, data: data}, nil)
 }
 
 func quicInitialPayload(f Frame, start []byte) bool {
@@ -641,12 +641,8 @@ func (fb *quicFlowBuf) canProbe() bool {
 	return fb.count+fb.failedProbes < MaxQUICPacketsPerFlow
 }
 
-func scanQUIC(source ipFrameSource) ([]QUICRecord, error) {
-	return scanQUICInitials(source, nil)
-}
-
 // Append server IDs in record order when a keyed application scan needs them.
-func scanQUICInitials(source ipFrameSource, serverIDs *[]quicCID) ([]QUICRecord, error) {
+func scanQUIC(source ipFrameSource, serverIDs *[]quicCID) ([]QUICRecord, error) {
 	var table flowIndexTable
 	var defrag ipFragAccumulator
 	var flows []quicFlowBuf
