@@ -551,24 +551,6 @@ func tls12TrafficProtection(suite uint16, master []byte, clientRandom, serverRan
 	return protection, err
 }
 
-func (p *tls12RecordProtection) open(seq uint64, typ byte, version uint16, body []byte) ([]byte, bool) {
-	if p.aead == nil {
-		return p.cbc.open(seq, typ, version, body)
-	}
-	var nonce [12]byte
-	copy(nonce[:4], p.salt[:])
-	copy(nonce[4:], body[:8])
-	ciphertext := body[8:]
-
-	var aad [13]byte
-	binary.BigEndian.PutUint64(aad[:8], seq)
-	aad[8] = typ
-	binary.BigEndian.PutUint16(aad[9:11], version)
-	binary.BigEndian.PutUint16(aad[11:13], uint16(len(ciphertext)-p.aead.Overhead()))
-	plain, err := p.aead.Open(nil, nonce[:], ciphertext, aad[:])
-	return plain, err == nil
-}
-
 // DecryptTLS12Records decrypts a directional TLS 1.2 byte stream using the
 // 48-byte masterSecret (from a CLIENT_RANDOM keylog line) and the 32-byte
 // client and server random values. For AES-CBC, it determines the record layout
@@ -602,7 +584,8 @@ func decryptTLS12Records(stream []byte, cipherSuite uint16, masterSecret []byte,
 		}
 	}
 
-	isCBC := protection.cbc.block != nil
+	aead, salt, cbc := protection.aead, protection.salt, protection.cbc
+	isCBC := cbc.block != nil
 	var seqNum uint64
 	var inCipherPhase bool
 	var appBuf bytes.Buffer
@@ -655,22 +638,42 @@ func decryptTLS12Records(stream []byte, cipherSuite uint16, masterSecret []byte,
 			}
 			continue
 		}
-		if protection.aead == nil && !isCBC {
+		if aead == nil && !isCBC {
 			if inCipherPhase || contentType == TLSRecordApplicationData {
 				provenance.stopAt(start, tlsStopMissingKey)
 				break
 			}
 			continue
 		}
-		// TLS 1.2 AES-GCM record payload: 8-byte explicit nonce + ciphertext + 16-byte tag.
-		if protection.aead != nil && len(recordBody) < 8+protection.aead.Overhead() {
-			if provenance != nil && (inCipherPhase || contentType == TLSRecordApplicationData) {
-				provenance.stopAt(start, tlsStopInvalidRecord)
-				break
+		var plain []byte
+		var ok bool
+		if isCBC {
+			plain, ok = cbc.open(seqNum, contentType, recVer, recordBody)
+		} else {
+			// TLS 1.2 AES-GCM record payload: 8-byte explicit nonce + ciphertext + 16-byte tag.
+			if len(recordBody) < 8+aead.Overhead() {
+				if provenance != nil && (inCipherPhase || contentType == TLSRecordApplicationData) {
+					provenance.stopAt(start, tlsStopInvalidRecord)
+					break
+				}
+				continue
 			}
-			continue
+			var nonce [12]byte
+			copy(nonce[:4], salt[:])
+			copy(nonce[4:], recordBody[:8])
+			ciphertext := recordBody[8:]
+			plainLen := len(ciphertext) - aead.Overhead()
+
+			var aad [13]byte
+			binary.BigEndian.PutUint64(aad[:8], seqNum)
+			aad[8] = contentType
+			binary.BigEndian.PutUint16(aad[9:11], recVer)
+			binary.BigEndian.PutUint16(aad[11:13], uint16(plainLen))
+
+			var openErr error
+			plain, openErr = aead.Open(nil, nonce[:], ciphertext, aad[:])
+			ok = openErr == nil
 		}
-		plain, ok := protection.open(seqNum, contentType, recVer, recordBody)
 		if !ok {
 			if (provenance != nil || isCBC) && (inCipherPhase || contentType == TLSRecordApplicationData) {
 				if provenance != nil {
