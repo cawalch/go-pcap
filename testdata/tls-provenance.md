@@ -69,6 +69,46 @@ tshark -2 -n -o tls.keylog_file: -r testdata/keyed-http2.pcapng \
 | 12 | 1 | `646f776e6c6f6164` (`download`) |
 | 14 | 1 | Trailer `x-end: ok` and reassembled `download` |
 
+## Export a keyed HTTP/2 exchange
+
+`keyed-http2-export.pcapng` contains 13 original packets and a synthetic TLS
+key log. Stream 1 inserts `:authority: test` in one client record. The request
+on stream 3 references that entry in a later record. Both responses start in
+the same TLS record. The Go tests regenerate the fixture, isolate an opening
+that reuses the tuple and stream IDs, and check that truncation at the final
+TLS record preserves a partial body.
+
+Export stream 3 using
+[the keyed HTTP/2 export example](../docs/parsing.md#export-a-keyed-http2-exchange-as-ciphertext).
+The selected file contains source frames 1–12. Use a fresh profile with
+TShark 4.6.10 (commit `eac916f07299`). Set `selected` to the exported file.
+
+```sh
+proofdir=$(mktemp -d)
+mkdir "$proofdir/profile"
+export WIRESHARK_CONFIG_DIR="$proofdir/profile"
+unset SSLKEYLOGFILE
+source_capture=testdata/keyed-http2-export.pcapng
+editcap --extract-secrets "$source_capture" "$proofdir/test.keys"
+for capture in "$source_capture" "$selected"; do
+  tshark -2 -n -o "tls.keylog_file:$proofdir/test.keys" -r "$capture" \
+    -Y 'http2.streamid > 0' -T fields -e frame.number -e http2.streamid \
+    -e http2.header.name -e http2.header.value -e http2.data.data
+done
+tshark -2 -n -o tls.keylog_file: -r "$selected" -Y http2 -T fields -e frame.number
+```
+
+| Frame | Stream IDs | Expected in both captures |
+| --- | --- | --- |
+| 8 | 1 | GET `/` and authority `test` |
+| 9 | 3 | GET `/two` and authority `test` |
+| 10 | 1, 3 | Status 200 for both streams |
+| 11–12 | 3 | Body `7265706c79` (`reply`) |
+
+Source frame 13 completes stream 1 and is absent from the export.
+The last command emits no HTTP/2 frames. The Go tests also verify the output
+has zero Decryption Secrets Blocks.
+
 ## Pipelined HTTP/1 over TLS
 
 `keyed-http1.pcapng` contains a synthetic TLS 1.2 AES-GCM exchange and a DSB
