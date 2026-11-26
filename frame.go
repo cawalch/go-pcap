@@ -108,9 +108,10 @@ func (f *Frame) pushLayer(proto LayerProto, offset, length int64) {
 // header is shorter than its minimum size or has invalid Radiotap framing.
 // Truncated inner headers are recorded in [Frame.Anomalies] without discarding
 // outer layers. Protected IEEE 802.11 frames and ESP bodies remain opaque.
-func DecodeFrame(data []byte, linkType LinkType) (Frame, error) {
+func DecodeFrame(data []byte, linkType LinkType) (f Frame, err error) {
 	r := NewSafeReader(data)
-	f := Frame{LinkType: linkType}
+	// Fill the result directly to avoid copying its fixed-size layer array.
+	f.LinkType = linkType
 
 	var offset int64
 	switch linkType {
