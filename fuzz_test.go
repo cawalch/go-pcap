@@ -343,6 +343,18 @@ func FuzzParseLDAP(f *testing.F) {
 	})
 }
 
+func FuzzParseDCERPC(f *testing.F) {
+	f.Add(dcerpcTestPacket(binary.LittleEndian, DCERPCBind, 3, dcerpcTestBindBody(binary.LittleEndian, 2)))
+	f.Add(dcerpcTestPacket(binary.BigEndian, DCERPCRequest, 3, make([]byte, 8)))
+	f.Add([]byte{5, 0, 11, 3, 0x10})
+	f.Fuzz(func(t *testing.T, data []byte) {
+		msg, err := ParseDCERPC(data)
+		if err == nil && (msg.FragmentLength < 16 || int(msg.FragmentLength) > len(data) || len(msg.Contexts) > MaxDCERPCContexts) {
+			t.Fatal("DCE/RPC fragment exceeded its metadata bounds")
+		}
+	})
+}
+
 func FuzzParseRDPNegotiation(f *testing.F) {
 	f.Add(buildRDPConnReqPDU("mstshash=USER", RDPProtoCredSSP))
 

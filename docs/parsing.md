@@ -132,6 +132,7 @@ These limits apply to capture scans. Streaming writers check individual calls an
 | `MaxLDAPFilterDepth` | 16 levels | Bounds nested LDAP search filters, including the outer filter |
 | `MaxLDAPFilterBytes` | 16 KiB | Bounds the rendered LDAP filter |
 | `MaxLDAPAttributes` | 64 selectors | Bounds the LDAP search attribute list |
+| `MaxDCERPCContexts` | 64 entries | Bounds DCE/RPC presentation context offers and acknowledgment results |
 | `MaxRDPPacketBytes` | 16 KiB | Bounds RDP TPKT/X.224 negotiation PDU length |
 | `MaxRDPRecordsPerScan` | 16,384 records | Bounds RDP negotiation records returned per capture scan |
 
@@ -1420,6 +1421,20 @@ The parser accepts definite BER lengths with up to four length octets,
 including non-minimal encodings. `ErrInvalidLDAP` covers malformed or
 unsupported input. `ErrLDAPLimit` covers the request size, filter limits,
 and selector count. The returned metadata owns its strings and slices.
+
+## Parse DCE/RPC fragments
+
+Pass bytes starting at a connection-oriented DCE/RPC 5.0 fragment to
+`ParseDCERPC`. It accepts Request, Response, Bind, Bind Ack, and Alter Context
+PDUs in either byte order. `FragmentLength` identifies the end of the first
+complete fragment when the input contains more bytes.
+
+Requests report the presentation context ID and operation number. Bind and
+Alter Context offers report the context ID, canonical interface UUID, and
+major and minor versions in wire order. The result owns its context list
+and UUID strings. RPC stub data and authentication tokens stay opaque.
+`ErrInvalidDCERPC` covers malformed or unsupported fragments.
+`ErrDCERPCLimit` covers context and result lists beyond `MaxDCERPCContexts`.
 
 ## Compute C2 beacon and flow statistics
 
