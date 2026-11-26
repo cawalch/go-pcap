@@ -9,34 +9,27 @@ import (
 	"time"
 
 	"github.com/cawalch/go-pcap"
+	"github.com/cawalch/go-pcap/examples/internal/captureinput"
 )
 
 func main() {
 	if len(os.Args) != 2 {
-		fmt.Fprintln(os.Stderr, "usage: dns-transactions capture.pcap[ng]")
+		fmt.Fprintln(os.Stderr, "usage: dns-transactions {capture.pcap[ng][.gz]|-}")
 		os.Exit(2)
 	}
-	if err := run(os.Args[1], os.Stdout); err != nil {
+	if err := run(os.Args[1], os.Stdin, os.Stdout); err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)
 	}
 }
 
-func run(path string, out io.Writer) error {
-	f, err := os.Open(path)
+func run(path string, stdin io.Reader, out io.Writer) error {
+	input, err := captureinput.Open(path, stdin)
 	if err != nil {
 		return err
 	}
-	defer func() { _ = f.Close() }()
-	info, err := f.Stat()
-	if err != nil {
-		return err
-	}
-	c, err := pcap.NewFromReaderAt(f, info.Size())
-	if err != nil {
-		return err
-	}
-	records, err := c.DNSFromReaderAt(f)
+	defer func() { _ = input.Close() }()
+	records, err := input.Capture.DNSFromReaderAt(input.File)
 	if err != nil {
 		return err
 	}
