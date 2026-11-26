@@ -139,7 +139,7 @@ func ExampleCapture_DCERPC() {
 	if err != nil {
 		panic(err)
 	}
-	fmt.Println(records[0].PacketIndex, records[0].Message.ContextID, records[0].Message.Opnum)
+	fmt.Println(records[0].PacketIndex, records[0].Message.ContextID, records[0].Message.Opnum, records[0].SMB2Command)
 	// Output:
-	// 0 1 42
+	// 0 1 42 0
 }

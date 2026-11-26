@@ -17,11 +17,13 @@ type DCERPCRecord struct {
 	Source      netip.AddrPort
 	Destination netip.AddrPort
 	Message     DCERPCMessage
+	SMB2Command uint16 // Zero for a fragment carried directly over TCP.
 }
 
 // DCERPC reports connection-oriented RPC fragments from the contiguous prefix
-// of each TCP direction on any port. Results follow packet order. A scan error
-// discards the result.
+// of each TCP direction on any port, including verified SMB2 named-pipe
+// transfers on TCP port 139 or 445. Results follow packet order.
+// A scan error discards the result.
 func (c *Capture) DCERPC(data []byte) ([]DCERPCRecord, error) {
 	return scanDCERPC(ipFrameSource{capture: c, data: data})
 }
@@ -33,47 +35,81 @@ func (c *Capture) DCERPCFromReaderAt(r io.ReaderAt) ([]DCERPCRecord, error) {
 }
 
 func scanDCERPC(source ipFrameSource) ([]DCERPCRecord, error) {
-	collector, err := collectTCPMessages(source)
+	var smb smbRPCScan
+	collector := tcpMessageCollector{separateInterfaces: source.capture != nil && source.capture.SeparateTCPInterfaces}
+	err := walkTCPMessagePackets(source, func(pkt PacketRecord, frame Frame, flow int, data []byte) error {
+		if !keepTCPMessageSegment(&frame, len(data), TCPFlagSYN) {
+			return nil
+		}
+		before := len(collector.directions)
+		pair, err := collector.addSegment(pkt, frame, flow, data)
+		if err == nil && pair[1] != 0 && len(collector.directions) != before &&
+			isRPCSMBPort(frame.SrcPort, frame.DstPort) {
+			smb.pairOpening(pkt.Index, collector.directions[pair[1]-1].packets[0].index)
+		}
+		return err
+	})
 	if err != nil {
 		return nil, err
 	}
 	var records []DCERPCRecord
 	contexts := MaxDCERPCContextsPerScan
+	emit := func(dir *tcpMessageDirection, pkt messagePacket, msg DCERPCMessage, smbCommand uint16) error {
+		if len(records) == MaxDCERPCRecordsPerScan || len(msg.Contexts) > contexts {
+			return ErrDCERPCLimit
+		}
+		contexts -= len(msg.Contexts)
+		records = append(records, DCERPCRecord{
+			PacketIndex: pkt.index, TimestampNs: pkt.timestamp, FlowIndex: dir.flowIndex,
+			Source: dir.src, Destination: dir.dst, Message: msg, SMB2Command: smbCommand,
+		})
+		return nil
+	}
 	err = collector.walkContiguous(func(dir *tcpMessageDirection, data []byte, spans []packetSpan, _ StreamAnomalies) error {
-		if len(data) < 2 || data[0] != 5 || data[1] != 0 {
+		if !hasDCERPCPrefix(data) {
+			if isRPCSMBPort(dir.src.Port(), dir.dst.Port()) {
+				return smb.collect(dir, data, spans)
+			}
 			return nil
 		}
 		span := 0
-		for off := 0; off < len(data); {
-			fragment, order, err := readDCERPCFragment(data[off:])
-			if err != nil {
-				break
+		return walkDCERPCFragments(data, func(off int, msg DCERPCMessage) error {
+			for spans[span].end <= off {
+				span++
 			}
-			msg, err := parseDCERPCFragment(fragment, order)
-			if errors.Is(err, ErrDCERPCLimit) {
-				return err
-			}
-			if err == nil {
-				if len(records) == MaxDCERPCRecordsPerScan || len(msg.Contexts) > contexts {
-					return ErrDCERPCLimit
-				}
-				contexts -= len(msg.Contexts)
-				for spans[span].end <= off {
-					span++
-				}
-				pkt := dir.packets[spans[span].segment]
-				records = append(records, DCERPCRecord{
-					PacketIndex: pkt.index, TimestampNs: pkt.timestamp, FlowIndex: dir.flowIndex,
-					Source: dir.src, Destination: dir.dst, Message: msg,
-				})
-			}
-			off += len(fragment)
-		}
-		return nil
+			return emit(dir, dir.packets[spans[span].segment], msg, 0)
+		})
 	})
 	if err != nil {
 		return nil, err
 	}
+	if err := smb.walk(emit); err != nil {
+		return nil, err
+	}
 	slices.SortStableFunc(records, func(a, b DCERPCRecord) int { return cmp.Compare(a.PacketIndex, b.PacketIndex) })
 	return records, nil
+}
+
+func hasDCERPCPrefix(data []byte) bool {
+	return len(data) >= 2 && data[0] == 5 && data[1] == 0
+}
+
+func walkDCERPCFragments(data []byte, visit func(int, DCERPCMessage) error) error {
+	for off := 0; off < len(data); {
+		fragment, order, err := readDCERPCFragment(data[off:])
+		if err != nil {
+			break
+		}
+		msg, err := parseDCERPCFragment(fragment, order)
+		if errors.Is(err, ErrDCERPCLimit) {
+			return err
+		}
+		if err == nil {
+			if err := visit(off, msg); err != nil {
+				return err
+			}
+		}
+		off += len(fragment)
+	}
+	return nil
 }

@@ -1466,7 +1466,7 @@ and UUID strings. RPC stub data and authentication tokens stay opaque.
 `ErrInvalidDCERPC` covers malformed or unsupported fragments.
 `ErrDCERPCLimit` covers context and result lists beyond `MaxDCERPCContexts`.
 
-Use `Capture.DCERPC` or `Capture.DCERPCFromReaderAt` for direct TCP.
+Use `Capture.DCERPC` or `Capture.DCERPCFromReaderAt` to scan a capture.
 The scanner considers all TCP ports, including dynamically selected server
 ports. It checks each contiguous direction from its first available byte
 and advances by declared fragment lengths. It skips complete fragments of
@@ -1474,6 +1474,17 @@ unsupported types and stops at a gap or invalid common header. Results use
 capture-wide flow indices and follow the order of the packets supplying the
 first byte of each fragment. The existing stream and ReaderAt read limits
 apply to the TCP scan.
+
+On TCP ports 139 and 445, the scanner also reads cleartext SMB2 named-pipe
+transfers. A successful pipe-share tree connect identifies subsequent
+WRITE requests and READ responses on that tree. Asynchronous READ responses
+use the corresponding observed request. An `FSCTL_PIPE_TRANSCEIVE` IOCTL
+identifies its own pipe transfer. Each declared command buffer supplies
+complete fragments starting at the first buffer byte. `SMB2Command` is 8
+for READ, 9 for WRITE, 11 for IOCTL, and zero for direct TCP. The SMB2
+packet and tracking bounds are `MaxSMB2PacketBytes` and
+`MaxSMBRecordsPerScan`. Exceeding the tracking bound returns
+`ErrDCERPCLimit`.
 
 ## Compute C2 beacon and flow statistics
 
