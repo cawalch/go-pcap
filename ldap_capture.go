@@ -48,36 +48,10 @@ func ldapCaptureFrame(f Frame) bool {
 		f.IPProtocol == IPProtoUDP && !f.Anomalies.IPTotalLengthExceedsFrame
 }
 
-type ldapScanUsage struct {
-	records, text int
-}
-
-func (u *ldapScanUsage) add(msg LDAPMessage) error {
-	text := len(msg.BindDN) + len(msg.SASLMechanism) + len(msg.BaseDN) + len(msg.Filter)
-	for _, attr := range msg.Attributes {
-		text += len(attr)
-	}
-	if u.records == MaxLDAPRecordsPerScan || text > MaxLDAPTextBytesPerScan-u.text {
-		return ErrLDAPLimit
-	}
-	u.records++
-	u.text += text
-	return nil
-}
-
-func ldapMessagePrefix(data []byte) []byte {
-	tag, _, rest, ok := readBERTLV(data)
-	if !ok || tag != 0x30 {
-		return nil
-	}
-	return data[:len(data)-len(rest)]
-}
-
 func scanLDAP(source ipFrameSource) ([]LDAPRecord, error) {
 	var table flowIndexTable
 	var records []LDAPRecord
-	var usage ldapScanUsage
-	remainingTCP := MaxTotalStreamBytes
+	remainingTCP, remainingText := MaxTotalStreamBytes, MaxLDAPTextBytesPerScan
 	add := func(wire []byte, record LDAPRecord) error {
 		message, err := ParseLDAP(wire)
 		if errors.Is(err, ErrLDAPLimit) {
@@ -86,9 +60,14 @@ func scanLDAP(source ipFrameSource) ([]LDAPRecord, error) {
 		if err != nil || record.IPProtocol == IPProtoUDP && message.Operation != LDAPSearchRequest {
 			return nil
 		}
-		if err := usage.add(message); err != nil {
-			return err
+		text := len(message.BindDN) + len(message.SASLMechanism) + len(message.BaseDN) + len(message.Filter)
+		for _, attr := range message.Attributes {
+			text += len(attr)
 		}
+		if len(records) == MaxLDAPRecordsPerScan || text > remainingText {
+			return ErrLDAPLimit
+		}
+		remainingText -= text
 		record.Message = message
 		records = append(records, record)
 		return nil
@@ -118,21 +97,22 @@ func scanLDAP(source ipFrameSource) ([]LDAPRecord, error) {
 	err = tcp.walkContiguous(func(dir *tcpMessageDirection, data []byte, spans []packetSpan, _ StreamAnomalies) error {
 		span := 0
 		for off := 0; off < len(data); {
-			wire := ldapMessagePrefix(data[off:])
-			if wire == nil {
+			tag, _, rest, ok := readBERTLV(data[off:])
+			if !ok || tag != 0x30 {
 				break
 			}
+			end := len(data) - len(rest)
 			for spans[span].end <= off {
 				span++
 			}
 			pkt := dir.packets[spans[span].segment]
-			if err := add(wire, LDAPRecord{
+			if err := add(data[off:end], LDAPRecord{
 				PacketIndex: pkt.index, TimestampNs: pkt.timestamp, FlowIndex: dir.flowIndex, IPProtocol: IPProtoTCP,
 				Source: dir.src, Destination: dir.dst,
 			}); err != nil {
 				return err
 			}
-			off += len(wire)
+			off = end
 		}
 		return nil
 	})

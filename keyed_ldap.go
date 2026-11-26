@@ -41,6 +41,31 @@ func (c *Capture) KeyedLDAPFromReaderAt(r io.ReaderAt, extraKeyLog []byte) ([]Ke
 	}}, extraKeyLog)
 }
 
+type ldapScanUsage struct {
+	records, text int
+}
+
+func (u *ldapScanUsage) add(msg LDAPMessage) error {
+	text := len(msg.BindDN) + len(msg.SASLMechanism) + len(msg.BaseDN) + len(msg.Filter)
+	for _, attr := range msg.Attributes {
+		text += len(attr)
+	}
+	if u.records == MaxLDAPRecordsPerScan || text > MaxLDAPTextBytesPerScan-u.text {
+		return ErrLDAPLimit
+	}
+	u.records++
+	u.text += text
+	return nil
+}
+
+func ldapMessagePrefix(data []byte) []byte {
+	tag, _, rest, ok := readBERTLV(data)
+	if !ok || tag != 0x30 {
+		return nil
+	}
+	return data[:len(data)-len(rest)]
+}
+
 func scanKeyedLDAP(source ipFrameSource, extraKeyLog []byte) ([]KeyedLDAPRecord, error) {
 	streams, err := scanTLSProvenanceOnPort(source, extraKeyLog, ldapsPort)
 	if err != nil {
