@@ -3,6 +3,7 @@
 package pcap
 
 import (
+	"bytes"
 	"encoding/binary"
 	"errors"
 	"net"
@@ -10,7 +11,39 @@ import (
 	"syscall"
 	"testing"
 	"time"
+	"unsafe"
 )
+
+func TestLiveLinuxUnsupportedDatalink(t *testing.T) {
+	tun, err := os.OpenFile("/dev/net/tun", os.O_RDWR, 0)
+	if errors.Is(err, os.ErrNotExist) || errors.Is(err, syscall.EACCES) || errors.Is(err, syscall.EPERM) || errors.Is(err, syscall.ENODEV) {
+		t.Skipf("TUN unavailable: %v", err)
+	}
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = tun.Close() }()
+	// An IP-only TUN interface delivers packets without an Ethernet header.
+	var req [syscall.IFNAMSIZ + 24]byte
+	copy(req[:], "pcaptun%d")
+	binary.NativeEndian.PutUint16(req[syscall.IFNAMSIZ:], syscall.IFF_TUN|syscall.IFF_NO_PI)
+	_, _, errno := syscall.Syscall(syscall.SYS_IOCTL, tun.Fd(), syscall.TUNSETIFF, uintptr(unsafe.Pointer(&req)))
+	if errno == syscall.EPERM || errno == syscall.EACCES {
+		t.Skipf("creating a TUN interface: %v", errno)
+	}
+	if errno != 0 {
+		t.Fatal(errno)
+	}
+	iface, _, _ := bytes.Cut(req[:syscall.IFNAMSIZ], []byte{0})
+	capture, err := OpenLive(string(iface), LiveOptions{})
+	if err == nil {
+		defer func() { _ = capture.Close() }()
+		t.Fatalf("opened IP-only TUN as link type %d", capture.LinkType())
+	}
+	if !errors.Is(err, ErrInvalidHeader) {
+		t.Fatalf("OpenLive(%s) error = %v, want ErrInvalidHeader", iface, err)
+	}
+}
 
 func TestLiveLinuxRingBlockSize(t *testing.T) {
 	// An IP-only interface can place the snapshot 96 bytes into the
