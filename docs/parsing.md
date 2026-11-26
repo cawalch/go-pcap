@@ -903,6 +903,42 @@ An aggregate HTTP limit returns `ErrHTTPLimit` and discards the result.
 Run `go test -run '^ExampleCapture_KeyedHTTP2Transactions$' .` to select an
 exchange from the [keyed fixture](../testdata/tls-provenance.md#http2-over-tls).
 
+### Export a keyed HTTP/2 exchange as ciphertext
+
+Select a row with `KeyedHTTP2Transactions` or
+`KeyedHTTP2TransactionsFromReaderAt`. Pass its `ID` and the same input and
+key log to `ExtractKeyedHTTP2TransactionPCAPNG` or its ReaderAt counterpart.
+Use nil for the key log when the source holds the keys.
+
+```go
+rows, err := capture.KeyedHTTP2Transactions(data, keyLog)
+if err != nil {
+	return err
+}
+for _, row := range rows {
+	if row.Request.Path == "/two" {
+		return capture.ExtractKeyedHTTP2TransactionPCAPNG(data, keyLog, output, row.ID)
+	}
+}
+return pcap.ErrOutOfBounds
+```
+
+The output contains original packets from the selected TCP opening. A complete
+exchange includes the TCP and TLS opening and the records through the selected
+frames in each direction. Those records carry earlier HPACK updates, even when
+another HTTP/2 stream supplied them. Whole packets and shared TLS records can
+also disclose concurrent traffic. A partial, reset or anomalous exchange can
+require the entire opening to preserve the original evidence. Inspect the
+export before sharing it.
+
+The packet-only PcapNG omits decryption secrets. Supply the keys separately
+when reopening and select the transaction using its new capture-local ID.
+An invalid or unavailable ID returns `ErrOutOfBounds` before writing. When
+whole packets cannot preserve a source reassembly cutoff, the export returns
+`ErrReassemblyLimit`. The ReaderAt variant shares the read budget across
+selection and copying. Run the example with
+`go test -run '^ExampleCapture_ExtractKeyedHTTP2TransactionPCAPNG$' .`.
+
 ## Parse HTTP messages and carve payloads
 
 | Question | Capture API |
@@ -1351,8 +1387,11 @@ interface using standard-library `syscall` descriptors (`/dev/bpf*` on macOS,
 and `BPFFilterIPv4Host` to construct classic BPF filter programs, or `EvalBPF`
 to evaluate a classic BPF program in memory.
 
-On Linux, `Promiscuous` requests membership for the capture socket until it
-closes. `OriginalLen` retains the wire length when the socket filter or
+On Linux, `OpenLive` accepts Ethernet and loopback interfaces and reports
+`LinkTypeEthernet` for both. Linux presents loopback packets with a synthetic
+Ethernet header. Other interface hardware types return an error wrapping
+`ErrInvalidHeader`. `Promiscuous` requests membership for the capture socket
+until it closes. `OriginalLen` retains the wire length when the socket filter or
 `SnapLen` shortens a packet. `TimestampNs` comes from the kernel when it
 captures the packet and uses nanosecond resolution. The receive ring holds at
 least two blocks sized to fit the requested snapshot, so its allocation can
