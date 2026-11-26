@@ -894,6 +894,30 @@ A limit or read error discards the result.
 [Coalescing](https://www.rfc-editor.org/rfc/rfc9000.html#section-12.2) ·
 [Runnable example](../keyed_quic_test.go)
 
+### Delimit HTTP/3 frames
+
+Use `ParseHTTP3Stream` on each directional `QUICStream` from a connection
+known to have negotiated HTTP/3. Establish that protocol from an endpoint
+log or another source of negotiated ALPN. The keyed QUIC scan exposes the
+ClientHello's protocol offers.
+
+The parser classifies request, control, push, and QPACK streams. On
+frame-bearing streams, each result locates the frame header and payload
+within `QUICStream.Data`. Use these offsets to read DATA bytes or preserve
+the wire range of a compressed HEADERS field section. The parser checks
+frame placement by stream kind and first-position SETTINGS. Unknown
+frame types retain their delimited ranges. QPACK and unknown unidirectional
+stream types are identified by their prologues and their bytes remain opaque.
+
+`Incomplete` reports a missing clean FIN, gap, or reset. `Truncated`
+identifies a partial prologue or frame and preserves any preceding complete
+frames. A clean FIN within a prologue or frame, or an invalid frame placement,
+returns `ErrInvalidHTTP3` and a zero result. Limits are 1,024 frames and
+4 MiB of stream input or declared frame payload. Exceeding either limit
+returns `ErrHTTP3Limit` and a zero result.
+[HTTP/3 framing](https://www.rfc-editor.org/rfc/rfc9114.html#section-7) ·
+[Runnable example](../http3_test.go)
+
 ## Decrypt TLS 1.2 and TLS 1.3 streams offline
 
 Call `capture.DecryptedTLSStreams(data, extraKeyLog)` to decrypt TLS 1.2
