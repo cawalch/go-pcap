@@ -111,6 +111,16 @@ All four packets carry service class 7, flow ID 101, and trace tag 42. The Go
 tests check these attribution boundaries and verify that flow export preserves
 the original process entries.
 
+TShark 4.6.10 (`eac916f07299`) decodes all four source PCAP frames as
+`pktap:pcap_pktdata:eth:ethertype:ip:udp`, with embedded DLT 1 (Ethernet) and
+`192.0.2.2:5000 → 198.51.100.2:6000`. The converted PcapNG uses Ethernet
+interfaces and presents the same four UDP tuples.
+
+```sh
+tshark -n -r darwin-pktap.pcap -T fields -e frame.number -e frame.protocols \
+  -e ip.src -e ip.dst -e udp.srcport -e udp.dstport
+```
+
 ## DNS transaction fixture
 
 `dns-transactions.pcap` contains 13 Ethernet frames with classic PCAP

@@ -211,7 +211,9 @@ without heap allocations:
 - Supported link types: `LinkTypeEthernet` (with up to 4 nested 802.1Q / 802.1ad
   VLAN tags), `LinkTypeLinuxSLL`, `LinkTypeLinuxSLL2`, `LinkTypeNull` (BSD
   loopback), `LinkTypeRaw`, `LinkTypeIPv4`, `LinkTypeIPv6`,
-  `LinkTypeIEEE80211` (105), and `LinkTypeIEEE80211RadioTap` (127).
+  `LinkTypeIEEE80211` (105), `LinkTypeIEEE80211RadioTap` (127), and
+  `LinkTypeApplePktap` (149). Apple PKTAP decoding uses the little-endian
+  version 1 packet header and reports offsets relative to the original frame.
 - Supported tunnel encapsulations: `MPLS` (`0x8847` / `0x8848`, up to 8 labels),
   `PPPoE` Session (`0x8864` over IPv4 or IPv6), `GRE` (`IPProto 47` over IPv4,
   IPv6, or Transparent Ethernet Bridging), `VXLAN` (`UDP 4789`), and `Geneve`
