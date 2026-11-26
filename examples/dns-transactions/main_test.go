@@ -25,7 +25,7 @@ flow=0 reply_frame=12 id=0005 name="orphan.example" type=1 class=1 header_rcode=
 flow=0 query_frame=13 id=0006 name="pending.example" type=1 class=1 no_reply_observed
 `
 	var out bytes.Buffer
-	if err := run(path, nil, &out, false); err != nil {
+	if err := run(path, nil, &out, options{}); err != nil {
 		t.Fatal(err)
 	}
 	if out.String() != want {
@@ -42,7 +42,7 @@ flow=0 query_frame=13 id=0006 name="pending.example" type=1 class=1 no_reply_obs
 		_ = writer.CloseWithError(err)
 	}()
 	out.Reset()
-	if err := run("-", reader, &out, false); err != nil {
+	if err := run("-", reader, &out, options{}); err != nil {
 		t.Fatal(err)
 	}
 	if out.String() != want {
@@ -114,15 +114,49 @@ func TestICMPReport(t *testing.T) {
 		t.Fatal(err)
 	}
 	var plain, withICMP bytes.Buffer
-	if err := run(path, nil, &plain, false); err != nil {
+	if err := run(path, nil, &plain, options{}); err != nil {
 		t.Fatal(err)
 	}
-	if err := run(path, nil, &withICMP, true); err != nil {
+	if err := run(path, nil, &withICMP, options{icmp: true}); err != nil {
 		t.Fatal(err)
 	}
 	const want = "flow=0 icmp_ip=4 icmp_type=3 icmp_code=3 quoted_src=192.0.2.14:53000 quoted_dst=192.0.2.53:53 count=2 first_error_frame=14 last_error_frame=15\n"
 	if !strings.HasSuffix(plain.String(), "name=\"pending.example\" type=1 class=1 no_reply_observed\n") ||
 		withICMP.String() != plain.String()+want {
 		t.Fatalf("ICMP report:\n%s", &withICMP)
+	}
+}
+
+func TestTCPZeroWindowReport(t *testing.T) {
+	data, err := os.ReadFile("../../testdata/deployments/dns-transactions.pcap")
+	if err != nil {
+		t.Fatal(err)
+	}
+	c, err := pcap.New(data)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for pkt, err := range c.PacketSeq(data) {
+		if err != nil {
+			t.Fatal(err)
+		}
+		// The resolver sent TCP responses in frames seven and eight.
+		if pkt.Index == 6 || pkt.Index == 7 {
+			const windowOffset = 14 + 20 + 14
+			start := pkt.PayloadOffset + windowOffset
+			clear(data[start : start+2])
+		}
+	}
+
+	var plain, withWindow bytes.Buffer
+	if err := run("-", bytes.NewReader(data), &plain, options{}); err != nil {
+		t.Fatal(err)
+	}
+	if err := run("-", bytes.NewReader(data), &withWindow, options{tcpZeroWindow: true}); err != nil {
+		t.Fatal(err)
+	}
+	const want = "flow=1 tcp_zero_window_src=192.0.2.53:53 tcp_zero_window_dst=192.0.2.14:53000 count=2 first_zero_window_frame=7 last_zero_window_frame=8\n"
+	if withWindow.String() != plain.String()+want {
+		t.Fatalf("zero-window report:\n%s", &withWindow)
 	}
 }

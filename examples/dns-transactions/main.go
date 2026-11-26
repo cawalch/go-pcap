@@ -14,9 +14,11 @@ import (
 )
 
 func main() {
-	includeICMP := flag.Bool("icmp", false, "report ICMP errors quoting observed DNS flows")
+	var opts options
+	flag.BoolVar(&opts.icmp, "icmp", false, "report ICMP errors quoting observed DNS flows")
+	flag.BoolVar(&opts.tcpZeroWindow, "tcp-zero-window", false, "report zero TCP receive windows on unicast port 53 flows")
 	flag.Usage = func() {
-		fmt.Fprintln(os.Stderr, "usage: dns-transactions [-icmp] {capture.pcap[ng][.gz]|-}")
+		fmt.Fprintln(os.Stderr, "usage: dns-transactions [-icmp] [-tcp-zero-window] {capture.pcap[ng][.gz]|-}")
 		flag.PrintDefaults()
 	}
 	flag.Parse()
@@ -24,13 +26,18 @@ func main() {
 		flag.Usage()
 		os.Exit(2)
 	}
-	if err := run(flag.Arg(0), os.Stdin, os.Stdout, *includeICMP); err != nil {
+	if err := run(flag.Arg(0), os.Stdin, os.Stdout, opts); err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)
 	}
 }
 
-func run(path string, stdin io.Reader, out io.Writer, includeICMP bool) error {
+type options struct {
+	icmp          bool
+	tcpZeroWindow bool
+}
+
+func run(path string, stdin io.Reader, out io.Writer, opts options) error {
 	input, err := captureinput.Open(path, stdin)
 	if err != nil {
 		return err
@@ -40,17 +47,42 @@ func run(path string, stdin io.Reader, out io.Writer, includeICMP bool) error {
 	if err != nil {
 		return err
 	}
-	if !includeICMP {
-		return report(out, records)
+	var quoted []pcap.ICMPFlowErrorSummary
+	if opts.icmp {
+		quoted, err = input.Capture.ICMPFlowErrorsFromReaderAt(input.File)
+		if err != nil {
+			return err
+		}
 	}
-	quoted, err := input.Capture.ICMPFlowErrorsFromReaderAt(input.File)
-	if err != nil {
-		return err
+	var zeroWindows []pcap.TCPZeroWindowSummary
+	if opts.tcpZeroWindow {
+		zeroWindows, err = input.Capture.TCPZeroWindowsFromReaderAt(input.File)
+		if err != nil {
+			return err
+		}
 	}
 	if err := report(out, records); err != nil {
 		return err
 	}
-	return reportICMPErrors(out, records, quoted)
+	if err := reportICMPErrors(out, records, quoted); err != nil {
+		return err
+	}
+	return reportTCPZeroWindows(out, zeroWindows)
+}
+
+func reportTCPZeroWindows(out io.Writer, groups []pcap.TCPZeroWindowSummary) error {
+	for _, group := range groups {
+		src, dst := group.Source, group.Destination
+		if (src.Port() != 53 && dst.Port() != 53) || src.Addr().IsMulticast() || dst.Addr().IsMulticast() {
+			continue
+		}
+		_, err := fmt.Fprintf(out, "flow=%d tcp_zero_window_src=%s tcp_zero_window_dst=%s count=%d first_zero_window_frame=%d last_zero_window_frame=%d\n",
+			group.FlowIndex, src, dst, group.Count, group.FirstPacketIndex+1, group.LastPacketIndex+1)
+		if err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func reportICMPErrors(out io.Writer, records []pcap.DNSRecord, quoted []pcap.ICMPFlowErrorSummary) error {
