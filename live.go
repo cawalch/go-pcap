@@ -1,13 +1,50 @@
 package pcap
 
 import (
+	"cmp"
 	"encoding/binary"
 	"fmt"
+	"net"
+	"slices"
 	"time"
 )
 
 // LinkTypeUnknown indicates that the capture has no known link-layer type.
 const LinkTypeUnknown LinkType = 0xffff
+
+// LiveDevice describes an interface the live capture backend can inspect.
+// LinkType is the backend's framing when HasLinkType is true. The device may
+// still require permissions to open for capture.
+type LiveDevice struct {
+	Name        string
+	Index       int
+	MTU         int
+	Flags       net.Flags
+	LinkType    LinkType
+	HasLinkType bool
+}
+
+// LiveDevices lists network interfaces in ascending interface-index order.
+// If the backend cannot determine a supported datalink for an interface, its
+// LinkType is [LinkTypeUnknown] and HasLinkType is false. On macOS, querying
+// datalinks requires access to /dev/bpf. Windows reports its IPv4 socket framing.
+func LiveDevices() ([]LiveDevice, error) {
+	ifaces, err := net.Interfaces()
+	if err != nil {
+		return nil, err
+	}
+	devices := make([]LiveDevice, 0, len(ifaces))
+	for _, iface := range ifaces {
+		devices = append(devices, LiveDevice{
+			Name: iface.Name, Index: iface.Index, MTU: iface.MTU, Flags: iface.Flags, LinkType: LinkTypeUnknown,
+		})
+	}
+	if err := liveDeviceLinkTypes(devices); err != nil {
+		return nil, err
+	}
+	slices.SortFunc(devices, func(a, b LiveDevice) int { return cmp.Compare(a.Index, b.Index) })
+	return devices, nil
+}
 
 // InterfaceName returns the bound network interface name.
 func (lc *LiveCapture) InterfaceName() string {

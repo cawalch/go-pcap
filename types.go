@@ -1,6 +1,9 @@
 package pcap
 
-import "errors"
+import (
+	"errors"
+	"fmt"
+)
 
 // Capture container formats.
 type Format uint8
@@ -523,6 +526,9 @@ var (
 	ErrInvalidKRB5 = errors.New("invalid Kerberos v5 message")
 	// ErrInvalidRDP indicates a malformed TPKT/X.224 RDP negotiation PDU.
 	ErrInvalidRDP = errors.New("invalid RDP negotiation packet")
+	// ErrUnsupportedDataLink indicates a live datalink the backend cannot capture.
+	// It wraps [ErrInvalidHeader] for callers of [OpenLive].
+	ErrUnsupportedDataLink = fmt.Errorf("unsupported live datalink: %w", ErrInvalidHeader)
 	// ErrLiveCaptureUnsupported indicates live interface capture is not supported on the target OS.
 	ErrLiveCaptureUnsupported = errors.New("live capture unsupported on this platform")
 	// ErrInterfaceLimit indicates the capture exceeds [MaxInterfaces].

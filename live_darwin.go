@@ -49,18 +49,9 @@ func OpenLive(ifaceName string, opts LiveOptions) (*LiveCapture, error) {
 		return nil, err
 	}
 
-	fd := -1
-	var dev string
-	var openErr error
-	for i := range 256 {
-		dev = fmt.Sprintf("/dev/bpf%d", i)
-		fd, openErr = syscall.Open(dev, syscall.O_RDONLY|syscall.O_CLOEXEC, 0)
-		if openErr != syscall.EBUSY {
-			break
-		}
-	}
-	if fd < 0 {
-		return nil, fmt.Errorf("opening /dev/bpf device: %w", openErr)
+	fd, dev, err := openDarwinBPF()
+	if err != nil {
+		return nil, err
 	}
 
 	bufLen := uint32(normOpts.BufferSize)
@@ -70,12 +61,9 @@ func OpenLive(ifaceName string, opts LiveOptions) (*LiveCapture, error) {
 		return nil, fmt.Errorf("ioctl BIOCSBLEN: %w", errno)
 	}
 
-	var ifr bpfIfreq
-	copy(ifr.Name[:], ifaceName)
-	_, _, errno = syscall.Syscall(syscall.SYS_IOCTL, uintptr(fd), syscall.BIOCSETIF, uintptr(unsafe.Pointer(&ifr)))
-	if errno != 0 {
+	if err := bindDarwinBPF(fd, ifaceName); err != nil {
 		_ = syscall.Close(fd)
-		return nil, fmt.Errorf("ioctl BIOCSETIF(%s): %w", ifaceName, errno)
+		return nil, err
 	}
 
 	if normOpts.Immediate {
@@ -132,13 +120,7 @@ func OpenLive(ifaceName string, opts LiveOptions) (*LiveCapture, error) {
 		actualBufLen = bufLen
 	}
 
-	var dlt uint32
-	_, _, errno = syscall.Syscall(syscall.SYS_IOCTL, uintptr(fd), syscall.BIOCGDLT, uintptr(unsafe.Pointer(&dlt)))
-	if errno != 0 {
-		_ = syscall.Close(fd)
-		return nil, fmt.Errorf("ioctl BIOCGDLT: %w", errno)
-	}
-	linkType, err := darwinBPFLinkType(dlt)
+	linkType, err := darwinBPFDeviceLinkType(fd)
 	if err != nil {
 		_ = syscall.Close(fd)
 		return nil, err
@@ -156,6 +138,61 @@ func OpenLive(ifaceName string, opts LiveOptions) (*LiveCapture, error) {
 		snapLen:   normOpts.SnapLen,
 		buf:       make([]byte, actualBufLen),
 	}, nil
+}
+
+func openDarwinBPF() (int, string, error) {
+	for i := range 256 {
+		dev := fmt.Sprintf("/dev/bpf%d", i)
+		fd, err := syscall.Open(dev, syscall.O_RDONLY|syscall.O_CLOEXEC, 0)
+		if err == syscall.EBUSY {
+			continue
+		}
+		if err != nil {
+			return -1, "", fmt.Errorf("opening /dev/bpf device: %w", err)
+		}
+		return fd, dev, nil
+	}
+	return -1, "", fmt.Errorf("opening /dev/bpf device: %w", syscall.EBUSY)
+}
+
+func bindDarwinBPF(fd int, ifaceName string) error {
+	var ifr bpfIfreq
+	copy(ifr.Name[:], ifaceName)
+	_, _, errno := syscall.Syscall(syscall.SYS_IOCTL, uintptr(fd), syscall.BIOCSETIF, uintptr(unsafe.Pointer(&ifr)))
+	if errno != 0 {
+		return fmt.Errorf("ioctl BIOCSETIF(%s): %w", ifaceName, errno)
+	}
+
+	return nil
+}
+
+func darwinBPFDeviceLinkType(fd int) (LinkType, error) {
+	var dlt uint32
+	_, _, errno := syscall.Syscall(syscall.SYS_IOCTL, uintptr(fd), syscall.BIOCGDLT, uintptr(unsafe.Pointer(&dlt)))
+	if errno != 0 {
+		return LinkTypeUnknown, fmt.Errorf("ioctl BIOCGDLT: %w", errno)
+	}
+	return darwinBPFLinkType(dlt)
+}
+
+func liveDeviceLinkTypes(devices []LiveDevice) error {
+	fd, _, err := openDarwinBPF()
+	if err != nil {
+		return nil // Device names are available when BPF access is unavailable.
+	}
+	defer func() { _ = syscall.Close(fd) }()
+	for i := range devices {
+		name := devices[i].Name
+		if len(name) >= syscall.IFNAMSIZ || bindDarwinBPF(fd, name) != nil {
+			continue
+		}
+		linkType, err := darwinBPFDeviceLinkType(fd)
+		if err == nil {
+			devices[i].LinkType = linkType
+			devices[i].HasLinkType = true
+		}
+	}
+	return nil
 }
 
 func darwinBPFLinkType(dlt uint32) (LinkType, error) {

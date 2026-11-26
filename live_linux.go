@@ -64,8 +64,8 @@ func htons(v uint16) uint16 {
 
 // OpenLive opens a live packet capture handle on ifaceName using an AF_PACKET
 // raw socket and standard library syscalls without cgo or libpcap. It accepts
-// Ethernet and Linux loopback interfaces. An unsupported interface hardware
-// type returns an error wrapping [ErrInvalidHeader].
+// Ethernet, Linux loopback, and Metricom interfaces. An unsupported interface hardware
+// type returns an error wrapping [ErrUnsupportedDataLink].
 func OpenLive(ifaceName string, opts LiveOptions) (*LiveCapture, error) {
 	if ifaceName == "" {
 		return nil, fmt.Errorf("%w: empty interface name", ErrInvalidHeader)
@@ -91,17 +91,9 @@ func OpenLive(ifaceName string, opts LiveOptions) (*LiveCapture, error) {
 		}
 	}()
 
-	// SIOCGIFHWADDR returns sa_family as the ARPHRD type. Reserve space for
-	// the largest Linux ifreq union (24 bytes on 64-bit architectures).
-	var req [syscall.IFNAMSIZ + 24]byte
-	copy(req[:syscall.IFNAMSIZ], iface.Name)
-	_, _, errno := syscall.Syscall(syscall.SYS_IOCTL, uintptr(fd), syscall.SIOCGIFHWADDR, uintptr(unsafe.Pointer(&req)))
-	if errno != 0 {
-		return nil, fmt.Errorf("SIOCGIFHWADDR for %s: %w", ifaceName, errno)
-	}
-	hardwareType := binary.NativeEndian.Uint16(req[syscall.IFNAMSIZ:])
-	if hardwareType != syscall.ARPHRD_ETHER && hardwareType != syscall.ARPHRD_LOOPBACK {
-		return nil, fmt.Errorf("%w: unsupported Linux live interface %q hardware type %d", ErrInvalidHeader, ifaceName, hardwareType)
+	linkType, err := linuxInterfaceLinkType(fd, iface.Name)
+	if err != nil {
+		return nil, fmt.Errorf("live interface %q: %w", ifaceName, err)
 	}
 
 	if normOpts.Promiscuous {
@@ -161,7 +153,7 @@ func OpenLive(ifaceName string, opts LiveOptions) (*LiveCapture, error) {
 	lc := &LiveCapture{
 		file:      os.NewFile(uintptr(fd), ifaceName),
 		ifaceName: ifaceName,
-		linkType:  LinkTypeEthernet,
+		linkType:  linkType,
 		snapLen:   normOpts.SnapLen,
 		timeout:   normOpts.Timeout,
 		buf:       make([]byte, normOpts.SnapLen),
@@ -170,6 +162,44 @@ func OpenLive(ifaceName string, opts LiveOptions) (*LiveCapture, error) {
 	lc.unmap = runtime.AddCleanup(lc, func(data []byte) { _ = syscall.Munmap(data) }, ring.data)
 	opened = true
 	return lc, nil
+}
+
+func linuxInterfaceLinkType(fd int, name string) (LinkType, error) {
+	// SIOCGIFHWADDR returns sa_family as the ARPHRD type. Reserve space for
+	// the largest Linux ifreq union (24 bytes on 64-bit architectures).
+	var req [syscall.IFNAMSIZ + 24]byte
+	copy(req[:syscall.IFNAMSIZ], name)
+	_, _, errno := syscall.Syscall(syscall.SYS_IOCTL, uintptr(fd), syscall.SIOCGIFHWADDR, uintptr(unsafe.Pointer(&req)))
+	if errno != 0 {
+		return LinkTypeUnknown, fmt.Errorf("SIOCGIFHWADDR: %w", errno)
+	}
+	return linuxARPHRDLinkType(binary.NativeEndian.Uint16(req[syscall.IFNAMSIZ:]))
+}
+
+func linuxARPHRDLinkType(hardwareType uint16) (LinkType, error) {
+	switch hardwareType {
+	case syscall.ARPHRD_ETHER, syscall.ARPHRD_LOOPBACK, syscall.ARPHRD_METRICOM:
+		return LinkTypeEthernet, nil
+	default:
+		return LinkTypeUnknown, fmt.Errorf("%w: ARPHRD type %d", ErrUnsupportedDataLink, hardwareType)
+	}
+}
+
+func liveDeviceLinkTypes(devices []LiveDevice) error {
+	// SIOCGIFHWADDR also works on an unprivileged datagram socket.
+	fd, err := syscall.Socket(syscall.AF_INET, syscall.SOCK_DGRAM|syscall.SOCK_CLOEXEC, 0)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = syscall.Close(fd) }()
+	for i := range devices {
+		linkType, err := linuxInterfaceLinkType(fd, devices[i].Name)
+		if err == nil {
+			devices[i].LinkType = linkType
+			devices[i].HasLinkType = true
+		}
+	}
+	return nil
 }
 
 func linuxRingBlockSize(opts LiveOptions, pageSize int) int {

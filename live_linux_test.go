@@ -8,11 +8,26 @@ import (
 	"errors"
 	"net"
 	"os"
+	"slices"
+	"strings"
 	"syscall"
 	"testing"
 	"time"
 	"unsafe"
 )
+
+func TestLiveLinuxHardwareTypes(t *testing.T) {
+	for _, hardwareType := range []uint16{syscall.ARPHRD_ETHER, syscall.ARPHRD_LOOPBACK, syscall.ARPHRD_METRICOM} {
+		if linkType, err := linuxARPHRDLinkType(hardwareType); err != nil || linkType != LinkTypeEthernet {
+			t.Fatalf("ARPHRD %d = %d, %v", hardwareType, linkType, err)
+		}
+	}
+	for _, hardwareType := range []uint16{syscall.ARPHRD_IEEE80211_RADIOTAP, syscall.ARPHRD_PPP, syscall.ARPHRD_NONE} {
+		if linkType, err := linuxARPHRDLinkType(hardwareType); !errors.Is(err, ErrUnsupportedDataLink) || linkType != LinkTypeUnknown {
+			t.Fatalf("ARPHRD %d = %d, %v", hardwareType, linkType, err)
+		}
+	}
+}
 
 func TestLiveLinuxUnsupportedDatalink(t *testing.T) {
 	tun, err := os.OpenFile("/dev/net/tun", os.O_RDWR, 0)
@@ -35,13 +50,21 @@ func TestLiveLinuxUnsupportedDatalink(t *testing.T) {
 		t.Fatal(errno)
 	}
 	iface, _, _ := bytes.Cut(req[:syscall.IFNAMSIZ], []byte{0})
+	devices, err := LiveDevices()
+	if err != nil {
+		t.Fatal(err)
+	}
+	idx := slices.IndexFunc(devices, func(dev LiveDevice) bool { return dev.Name == string(iface) })
+	if idx < 0 || devices[idx].HasLinkType || devices[idx].LinkType != LinkTypeUnknown {
+		t.Fatalf("TUN not listed with unknown framing: %+v", devices)
+	}
 	capture, err := OpenLive(string(iface), LiveOptions{})
 	if err == nil {
 		defer func() { _ = capture.Close() }()
 		t.Fatalf("opened IP-only TUN as link type %d", capture.LinkType())
 	}
-	if !errors.Is(err, ErrInvalidHeader) {
-		t.Fatalf("OpenLive(%s) error = %v, want ErrInvalidHeader", iface, err)
+	if !errors.Is(err, ErrUnsupportedDataLink) || !errors.Is(err, ErrInvalidHeader) || !strings.Contains(err.Error(), string(iface)) || !strings.Contains(err.Error(), "ARPHRD type") {
+		t.Fatalf("OpenLive(%s) error = %v, want named unsupported datalink", iface, err)
 	}
 }
 

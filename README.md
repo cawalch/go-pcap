@@ -86,7 +86,7 @@ The table describes the current source checkout. The quick start above uses the 
 | Which packet carried this HTTP request? | Use `HTTPRequests` for a cleartext HTTP/1 or HTTP/2 timeline, or `HTTP1RequestEvidence` for raw targets, ordered headers and body completeness. [Request provenance](docs/parsing.md#locate-individual-http-requests-in-a-capture) |
 | Which packets show a particular HTTP/1 request and its response? | Select a cleartext exchange with `HTTP1Transactions` and export its original packets and pairing context. [Transaction selection](docs/parsing.md#select-and-export-a-cleartext-http1-transaction) |
 | How do I share one connection? | Call `ExtractFlowPacketsPCAPNG` to keep selected packets and omit capture-wide names and decryption secrets. [Packet-only export](#share-packets-from-one-flow) |
-| How do I collect packets on a host? | Open an interface with `OpenLive`. [Live capture](docs/parsing.md#capture-live-interface-traffic) |
+| How do I collect packets on a host? | List interfaces with `LiveDevices()`, then open one by name with `OpenLive`. [Live capture](docs/parsing.md#capture-live-interface-traffic) |
 
 ## Share packets from one flow
 
