@@ -44,7 +44,7 @@ be added compatibly.
 | `KeyedHTTP1Transactions`, `KeyedHTTP1TransactionsFromReaderAt` | Caller-owned HTTP and TLS record evidence survives input reuse. IDs apply to the original capture. See [key inputs and coverage](parsing.md#select-http1-transactions-inside-tls). |
 | `ExtractKeyedHTTP1TransactionPCAPNG`, `ExtractKeyedHTTP1TransactionPCAPNGFromReaderAt` | The source ID and matching keys select original ciphertext packets. Reopening the packet-only output requires separate secrets. [Export coverage](parsing.md#export-an-http1-exchange-as-ciphertext) |
 | `ExtractKeyedHTTP2TransactionPCAPNG`, `ExtractKeyedHTTP2TransactionPCAPNGFromReaderAt` | The source ID and matching keys select original ciphertext packets and directional HPACK history. Reopening requires separate secrets. [Export coverage](parsing.md#export-a-keyed-http2-exchange-as-ciphertext) |
-| `DecompressCapture` | Plain input passes through by reference. A successful gzip decode returns decompressed bytes. |
+| `DecompressCapture` | Non-gzip input passes through by reference. A successful gzip decode returns decompressed bytes. |
 | `LiveCapture.ReadPacket` | For portable code, copy a packet that must survive the next read. The macOS backend reuses its buffer. |
 
 For other low-level parsers, consult the individual API before modifying an
@@ -60,6 +60,7 @@ from a failed call.
 | Operation | What the caller receives |
 | --- | --- |
 | Container open | A valid header followed by an incomplete trailing record can produce a usable snapshot. Check `InputTruncated()` and `DeclaredExtent()` to distinguish this from a complete capture. |
+| Compressed signatures | A leading Zstandard data frame or XZ stream signature returns `ErrUnsupportedZstd` or `ErrUnsupportedXZ` with a nil capture. Both errors also match `ErrNotPCAP` and `ErrInvalidMagic`. |
 | Link-type coverage | `UnsupportedLinkTypePackets` and `UnsupportedLinkTypePacketsFromReaderAt` report complete records on unsupported interfaces. The ReaderAt metadata pass is bounded by `MaxReaderAtScanBytes`. Packet iteration still exposes those records, and frame-based scans can return empty or partial results. |
 | Packet iteration and collection | Iterators can yield complete packets followed by one terminal error. Breaking stops iteration. On a walk error the collecting methods discard the accumulated records. |
 | ReaderAt flow, DNS, TLS and QUIC scans | The per-call read budget covers selected payload and metadata. Exceeding `MaxReaderAtScanBytes` returns `ErrPacketLimit`. A larger file can fit within the budget. |

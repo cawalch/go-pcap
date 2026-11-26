@@ -26,6 +26,10 @@ const (
 	pcapngSPBMinSize         = 16
 	pcapngDSBMinSize         = 20
 	defaultTimestampResolN   = 1_000 // default PcapNG 10^-6 s = 1,000 ns per unit
+
+	zstdFrameMagic = 0xfd2fb528
+	xzMagicPrefix  = 0x587a37fd
+	xzMagicSuffix  = "\x5a\x00"
 )
 
 // InterfaceDescriptor describes a capture interface from a classic PCAP header
@@ -172,7 +176,7 @@ type Capture struct {
 	anomalies      CaptureAnomalies
 }
 
-// Open reads the entire named file into memory and parses its capture container.
+// Open reads the entire named file into memory and parses it with [New].
 // If you need to control input size or I/O, read the bytes in your application
 // and pass them to [New].
 func Open(filename string) (*Capture, error) {
@@ -183,7 +187,7 @@ func Open(filename string) (*Capture, error) {
 	return New(data)
 }
 
-// DecompressCapture returns plain input unchanged or decodes gzip input into a
+// DecompressCapture returns non-gzip input unchanged or decodes gzip input into a
 // new slice. The combined output of all gzip members is limited to
 // [MaxDecompressedCaptureBytes]. Invalid gzip data and over-limit streams
 // return no data. Pass the returned slice to [New] and subsequent capture
@@ -212,6 +216,8 @@ func DecompressCapture(data []byte) ([]byte, error) {
 // New parses a classic PCAP or PcapNG container from data.
 // It returns an error if the leading container header is missing or invalid, or
 // if any block or record violates structural invariants or work limits.
+// Input starting with a Zstandard frame or XZ stream signature returns
+// [ErrUnsupportedZstd] or [ErrUnsupportedXZ], respectively.
 //
 // New records int64(len(data)) as [Capture.FileSize]. If a trailing packet or
 // PcapNG block is truncated at the end of data, New succeeds, sets
@@ -245,6 +251,7 @@ func (e *notPCAPWrapError) Unwrap() error { return e.cause }
 // NewWithLength parses a classic PCAP or PcapNG container from data while
 // recording fileSize as the capture's total byte length ([Capture.FileSize]).
 // Returns [ErrInvalidHeader] if fileSize is smaller than int64(len(data)).
+// See [New] for signature errors.
 func NewWithLength(data []byte, fileSize int64) (*Capture, error) {
 	if fileSize < int64(len(data)) {
 		return nil, fmt.Errorf("%w: input length %d is smaller than buffer length %d", ErrInvalidHeader, fileSize, len(data))
@@ -270,6 +277,13 @@ func NewWithLength(data []byte, fileSize int64) (*Capture, error) {
 		r := SafeReader{data: data, size: int64(len(data))}
 		return parsePCAPNG(&r, fileSize)
 	default:
+		if magic == zstdFrameMagic {
+			return nil, ErrUnsupportedZstd
+		}
+		if magic == xzMagicPrefix && len(data) >= 4+len(xzMagicSuffix) &&
+			string(data[4:4+len(xzMagicSuffix)]) == xzMagicSuffix {
+			return nil, ErrUnsupportedXZ
+		}
 		return nil, errNotPCAPInvalidMagic
 	}
 }
