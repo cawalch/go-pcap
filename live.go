@@ -27,19 +27,12 @@ type LiveDevice struct {
 // LiveDevices lists network interfaces in ascending interface-index order.
 // If the backend cannot determine a supported datalink for an interface, its
 // LinkType is [LinkTypeUnknown] and HasLinkType is false. On macOS, querying
-// datalinks requires access to /dev/bpf. Windows reports its IPv4 socket framing.
+// datalinks requires access to /dev/bpf. Windows reports its IPv4 socket
+// framing. Linux reads each device and its datalink from the same kernel
+// link record.
 func LiveDevices() ([]LiveDevice, error) {
-	ifaces, err := net.Interfaces()
+	devices, err := platformLiveDevices()
 	if err != nil {
-		return nil, err
-	}
-	devices := make([]LiveDevice, 0, len(ifaces))
-	for _, iface := range ifaces {
-		devices = append(devices, LiveDevice{
-			Name: iface.Name, Index: iface.Index, MTU: iface.MTU, Flags: iface.Flags, LinkType: LinkTypeUnknown,
-		})
-	}
-	if err := liveDeviceLinkTypes(devices); err != nil {
 		return nil, err
 	}
 	slices.SortFunc(devices, func(a, b LiveDevice) int { return cmp.Compare(a.Index, b.Index) })

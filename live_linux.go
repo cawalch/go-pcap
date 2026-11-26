@@ -74,9 +74,19 @@ func OpenLive(ifaceName string, opts LiveOptions) (*LiveCapture, error) {
 	if err != nil {
 		return nil, err
 	}
-	iface, err := net.InterfaceByName(ifaceName)
+	links, err := readLinuxLiveLinks()
 	if err != nil {
-		return nil, err
+		return nil, &net.OpError{Op: "route", Net: "ip+net", Err: err}
+	}
+	var iface linuxLiveLink
+	for _, link := range links {
+		if link.device.Name == ifaceName {
+			iface = link
+			break
+		}
+	}
+	if iface.device.Index == 0 {
+		return nil, &net.OpError{Op: "route", Net: "ip+net", Err: errors.New("no such network interface")}
 	}
 
 	// Install the filter and ring before binding makes the socket receive packets.
@@ -91,7 +101,7 @@ func OpenLive(ifaceName string, opts LiveOptions) (*LiveCapture, error) {
 		}
 	}()
 
-	linkType, err := linuxInterfaceLinkType(fd, iface.Name)
+	linkType, err := linuxARPHRDLinkType(iface.hardwareType)
 	if err != nil {
 		return nil, fmt.Errorf("live interface %q: %w", ifaceName, err)
 	}
@@ -100,7 +110,7 @@ func OpenLive(ifaceName string, opts LiveOptions) (*LiveCapture, error) {
 		// Linux packet_mreq contains the interface index, membership type,
 		// address length, and eight address bytes in native byte order.
 		var membership [16]byte
-		binary.NativeEndian.PutUint32(membership[:4], uint32(iface.Index))
+		binary.NativeEndian.PutUint32(membership[:4], uint32(iface.device.Index))
 		binary.NativeEndian.PutUint16(membership[4:6], syscall.PACKET_MR_PROMISC)
 		if err := syscall.SetsockoptString(fd, syscall.SOL_PACKET, syscall.PACKET_ADD_MEMBERSHIP, string(membership[:])); err != nil {
 			return nil, fmt.Errorf("PACKET_ADD_MEMBERSHIP: %w", err)
@@ -143,7 +153,7 @@ func OpenLive(ifaceName string, opts LiveOptions) (*LiveCapture, error) {
 	}
 	addr := &syscall.SockaddrLinklayer{
 		Protocol: htons(syscall.ETH_P_ALL),
-		Ifindex:  iface.Index,
+		Ifindex:  iface.device.Index,
 	}
 	if err := syscall.Bind(fd, addr); err != nil {
 		_ = syscall.Munmap(ring.data)
@@ -162,44 +172,6 @@ func OpenLive(ifaceName string, opts LiveOptions) (*LiveCapture, error) {
 	lc.unmap = runtime.AddCleanup(lc, func(data []byte) { _ = syscall.Munmap(data) }, ring.data)
 	opened = true
 	return lc, nil
-}
-
-func linuxInterfaceLinkType(fd int, name string) (LinkType, error) {
-	// SIOCGIFHWADDR returns sa_family as the ARPHRD type. Reserve space for
-	// the largest Linux ifreq union (24 bytes on 64-bit architectures).
-	var req [syscall.IFNAMSIZ + 24]byte
-	copy(req[:syscall.IFNAMSIZ], name)
-	_, _, errno := syscall.Syscall(syscall.SYS_IOCTL, uintptr(fd), syscall.SIOCGIFHWADDR, uintptr(unsafe.Pointer(&req)))
-	if errno != 0 {
-		return LinkTypeUnknown, fmt.Errorf("SIOCGIFHWADDR: %w", errno)
-	}
-	return linuxARPHRDLinkType(binary.NativeEndian.Uint16(req[syscall.IFNAMSIZ:]))
-}
-
-func linuxARPHRDLinkType(hardwareType uint16) (LinkType, error) {
-	switch hardwareType {
-	case syscall.ARPHRD_ETHER, syscall.ARPHRD_LOOPBACK, syscall.ARPHRD_METRICOM:
-		return LinkTypeEthernet, nil
-	default:
-		return LinkTypeUnknown, fmt.Errorf("%w: ARPHRD type %d", ErrUnsupportedDataLink, hardwareType)
-	}
-}
-
-func liveDeviceLinkTypes(devices []LiveDevice) error {
-	// SIOCGIFHWADDR also works on an unprivileged datagram socket.
-	fd, err := syscall.Socket(syscall.AF_INET, syscall.SOCK_DGRAM|syscall.SOCK_CLOEXEC, 0)
-	if err != nil {
-		return err
-	}
-	defer func() { _ = syscall.Close(fd) }()
-	for i := range devices {
-		linkType, err := linuxInterfaceLinkType(fd, devices[i].Name)
-		if err == nil {
-			devices[i].LinkType = linkType
-			devices[i].HasLinkType = true
-		}
-	}
-	return nil
 }
 
 func linuxRingBlockSize(opts LiveOptions, pageSize int) int {
