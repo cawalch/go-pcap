@@ -56,10 +56,7 @@ func (c *Capture) KeyedQUICFromReaderAt(r io.ReaderAt, extraKeyLog []byte) ([]Ke
 	if r == nil {
 		return nil, fmt.Errorf("%w: nil ReaderAt", ErrInvalidHeader)
 	}
-	if w := fileWindow(r, c.fileSize, c.scanReadAhead()); w != nil {
-		defer w.release()
-		r = w
-	}
+	// Charge reads from both walks directly to the original source.
 	budget := scanReadBudget{r: r, remaining: MaxReaderAtScanBytes}
 	return scanKeyedQUIC(ipFrameSource{capture: c, reader: &budget, needsPayload: quicInitialPayload}, extraKeyLog)
 }

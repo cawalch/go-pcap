@@ -280,6 +280,17 @@ func TestKeyedQUICReaderAtSharedBudget(t *testing.T) {
 	if rows != nil || !errors.Is(err, ErrPacketLimit) || budget.remaining != 0 {
 		t.Fatalf("shared budget = %+v, %v, %d bytes left", rows, err, budget.remaining)
 	}
+
+	direct := measuredReaderAt{Reader: bytes.NewReader(raw)}
+	descriptor := measuredReaderAt{Reader: bytes.NewReader(raw)}
+	want, err := c.KeyedQUICFromReaderAt(&direct, keys)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := c.KeyedQUICFromReaderAt(descriptorReader{&descriptor}, keys)
+	if err != nil || !reflect.DeepEqual(got, want) || descriptor.bytesRead != direct.bytesRead {
+		t.Fatalf("file-backed reads = %d, direct reads = %d, error %v", descriptor.bytesRead, direct.bytesRead, err)
+	}
 }
 
 func FuzzQUICShortTail(f *testing.F) {
