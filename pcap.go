@@ -427,12 +427,15 @@ func (c *Capture) walkPackets(r *SafeReader, fn func(PacketRecord) error) error 
 }
 
 // ipFrameSource visits all decoded IP frames to preserve first-seen flow
-// indices. Selected payloads remain valid after the visitor returns.
+// indices. Selected payloads remain valid after the visitor returns unless
+// borrowUDPPayload is set. It is only for visitors that consume complete
+// unfragmented UDP payloads during the call.
 type ipFrameSource struct {
-	capture      *Capture
-	data         []byte
-	reader       io.ReaderAt
-	needsPayload func(Frame, []byte) bool
+	capture          *Capture
+	data             []byte
+	reader           io.ReaderAt
+	needsPayload     func(Frame, []byte) bool
+	borrowUDPPayload bool
 }
 
 func (s ipFrameSource) walk(visit func(PacketRecord, Frame, []byte) error) error {

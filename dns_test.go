@@ -47,6 +47,25 @@ func buildDNSQueryResponsePacket() []byte {
 	return buf.Bytes()
 }
 
+func TestDNSReaderAtBorrowedPayloadLifetime(t *testing.T) {
+	src, dst := [4]byte{192, 0, 2, 53}, [4]byte{192, 0, 2, 14}
+	first := buildDNSQueryResponsePacket()
+	second := bytes.ReplaceAll(first, []byte("example"), []byte("invalid"))
+	raw := buildClassicPCAP(binary.LittleEndian, true, LinkTypeEthernet, 65535, [][]byte{
+		buildEthernetIPv4UDPFrame(src, dst, 53, 53000, first),
+		buildEthernetIPv4UDPFrame(src, dst, 53, 53000, second),
+	})
+	c, err := New(raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	records := checkReaderParity(t, raw, c.DNS, c.DNSFromReaderAt)
+	if len(records) != 2 || records[0].Message.Answers[0].Target != "edge.example.com" ||
+		records[1].Message.Answers[0].Target != "edge.invalid.com" {
+		t.Fatalf("DNS records = %+v", records)
+	}
+}
+
 func buildEthernetIPv4UDPFrame(srcIP, dstIP [4]byte, srcPort, dstPort uint16, payload []byte) []byte {
 	udpLen := 8 + len(payload)
 	ipTotalLen := 20 + udpLen

@@ -401,7 +401,8 @@ func completeFlowPrefix(f *Frame, prefix []byte, captured int64) (complete bool,
 // DNS transport and UDP fragment reads under [MaxReaderAtScanBytes].
 // See [Capture.UnsupportedLinkTypePackets] for link-type coverage.
 func (c *Capture) DNSFromReaderAt(r io.ReaderAt) ([]DNSRecord, error) {
-	return scanDNS(ipFrameSource{capture: c, reader: r, needsPayload: func(f Frame, _ []byte) bool {
+	// ParseDNS owns the decoded names and never keeps the original bytes.
+	return scanDNS(ipFrameSource{capture: c, reader: r, borrowUDPPayload: true, needsPayload: func(f Frame, _ []byte) bool {
 		return f.mayContainUDPFragment() ||
 			(f.IPProtocol == IPProtoUDP || f.IPProtocol == IPProtoTCP) && (isDNSPort(f.SrcPort) || isDNSPort(f.DstPort))
 	}})
@@ -543,6 +544,9 @@ func (s ipFrameSource) walkReaderAt(visit func(PacketRecord, Frame, []byte) erro
 		// Protocol state can retain these bytes across calls (TCP segments,
 		// IP fragments and QUIC datagrams). Never retain prefix scratch.
 		missing := int64(f.PayloadLength) - int64(len(available))
+		if missing == 0 && s.borrowUDPPayload && f.IPProtocol == IPProtoUDP && !f.Anomalies.IPFragment {
+			return visit(pkt, f, available)
+		}
 		if err := budget.check(missing); err != nil {
 			return err
 		}

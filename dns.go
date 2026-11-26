@@ -559,6 +559,9 @@ func scanDNS(source ipFrameSource) ([]DNSRecord, error) {
 		return nil, err
 	}
 
+	if len(tcp.directions) == 0 {
+		return records, nil
+	}
 	err = tcp.walk(2, 12, 65535, func(dir *tcpMessageDirection, pkt messagePacket, data []byte) error {
 		msg, err := ParseDNS(data)
 		if err != nil {
@@ -573,9 +576,7 @@ func scanDNS(source ipFrameSource) ([]DNSRecord, error) {
 	if err != nil {
 		return nil, err
 	}
-	if len(tcp.directions) > 0 {
-		slices.SortStableFunc(records, func(a, b DNSRecord) int { return cmp.Compare(a.PacketIndex, b.PacketIndex) })
-	}
+	slices.SortStableFunc(records, func(a, b DNSRecord) int { return cmp.Compare(a.PacketIndex, b.PacketIndex) })
 	return records, nil
 }
 
