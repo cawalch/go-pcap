@@ -9,7 +9,7 @@ for pre-v1 releases (`0.y.z` minor bumps may include API additions or changes).
 ## Unreleased
 
 - Report unsupported link-layer packet counts and interface IDs through
-  `Capture.UnsupportedLinkTypePackets`, including for mixed captures.
+  `Capture.UnsupportedLinkTypePackets` and its ReaderAt counterpart.
 
 ## [v0.1.1](https://github.com/cawalch/go-pcap/releases/tag/v0.1.1) - 2026-11-23
 

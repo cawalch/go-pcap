@@ -231,7 +231,8 @@ func TestBorrowedViews(t *testing.T) {
 func TestUnsupportedLinkTypeCoverage(t *testing.T) {
 	// The suite also runs against the original published API.
 	type coverage interface {
-		UnsupportedLinkTypePackets() (int, []uint32)
+		UnsupportedLinkTypePackets([]byte) (int, []uint32, error)
+		UnsupportedLinkTypePacketsFromReaderAt(io.ReaderAt) (int, []uint32, error)
 	}
 	if _, ok := any(new(pcap.Capture)).(coverage); !ok {
 		t.Skip("link-type coverage is unavailable in this module version")
@@ -274,10 +275,19 @@ func TestUnsupportedLinkTypeCoverage(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
+			check := func(label string, count int, ids []uint32, err error) {
+				t.Helper()
+				if err != nil || count != tc.count || !reflect.DeepEqual(ids, tc.ids) {
+					t.Fatalf("%s reports %d unsupported packets on %v, error %v", label, count, ids, err)
+				}
+			}
+			count, ids, err := any(a).(coverage).UnsupportedLinkTypePackets(raw)
+			check("slice", count, ids, err)
+			count, ids, err = any(b).(coverage).UnsupportedLinkTypePacketsFromReaderAt(bytes.NewReader(raw))
+			check("ReaderAt", count, ids, err)
 			for _, c := range []*pcap.Capture{a, b} {
-				count, ids := any(c).(coverage).UnsupportedLinkTypePackets()
-				if c.PacketCount != len(tc.packets) || !c.Anomalies().UnknownLinkType || count != tc.count || !reflect.DeepEqual(ids, tc.ids) {
-					t.Fatalf("capture has %d packets, anomalies %+v, unsupported %d on %v", c.PacketCount, c.Anomalies(), count, ids)
+				if c.PacketCount != len(tc.packets) || !c.Anomalies().UnknownLinkType {
+					t.Fatalf("capture has %d packets and anomalies %+v", c.PacketCount, c.Anomalies())
 				}
 			}
 		})

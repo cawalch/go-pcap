@@ -228,6 +228,17 @@ func (c *Capture) PacketPayloadFromReaderAt(r io.ReaderAt, pkt PacketRecord) ([]
 	return buf, nil
 }
 
+// UnsupportedLinkTypePacketsFromReaderAt reports the same coverage as
+// [Capture.UnsupportedLinkTypePackets] using the unchanged reader. PcapNG
+// metadata reads share [MaxReaderAtScanBytes].
+func (c *Capture) UnsupportedLinkTypePacketsFromReaderAt(r io.ReaderAt) (count int, interfaceIDs []uint32, err error) {
+	if r == nil {
+		return 0, nil, ErrInvalidHeader
+	}
+	budget := scanReadBudget{r: r, remaining: MaxReaderAtScanBytes}
+	return c.unsupportedLinkTypePackets(c.PacketSeqFromReaderAt(&budget))
+}
+
 // FlowsFromReaderAt aggregates deterministic 5-tuple flows from an [io.ReaderAt]
 // using a 256-byte prefix for common transport headers. When the prefix is
 // insufficient it extends the read up to the IP datagram boundary. Container
@@ -752,8 +763,6 @@ func parsePCAPNGFromReaderAt(r io.ReaderAt, size int64) (*Capture, error) {
 		fileSize:       size,
 		declaredExtent: meta.declaredExtent,
 		anomalies:      meta.anomalies,
-
-		unsupportedLinkTypePackets: meta.unsupportedLinkTypePackets,
 	}, nil
 }
 
@@ -762,7 +771,7 @@ func scanPCAPNGReaderAt(r io.ReaderAt, size int64, cb func(PacketRecord) error, 
 		return scanSummary{}, fmt.Errorf("%w: PcapNG section header block shorter than %d bytes", ErrInvalidHeader, pcapngSHBMinSize)
 	}
 
-	summary := scanSummary{trackUnsupportedLinkTypes: cb == nil && rawBlock == nil}
+	var summary scanSummary
 	var scratch []byte
 	var totalSecretBytes int64
 	order := binary.ByteOrder(binary.LittleEndian)

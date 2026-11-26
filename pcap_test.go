@@ -307,7 +307,10 @@ func ExampleCapture_UnsupportedLinkTypePackets() {
 	if err != nil {
 		panic(err)
 	}
-	count, interfaces := capture.UnsupportedLinkTypePackets()
+	count, interfaces, err := capture.UnsupportedLinkTypePackets(buf.Bytes())
+	if err != nil {
+		panic(err)
+	}
 	fmt.Printf("%d of %d packets have unsupported link types on interfaces %v\n", count, capture.PacketCount, interfaces)
 	// Output:
 	// 1 of 1 packets have unsupported link types on interfaces [0]
