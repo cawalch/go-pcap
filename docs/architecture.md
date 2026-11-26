@@ -45,9 +45,10 @@ allocations and elapsed time on the same inputs. [Benchmark guide](../CONTRIBUTI
 
 ### Protocol and integration proposals
 
-New protocol fields need a caller and bounded parsing costs. HTTP/3 depends on
-QUIC 1-RTT stream reconstruction. Scanner schemas and rule evaluation belong in
-the consuming repository. [HTTP/3 proposal](https://github.com/cawalch/go-pcap/issues/31) · [go-yara integration](https://github.com/cawalch/go-yara/issues/646)
+New protocol fields need a caller and bounded parsing costs. HTTP/3 framing
+uses directional QUIC 1-RTT streams from a connection the caller has identified
+as HTTP/3. Scanner schemas and rule evaluation belong in the consuming
+repository. [HTTP/3 framing](parsing.md#delimit-http3-frames) · [go-yara integration](https://github.com/cawalch/go-yara/issues/646)
 
 ## Where to make a change
 
