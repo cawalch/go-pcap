@@ -863,6 +863,37 @@ ranges. Exceeding a limit returns `ErrQUICLimit` with no streams.
 Run `go test -run '^ExampleReassembleQUIC1RTTStreams$' .` to check the
 [out-of-order packet example](../quic_stream_test.go).
 
+### Associate keyed QUIC packets with capture connections
+
+Use `capture.KeyedQUIC(data, extraKeyLog)` or
+`capture.KeyedQUICFromReaderAt(reader, extraKeyLog)` on a capture that includes
+the client and server Initials. Provide NSS key-log bytes, or pass `nil` to
+use a PcapNG TLS Decryption Secrets Block. The scan uses the ClientHello
+random to select the keys, the ServerHello to select the cipher suite, and
+Initial source connection IDs to identify candidate destinations.
+
+Each result keeps the Initial exchange's flow index and lists authenticated
+packets in capture order by sender. The zero-based packet index identifies the
+UDP datagram. The UDP offset locates the short header after any coalesced
+long headers. Take the `Payload` fields from one sender when calling
+`ReassembleQUIC1RTTStreams`.
+
+Association covers complete UDP datagrams for QUIC v1/v2 with the decoder's
+initial AES-GCM traffic keys and the observed Initial IDs. Nonempty IDs can
+follow a client port change on the same IP pair and server port. An empty ID
+requires the original tuple. Packets that cannot authenticate uniquely are
+skipped. This includes packets using a rotated connection ID or a later key
+generation, and packets outside the available packet number window.
+
+ReaderAt metadata and payload reads share the same 64 MiB budget across both
+passes. The scan limits authentication to 16,384 attempts and 64 MiB of
+attempted packet bytes. It retains up to 16 MiB of plaintext across all
+results and uses the stream reassembly packet and byte limits per direction.
+A limit or read error discards the result.
+[Connection ID handling](https://www.rfc-editor.org/rfc/rfc9000.html#section-5.1) ·
+[Coalescing](https://www.rfc-editor.org/rfc/rfc9000.html#section-12.2) ·
+[Runnable example](../keyed_quic_test.go)
+
 ## Decrypt TLS 1.2 and TLS 1.3 streams offline
 
 Call `capture.DecryptedTLSStreams(data, extraKeyLog)` to decrypt TLS 1.2
