@@ -130,6 +130,58 @@ func TestKeyedQUICCaptureAssociation(t *testing.T) {
 	}
 }
 
+func TestKeyedQUICFragmentInterfaceScope(t *testing.T) {
+	fixture, keys := keyedQUICFixture(t, 1)
+	frames := keyedQUICFrames(t, fixture)
+	// The fixture starts with a client Initial in a raw IPv4 packet.
+	first := frames[0]
+	src, dst := [4]byte(first[12:16]), [4]byte(first[16:20])
+	udp := first[20:]
+	fragments := [][]byte{
+		buildEthernetIPv4FragmentFrame(src, dst, IPProtoUDP, 1, 0, true, udp[:16])[14:],
+		buildEthernetIPv4FragmentFrame(src, dst, IPProtoUDP, 1, 16, false, udp[16:])[14:],
+	}
+
+	var buf bytes.Buffer
+	opts := PCAPNGWriterOptions{LinkType: LinkTypeRaw}
+	w, err := NewPCAPNGWriter(&buf, opts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, err := w.AddInterface(opts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for i, frame := range slices.Concat(fragments, frames[1:]) {
+		var pkt PacketRecord
+		if i == 1 {
+			pkt.InterfaceID = second
+		}
+		if err := w.WritePacket(pkt, frame); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	raw := buf.Bytes()
+	c, err := New(raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, separate := range []bool{false, true} {
+		c.SeparateIPFragmentInterfaces = separate
+		rows := checkReaderParity(t, raw,
+			func(data []byte) ([]KeyedQUICRecord, error) { return c.KeyedQUIC(data, keys) },
+			func(r io.ReaderAt) ([]KeyedQUICRecord, error) { return c.KeyedQUICFromReaderAt(r, keys) })
+		if separate {
+			if len(rows) != 0 {
+				t.Fatalf("separate interfaces: got %d keyed connections, want none", len(rows))
+			}
+		} else if len(rows) != 1 || len(rows[0].Client) != 3 || len(rows[0].Server) != 2 {
+			t.Fatalf("combined interfaces: keyed connections = %+v, want one complete connection", rows)
+		}
+	}
+}
+
 func TestKeyedQUICRebindingAndTupleReuse(t *testing.T) {
 	raw1, keys1 := keyedQUICFixture(t, 1)
 	raw2, keys2 := keyedQUICFixture(t, 2)

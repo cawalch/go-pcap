@@ -225,11 +225,12 @@ func shortFragmentHeader(proto uint8, payload []byte) bool {
 }
 
 type ipFragKey struct {
-	srcAddr  netip.Addr
-	dstAddr  netip.Addr
-	ipID     uint32
-	version  uint8
-	protocol uint8
+	srcAddr     netip.Addr
+	dstAddr     netip.Addr
+	ipID        uint32
+	interfaceID uint32
+	version     uint8
+	protocol    uint8
 }
 
 type ipFragGroup struct {
@@ -244,9 +245,10 @@ type ipFragGroup struct {
 }
 
 type ipFragAccumulator struct {
-	groups map[ipFragKey]*ipFragGroup
-	head   *ipFragGroup
-	tail   *ipFragGroup
+	groups             map[ipFragKey]*ipFragGroup
+	head               *ipFragGroup
+	tail               *ipFragGroup
+	separateInterfaces bool
 }
 
 func (a *ipFragAccumulator) pushBack(g *ipFragGroup) {
@@ -276,7 +278,7 @@ func (a *ipFragAccumulator) removeGroup(g *ipFragGroup) {
 	delete(a.groups, g.key)
 }
 
-func (a *ipFragAccumulator) addUDPFragment(frame *Frame, fragBytes []byte) (udpPayload []byte, srcPort, dstPort uint16, ok bool) {
+func (a *ipFragAccumulator) addUDPFragment(frame *Frame, fragBytes []byte, interfaceID uint32) (udpPayload []byte, srcPort, dstPort uint16, ok bool) {
 	if frame.PayloadLength == 0 && frame.IPVersion != 6 {
 		return nil, 0, 0, false
 	}
@@ -289,6 +291,9 @@ func (a *ipFragAccumulator) addUDPFragment(frame *Frame, fragBytes []byte) (udpP
 		ipID:     frame.IPID,
 		version:  frame.IPVersion,
 		protocol: frame.IPProtocol,
+	}
+	if a.separateInterfaces {
+		key.interfaceID = interfaceID
 	}
 	// IPv6 uses the next header from fragment zero. Later fragments can
 	// carry a different value and still belong to the same datagram.

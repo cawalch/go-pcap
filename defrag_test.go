@@ -6,6 +6,7 @@ import (
 	"errors"
 	"net/netip"
 	"os"
+	"slices"
 	"testing"
 )
 
@@ -28,6 +29,22 @@ func buildEthernetIPv4FragmentFrame(srcIP, dstIP [4]byte, proto uint8, ipID uint
 	copy(ip[16:20], dstIP[:])
 	copy(buf[34:], l4Frag)
 	return buf
+}
+
+func buildEthernetIPv6UDPFragmentFrame(id, off uint16, more bool, data []byte) []byte {
+	wire := make([]byte, 62+len(data))
+	binary.BigEndian.PutUint16(wire[12:], EtherTypeIPv6)
+	wire[14], wire[20], wire[21] = 0x60, IPProtoIPv6Frag, 64
+	wire[37], wire[53] = 1, 2
+	binary.BigEndian.PutUint16(wire[18:], uint16(8+len(data)))
+	wire[54] = IPProtoUDP
+	if more {
+		off |= 1
+	}
+	binary.BigEndian.PutUint16(wire[56:], off)
+	binary.BigEndian.PutUint32(wire[58:], uint32(id))
+	copy(wire[62:], data)
+	return wire
 }
 
 func TestDefragmentIPOutOfOrderAndOverlap(t *testing.T) {
@@ -108,7 +125,7 @@ func TestDefragmentIPOutOfOrderAndOverlap(t *testing.T) {
 
 	// ipFragAccumulator must sustain turnover at MaxFragmentGroups capacity (incomplete groups)
 	// and evict completed groups so reused IPIDs succeed.
-	var acc ipFragAccumulator
+	acc := ipFragAccumulator{separateInterfaces: true}
 	udp := make([]byte, 16)
 	binary.BigEndian.PutUint16(udp[0:2], 53)
 	binary.BigEndian.PutUint16(udp[2:4], 12345)
@@ -117,7 +134,7 @@ func TestDefragmentIPOutOfOrderAndOverlap(t *testing.T) {
 	// Fill to capacity with incomplete groups, then churn past capacity.
 	for i := range MaxFragmentGroups * 2 {
 		f1 := Frame{IPVersion: 4, IPProtocol: IPProtoUDP, SrcAddr: src, DstAddr: dst, IPID: uint32(10000 + i), IPFragOffset: 0, IPMoreFragments: true, PayloadLength: 8}
-		if _, _, _, ok := acc.addUDPFragment(&f1, udp[:8]); ok {
+		if _, _, _, ok := acc.addUDPFragment(&f1, udp[:8], uint32(i%2)); ok {
 			t.Fatalf("incomplete iter %d unexpectedly completed", i)
 		}
 		if len(acc.groups) > MaxFragmentGroups {
@@ -129,10 +146,10 @@ func TestDefragmentIPOutOfOrderAndOverlap(t *testing.T) {
 		ipID := uint32(i % 64)
 		f1 := Frame{IPVersion: 4, IPProtocol: IPProtoUDP, SrcAddr: src, DstAddr: dst, IPID: ipID, IPFragOffset: 0, IPMoreFragments: true, PayloadLength: 8}
 		f2 := Frame{IPVersion: 4, IPProtocol: IPProtoUDP, SrcAddr: src, DstAddr: dst, IPID: ipID, IPFragOffset: 8, IPMoreFragments: false, PayloadLength: 8}
-		if _, _, _, ok := acc.addUDPFragment(&f1, udp[:8]); ok {
+		if _, _, _, ok := acc.addUDPFragment(&f1, udp[:8], uint32(i%2)); ok {
 			t.Fatalf("iter %d: first fragment unexpectedly completed", i)
 		}
-		payload, sp, dp, ok := acc.addUDPFragment(&f2, udp[8:])
+		payload, sp, dp, ok := acc.addUDPFragment(&f2, udp[8:], uint32(i%2))
 		if !ok || sp != 53 || dp != 12345 || string(payload) != "12345678" {
 			t.Fatalf("iter %d: addUDPFragment = (%q, %d, %d, %v)", i, payload, sp, dp, ok)
 		}
@@ -264,6 +281,113 @@ func TestUDPFragmentRecordFlowIndices(t *testing.T) {
 	}
 }
 
+func TestUDPFragmentInterfaceScope(t *testing.T) {
+	client, server := [4]byte{192, 0, 2, 1}, [4]byte{192, 0, 2, 2}
+	hosts := [2]string{"c2.example.com", "c2.invalid.com"}
+	for _, version := range []struct {
+		name  string
+		frame func(id, off uint16, more bool, data []byte) []byte
+	}{
+		{"IPv4", func(id, off uint16, more bool, data []byte) []byte {
+			return buildEthernetIPv4FragmentFrame(client, server, IPProtoUDP, id, off, more, data)
+		}},
+		{"IPv6", buildEthernetIPv6UDPFragmentFrame},
+	} {
+		t.Run(version.name, func(t *testing.T) {
+			type datagram struct {
+				first, last []byte
+			}
+			var dns, quic [2]datagram
+			for i, host := range hosts {
+				dnsMsg := buildDNSQueryResponsePacket()
+				if i == 1 {
+					dnsMsg = bytes.ReplaceAll(dnsMsg, []byte("example"), []byte("invalid"))
+				}
+				hello := buildTLS13ClientHelloRecord(host, "h3")[5:]
+				initial := buildEncryptedQUICInitialDatagram(t, QUICVersion1, []byte{byte(i + 1)}, []byte{byte(i + 3)}, nil, 1, 0, hello)
+				for _, packet := range []struct {
+					out     *datagram
+					id, dst uint16
+					payload []byte
+				}{{&dns[i], 1, 53, dnsMsg}, {&quic[i], 2, 443, initial}} {
+					udp := buildEthernetIPv4UDPFrame(client, server, uint16(53000+i), packet.dst, packet.payload)[34:]
+					packet.out.first = version.frame(packet.id, 0, true, udp[:16])
+					packet.out.last = version.frame(packet.id, 16, false, udp[16:])
+				}
+			}
+
+			for _, tc := range []struct {
+				name        string
+				first, last []uint32
+				separate    bool
+				want        []string
+			}{
+				{"interface zero alone", []uint32{0}, []uint32{0}, true, hosts[:1]},
+				{"interface one alone", []uint32{1}, []uint32{1}, true, hosts[1:]},
+				{"independent interfaces", []uint32{0, 1}, []uint32{0, 1}, true, hosts[:]},
+				{"shared observations", []uint32{0}, []uint32{1}, false, hosts[:1]},
+				{"separate observations", []uint32{0}, []uint32{1}, true, nil},
+			} {
+				t.Run(tc.name, func(t *testing.T) {
+					var buf bytes.Buffer
+					opts := PCAPNGWriterOptions{LinkType: LinkTypeEthernet}
+					w, err := NewPCAPNGWriter(&buf, opts)
+					if err != nil {
+						t.Fatal(err)
+					}
+					if _, err := w.AddInterface(opts); err != nil {
+						t.Fatal(err)
+					}
+					for _, iface := range tc.first {
+						for _, frame := range [][]byte{dns[iface].first, quic[iface].first} {
+							if err := w.WritePacket(PacketRecord{InterfaceID: iface}, frame); err != nil {
+								t.Fatal(err)
+							}
+						}
+					}
+					for i, iface := range tc.last {
+						for _, frame := range [][]byte{dns[tc.first[i]].last, quic[tc.first[i]].last} {
+							if err := w.WritePacket(PacketRecord{InterfaceID: iface}, frame); err != nil {
+								t.Fatal(err)
+							}
+						}
+					}
+
+					raw := buf.Bytes()
+					c, err := New(raw)
+					if err != nil {
+						t.Fatal(err)
+					}
+					c.SeparateIPFragmentInterfaces = tc.separate
+					flows := checkReaderParity(t, raw, c.Flows, c.FlowsFromReaderAt)
+					dnsRows := checkReaderParity(t, raw, c.DNS, c.DNSFromReaderAt)
+					quicRows := checkReaderParity(t, raw, c.QUIC, c.QUICFromReaderAt)
+					if len(flows) != 1 || len(dnsRows) != len(tc.want) || len(quicRows) != len(tc.want) {
+						t.Fatalf("flows=%d, DNS=%d, QUIC=%d, want 1 flow and %d DNS and QUIC records",
+							len(flows), len(dnsRows), len(quicRows), len(tc.want))
+					}
+					for i, host := range tc.want {
+						dr, qr := dnsRows[i], quicRows[i]
+						port := uint16(53000 + tc.first[i])
+						if dr.FlowIndex != 0 || dr.SrcPort != port || dr.Message.Questions[0].Name != host {
+							t.Errorf("DNS row %d = %+v, want flow 0 and %s on port %d", i, dr, host, port)
+						}
+						if qr.FlowIndex != 0 || qr.SrcPort != port || qr.Handshake.ClientHello.SNI != host {
+							t.Errorf("QUIC row %d = %+v, want flow 0 and %s on port %d", i, qr, host, port)
+						}
+					}
+					for _, host := range hosts {
+						found, err := c.HasDNSQuery(raw, host)
+						if err != nil || found != slices.Contains(tc.want, host) {
+							t.Errorf("HasDNSQuery(%q) = %v, %v", host, found, err)
+						}
+					}
+				})
+			}
+		})
+	}
+}
+
 func TestIPv6FragmentPolicy(t *testing.T) {
 	for _, kind := range []string{"dns", "quic"} {
 		var payload []byte
@@ -284,19 +408,7 @@ func TestIPv6FragmentPolicy(t *testing.T) {
 		binary.BigEndian.PutUint16(udp[4:], uint16(len(udp)))
 		copy(udp[8:], payload)
 		frame := func(off uint16, more bool, data []byte) []byte {
-			wire := make([]byte, 62+len(data))
-			binary.BigEndian.PutUint16(wire[12:], EtherTypeIPv6)
-			wire[14], wire[20], wire[21] = 0x60, IPProtoIPv6Frag, 64
-			wire[37], wire[53] = 1, 2
-			binary.BigEndian.PutUint16(wire[18:], uint16(8+len(data)))
-			wire[54] = IPProtoUDP
-			if more {
-				off |= 1
-			}
-			binary.BigEndian.PutUint16(wire[56:], off)
-			binary.BigEndian.PutUint32(wire[58:], 7)
-			copy(wire[62:], data)
-			return wire
+			return buildEthernetIPv6UDPFragmentFrame(7, off, more, data)
 		}
 		tiny, err := DecodeFrame(frame(0, true, udp[:4]), LinkTypeEthernet)
 		if err != nil || !tiny.Anomalies.TruncatedLayer {

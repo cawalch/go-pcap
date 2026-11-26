@@ -617,6 +617,13 @@ fragmented UDP messages, the record uses the fragment flow index and the
 reassembled UDP ports. The packet index and timestamp identify the fragment
 that completed the message.
 
+If PcapNG interfaces observe independent networks, set
+`capture.SeparateIPFragmentInterfaces = true` before calling `DNS`,
+`DNSFromReaderAt`, or `HasDNSQuery`. The setting also applies to IP fragment
+grouping for QUIC Initial scans, including those used by `KeyedQUIC`.
+By default a datagram can be assembled from fragments captured on different
+interfaces. Both settings use the same flow indices and scan-wide fragment limit.
+
 [DNS over TCP (RFC 7766)](https://www.rfc-editor.org/rfc/rfc7766)
 
 ### Diagnose DNS transactions
