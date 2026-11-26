@@ -167,7 +167,7 @@ func (c *Capture) extractFlowPCAPNG(source flowExportSource, w io.Writer, flowIn
 			return observe(&pkt, &frame, payload)
 		})
 	} else {
-		err = c.walkFlowPrefixes(source.budget, func(pkt PacketRecord, frame Frame, prefix []byte) error {
+		err = c.walkFlowPrefixes(source.budget, false, func(pkt PacketRecord, frame Frame, prefix []byte) error {
 			return observe(&pkt, &frame, prefix)
 		})
 	}

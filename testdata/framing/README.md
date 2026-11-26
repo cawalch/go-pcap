@@ -82,3 +82,22 @@ tshark -n -r pppoe-nflog.pcapng -T fields -e frame.number -e frame.protocols \
 | --- | --- | --- |
 | 1 | `pppoes:ppp:ip:tcp` | 50100 → 443 |
 | 2 | `nflog:ip:tcp` | 50101 → 443 |
+
+## IP-in-IP
+
+`ipip.hex` contains synthetic Ethernet TCP SYNs with documentation addresses.
+Generate the fixture with Wireshark tools 4.6.10 (commit `eac916f07299`).
+
+```sh
+fixture_tmp=$(mktemp -d)
+TZ=UTC text2pcap -q -t ISO -l 1 ipip.hex "$fixture_tmp/ipip.pcapng"
+editcap --discard-capture-comment "$fixture_tmp/ipip.pcapng" ipip.pcapng
+tshark -n -r ipip.pcapng -T fields -e frame.number -e frame.protocols \
+  -e tcp.srcport -e tcp.dstport
+```
+
+| Frame | TShark protocols | Inner TCP ports |
+| --- | --- | --- |
+| 1 | `eth:ethertype:ip:ip:tcp` | 40000 → 8080 |
+| 2 | `eth:ethertype:ip:ipv6:tcp` | 41000 → 8443 |
+| 3 | `eth:ethertype:ipv6:ipv6:tcp` | 41000 → 8443 |

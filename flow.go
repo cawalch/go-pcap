@@ -145,7 +145,7 @@ func (c *Capture) Flows(data []byte) ([]FlowSummary, error) {
 		if err != nil {
 			return err
 		}
-		frame, err := DecodeFrame(payload, pkt.LinkType)
+		frame, err := decodeFrame(payload, pkt.LinkType, true)
 		if err != nil || frame.IPVersion == 0 {
 			return nil
 		}

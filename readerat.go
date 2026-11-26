@@ -276,7 +276,7 @@ func (c *Capture) FlowsFromReaderAt(r io.ReaderAt) ([]FlowSummary, error) {
 		if err := readExactAt(&budget, payload, pkt.PayloadOffset, c.fileSize); err != nil {
 			return err
 		}
-		frame, err := DecodeFrame(payload, pkt.LinkType)
+		frame, err := decodeFrame(payload, pkt.LinkType, true)
 		if err != nil {
 			return nil
 		}
@@ -302,7 +302,7 @@ func (c *Capture) FlowsFromReaderAt(r io.ReaderAt) ([]FlowSummary, error) {
 func (c *Capture) flowsFromRadiotapReader(r io.ReaderAt) ([]FlowSummary, error) {
 	budget := scanReadBudget{r: r, remaining: MaxReaderAtScanBytes}
 	acc := flowAccumulator{separateInterfaces: c.SeparateTCPInterfaces && len(c.Interfaces) > 1}
-	err := c.walkFlowPrefixes(&budget, func(pkt PacketRecord, f Frame, prefix []byte) error {
+	err := c.walkFlowPrefixes(&budget, true, func(pkt PacketRecord, f Frame, prefix []byte) error {
 		return acc.observe(&pkt, &f, prefix)
 	})
 	if err != nil {
@@ -450,7 +450,7 @@ func extendFramePrefix(budget *scanReadBudget, size int64, pkt PacketRecord, f *
 			if err != nil {
 				return nil, err
 			}
-			*f, _ = DecodeFrame(full, pkt.LinkType)
+			*f, _ = decodeFrame(full, pkt.LinkType, f.keepIPIPOuter)
 			return full, nil
 		}
 		complete, required := completeFlowPrefix(f, data, pkt.PayloadLength)
@@ -488,7 +488,7 @@ func extendFramePrefix(budget *scanReadBudget, size int64, pkt PacketRecord, f *
 		}
 		// DecodeFrame has already accepted this link header. Extending its
 		// backing data cannot shorten the header or change its link type.
-		*f, _ = DecodeFrame(data, pkt.LinkType)
+		*f, _ = decodeFrame(data, pkt.LinkType, f.keepIPIPOuter)
 		if next == limit {
 			return data, nil
 		}
@@ -524,7 +524,7 @@ func (s ipFrameSource) walkReaderAt(visit func(PacketRecord, Frame, []byte) erro
 		s.reader = w
 	}
 	budget := scanReadBudget{r: s.reader, remaining: MaxReaderAtScanBytes}
-	return s.capture.walkFlowPrefixes(&budget, func(pkt PacketRecord, f Frame, data []byte) error {
+	return s.capture.walkFlowPrefixes(&budget, false, func(pkt PacketRecord, f Frame, data []byte) error {
 		start, end := int64(f.PayloadOffset), int64(f.PayloadOffset)+int64(f.PayloadLength)
 		available := data[start:min(end, int64(len(data)))]
 		if f.PayloadLength == 0 || !s.needsPayload(f, available) {
@@ -547,7 +547,7 @@ func (s ipFrameSource) walkReaderAt(visit func(PacketRecord, Frame, []byte) erro
 
 // walkFlowPrefixes supplies borrowed frame bytes through the transport header.
 // The prefix can be shorter than the frame's declared payload.
-func (c *Capture) walkFlowPrefixes(budget *scanReadBudget, visit func(PacketRecord, Frame, []byte) error) error {
+func (c *Capture) walkFlowPrefixes(budget *scanReadBudget, keepIPIPOuter bool, visit func(PacketRecord, Frame, []byte) error) error {
 	var header [256]byte
 	var scratch []byte
 	return c.walkPacketsFromReaderAt(budget, false, func(pkt PacketRecord) error {
@@ -559,11 +559,12 @@ func (c *Capture) walkFlowPrefixes(budget *scanReadBudget, visit func(PacketReco
 		if err := readExactAt(budget, data, pkt.PayloadOffset, c.fileSize); err != nil {
 			return err
 		}
-		f, err := DecodeFrame(data, pkt.LinkType)
+		f, err := decodeFrame(data, pkt.LinkType, keepIPIPOuter)
 		if err != nil {
 			if pkt.LinkType != LinkTypeIEEE80211RadioTap {
 				return nil
 			}
+			f.keepIPIPOuter = keepIPIPOuter
 			data, err = extendRadiotapPrefix(budget, c.fileSize, &pkt, &f, data, &scratch)
 			if err != nil {
 				return err
@@ -606,7 +607,7 @@ func extendRadiotapPrefix(budget *scanReadBudget, size int64, pkt *PacketRecord,
 	if err := readExactAt(budget, result[n:], pkt.PayloadOffset+n, size); err != nil {
 		return nil, err
 	}
-	*f, _ = DecodeFrame(result, pkt.LinkType)
+	*f, _ = decodeFrame(result, pkt.LinkType, f.keepIPIPOuter)
 	return result, nil
 }
 

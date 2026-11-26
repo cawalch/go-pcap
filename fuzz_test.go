@@ -80,6 +80,7 @@ func FuzzDecodeFrame(f *testing.F) {
 	frame := buildEthernetIPv4TCPFrame([4]byte{10, 0, 0, 1}, [4]byte{10, 0, 0, 2}, 12345, 443, 1, 1, TCPFlagSYN, []byte("payload"))
 	f.Add(frame, uint16(LinkTypeEthernet))
 	f.Add(frame[14:], uint16(LinkTypeRaw))
+	f.Add(ipipIPv4(IPProtoIPv4Encap, frame[14:]), uint16(LinkTypeRaw))
 	f.Add(pktapFrame(156, 1, frame), uint16(LinkTypeApplePktap))
 	f.Add(append([]byte{0xff, 0x03, 0x00, 0x21}, frame[14:]...), uint16(LinkTypePPP))
 	pflog := make([]byte, 48)

@@ -252,6 +252,10 @@ without heap allocations:
   `PPPoE` Session (`0x8864` over IPv4 or IPv6), `GRE` (`IPProto 47` over IPv4,
   IPv6, or Transparent Ethernet Bridging), `VXLAN` (`UDP 4789`), and `Geneve`
   (`UDP 6081`).
+- `DecodeFrame` follows IP-in-IP (IP protocols 4 and 41) within the enclosing
+  datagram length and `MaxFrameLayers`. Each `LayerIPIP` marks the encapsulated
+  IP header. `Flows` and `FlowsFromReaderAt` key IP-in-IP packets by the
+  enclosing IP addresses and protocol and preserve their Community ID behavior.
 - Supported network headers: `IPv4` (with fragment detection), `IPv6` (with
   bounded extension-header traversal for Hop-by-Hop, Routing, Fragment,
   Destination Options, and Authentication headers), and `ARP`.

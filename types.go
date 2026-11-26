@@ -147,6 +147,7 @@ const (
 const (
 	IPProtoHopByHop  uint8 = 0
 	IPProtoICMP      uint8 = 1
+	IPProtoIPv4Encap uint8 = 4 // IPv4 encapsulation
 	IPProtoTCP       uint8 = 6
 	IPProtoUDP       uint8 = 17
 	IPProtoIPv6      uint8 = 41
@@ -205,6 +206,7 @@ const (
 	LayerPPP
 	LayerPFLOG
 	LayerNFLOG
+	LayerIPIP
 )
 
 // String returns the lowercase layer identifier.
@@ -260,6 +262,8 @@ func (p LayerProto) String() string {
 		return "pflog"
 	case LayerNFLOG:
 		return "nflog"
+	case LayerIPIP:
+		return "ipip"
 	case LayerApplePktap:
 		return "apple_pktap"
 	case LayerIKEv2:
