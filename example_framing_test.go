@@ -36,3 +36,12 @@ func ExampleVerifyUDPChecksum() {
 	// Output:
 	// true false
 }
+
+func ExampleClassifyL7() {
+	payload := []byte("GET /health HTTP/1.1\r\nHost: service.example\r\n\r\n")
+	if pcap.ClassifyL7(payload, pcap.IPProtoTCP, 50321, 8081) == pcap.L7HTTP1 {
+		fmt.Println("HTTP/1 candidate")
+	}
+	// Output:
+	// HTTP/1 candidate
+}

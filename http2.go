@@ -10,8 +10,10 @@ import (
 	"strings"
 )
 
+const http2ClientPreface = "PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n"
+
 // HTTP2ClientPreface is the 24-byte RFC 9113 §3.4 HTTP/2 client connection preface.
-var HTTP2ClientPreface = []byte("PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n")
+var HTTP2ClientPreface = []byte(http2ClientPreface)
 
 // HTTP/2 frame type codes (RFC 9113 §6).
 const (

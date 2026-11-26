@@ -162,6 +162,23 @@ const (
 	IPProtoSCTP      uint8 = 132
 )
 
+// L7Protocol identifies a candidate application protocol reported by [ClassifyL7].
+type L7Protocol uint8
+
+const (
+	L7Unknown L7Protocol = iota
+	L7DNS
+	L7TLS
+	L7QUIC
+	L7HTTP1
+	L7HTTP2
+	L7SSH
+	L7SMB2
+	L7SMB3Encrypted
+	L7RDP
+	L7KRB5
+)
+
 // TCP control flags.
 const (
 	TCPFlagFIN uint8 = 0x01

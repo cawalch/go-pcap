@@ -528,6 +528,22 @@ Set the same field on a capture from `NewFromReaderAt` before calling
 `HTTPRequestsFromReaderAt` to get packet-attributed requests. Look up each
 observation's `PacketIndex` in the packet records to identify its interface.
 
+### Identify an application protocol from a prefix
+
+Pass the start of one directional TCP stream or one UDP payload to
+`ClassifyL7(payload, ipProto, srcPort, dstPort)` to choose a decoder to try.
+It recognizes TCP signatures for HTTP/1, the HTTP/2 client preface, an SSH
+identification line, TLS ClientHello or ServerHello, session-framed SMB2 or
+encrypted SMB3, and RDP connection negotiation. On UDP it recognizes QUIC v1
+and v2 long headers with the fixed bit set.
+
+DNS uses port 53 on TCP and ports 53, 5353, or 5355 on UDP, with enough bytes
+for the header. Kerberos uses port 88 and a recognized application tag. Both
+check the record length field on TCP. The classifier tries the other protocol
+signatures before using these port hints. A result is a candidate for further
+parsing. `L7Unknown` can also mean the identifying bytes are incomplete or the
+capture starts after the protocol opening.
+
 ## Parse DNS messages and tunneling metrics
 
 Call `ParseDNS(payload)` on a single DNS message or `capture.DNS(data)` to

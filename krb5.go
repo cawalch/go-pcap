@@ -10,6 +10,8 @@ import (
 	"slices"
 )
 
+const krb5Port = 88
+
 // KRB5Message contains metadata parsed from a Kerberos v5 AS-REQ, AS-REP,
 // TGS-REQ, TGS-REP, or KRB-ERROR message (RFC 4120).
 type KRB5Message struct {
@@ -367,7 +369,7 @@ func (c *Capture) Kerberos(data []byte) ([]KRB5Record, error) {
 		if err != nil {
 			return err
 		}
-		if frame.SrcPort != 88 && frame.DstPort != 88 {
+		if frame.SrcPort != krb5Port && frame.DstPort != krb5Port {
 			return nil
 		}
 		if frame.IPProtocol == IPProtoTCP {
