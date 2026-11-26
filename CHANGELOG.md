@@ -10,6 +10,8 @@ for pre-v1 releases (`0.y.z` minor bumps may include API additions or changes).
 
 - Report unsupported link-layer packet counts and interface IDs through
   `Capture.UnsupportedLinkTypePackets` and its ReaderAt counterpart.
+- Decrypt supported TLS 1.2 AES-CBC suites from `CLIENT_RANDOM` key-log secrets,
+  including both MAC-then-encrypt and encrypt-then-MAC records.
 
 ## [v0.1.1](https://github.com/cawalch/go-pcap/releases/tag/v0.1.1) - 2026-11-23
 
