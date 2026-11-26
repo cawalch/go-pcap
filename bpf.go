@@ -102,7 +102,14 @@ func CompileBPFFilter(expression string, linkType LinkType) ([]BPFInstruction, e
 	prefix := fields[:len(fields)-1]
 	switch {
 	case slices.Equal(prefix, []string{"ip", "and", "port"}):
-		return bpfFilterIPv4L4Port(uint16(port), IPProtoSCTP, IPProtoTCP, IPProtoUDP), nil
+		program := BPFFilterUDPPort(uint16(port))
+		// Insert two checks before the protocol comparison. They jump
+		// to the fragment check on a match or continue to the UDP test.
+		program[1].JF += 2 // Keep the EtherType mismatch pointed at reject.
+		return slices.Insert(program, 3,
+			BPFInstruction{Code: bpfClassJMP | bpfOpJEQ | bpfSrcK, JT: 2, K: uint32(IPProtoSCTP)},
+			BPFInstruction{Code: bpfClassJMP | bpfOpJEQ | bpfSrcK, JT: 1, K: uint32(IPProtoTCP)},
+		), nil
 	case slices.Equal(prefix, []string{"ip", "and", "tcp", "port"}):
 		return BPFFilterTCPPort(uint16(port)), nil
 	case slices.Equal(prefix, []string{"ip", "and", "udp", "port"}):
@@ -116,42 +123,33 @@ func CompileBPFFilter(expression string, linkType LinkType) ([]BPFInstruction, e
 // frames that accepts TCP packets whose source or destination port equals
 // port. The filter can read ports in an IPv4 first fragment.
 func BPFFilterTCPPort(port uint16) []BPFInstruction {
-	return bpfFilterIPv4L4Port(port, IPProtoTCP)
+	return bpfFilterIPv4L4Port(IPProtoTCP, port)
 }
 
 // BPFFilterUDPPort returns a classic BPF program for untagged IPv4 Ethernet
 // frames that accepts UDP packets whose source or destination port equals
 // port. The filter can read ports in an IPv4 first fragment.
 func BPFFilterUDPPort(port uint16) []BPFInstruction {
-	return bpfFilterIPv4L4Port(port, IPProtoUDP)
+	return bpfFilterIPv4L4Port(IPProtoUDP, port)
 }
 
-func bpfFilterIPv4L4Port(port uint16, protocols ...uint8) []BPFInstruction {
+func bpfFilterIPv4L4Port(proto uint8, port uint16) []BPFInstruction {
 	p := uint32(port)
-	program := make([]BPFInstruction, 0, 12+len(protocols))
-	program = append(program,
-		BPFInstruction{Code: bpfClassLD | bpfSizeH | bpfModeABS, K: 12},
-		BPFInstruction{Code: bpfClassJMP | bpfOpJEQ | bpfSrcK, JF: uint8(9 + len(protocols)), K: uint32(EtherTypeIPv4)},
-		BPFInstruction{Code: bpfClassLD | bpfSizeB | bpfModeABS, K: 23},
-	)
-	for i, protocol := range protocols {
-		check := BPFInstruction{Code: bpfClassJMP | bpfOpJEQ | bpfSrcK, JT: uint8(len(protocols) - 1 - i), K: uint32(protocol)}
-		if i == len(protocols)-1 {
-			check.JF = 8 // Reject after testing the last protocol.
-		}
-		program = append(program, check)
+	return []BPFInstruction{
+		{Code: bpfClassLD | bpfSizeH | bpfModeABS, K: 12},                                 // 0: ldh [12] (EtherType)
+		{Code: bpfClassJMP | bpfOpJEQ | bpfSrcK, JT: 0, JF: 10, K: uint32(EtherTypeIPv4)}, // 1: jeq #0x0800, +0, reject(12)
+		{Code: bpfClassLD | bpfSizeB | bpfModeABS, K: 23},                                 // 2: ldb [23] (IPv4 proto)
+		{Code: bpfClassJMP | bpfOpJEQ | bpfSrcK, JT: 0, JF: 8, K: uint32(proto)},          // 3: jeq #proto, +0, reject(12)
+		{Code: bpfClassLD | bpfSizeH | bpfModeABS, K: 20},                                 // 4: ldh [20] (IPv4 frag offset)
+		{Code: bpfClassJMP | bpfOpJSET | bpfSrcK, JT: 6, JF: 0, K: 0x1fff},                // 5: jset #0x1fff, reject(12), +0
+		{Code: bpfClassLDX | bpfSizeB | bpfModeMSH, K: 14},                                // 6: ldxb 4*([14]&0xf)
+		{Code: bpfClassLD | bpfSizeH | bpfModeIND, K: 14},                                 // 7: ldh [x + 14] (src port)
+		{Code: bpfClassJMP | bpfOpJEQ | bpfSrcK, JT: 2, JF: 0, K: p},                      // 8: jeq #port, accept(11), +0
+		{Code: bpfClassLD | bpfSizeH | bpfModeIND, K: 16},                                 // 9: ldh [x + 16] (dst port)
+		{Code: bpfClassJMP | bpfOpJEQ | bpfSrcK, JT: 0, JF: 1, K: p},                      // 10: jeq #port, accept(11), reject(12)
+		{Code: bpfClassRET | bpfSrcK, K: DefaultLiveSnapLen},                              // 11: accept
+		{Code: bpfClassRET | bpfSrcK, K: 0},                                               // 12: reject
 	}
-	return append(program,
-		BPFInstruction{Code: bpfClassLD | bpfSizeH | bpfModeABS, K: 20},           // IPv4 fragment offset
-		BPFInstruction{Code: bpfClassJMP | bpfOpJSET | bpfSrcK, JT: 6, K: 0x1fff}, // reject later fragments
-		BPFInstruction{Code: bpfClassLDX | bpfSizeB | bpfModeMSH, K: 14},          // X = IPv4 header length
-		BPFInstruction{Code: bpfClassLD | bpfSizeH | bpfModeIND, K: 14},           // source port
-		BPFInstruction{Code: bpfClassJMP | bpfOpJEQ | bpfSrcK, JT: 2, K: p},       // accept on match
-		BPFInstruction{Code: bpfClassLD | bpfSizeH | bpfModeIND, K: 16},           // destination port
-		BPFInstruction{Code: bpfClassJMP | bpfOpJEQ | bpfSrcK, JF: 1, K: p},       // reject on mismatch
-		BPFInstruction{Code: bpfClassRET | bpfSrcK, K: DefaultLiveSnapLen},        // accept
-		BPFInstruction{Code: bpfClassRET | bpfSrcK, K: 0},                         // reject
-	)
 }
 
 // BPFFilterIPv4Host returns a classic BPF program for Ethernet frames that
