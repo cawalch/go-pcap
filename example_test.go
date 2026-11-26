@@ -15,6 +15,18 @@ import (
 	"github.com/cawalch/go-pcap"
 )
 
+func ExampleParseLDAP() {
+	// LDAPv3 anonymous BindRequest.
+	wire := []byte{0x30, 0x0c, 0x02, 0x01, 0x01, 0x60, 0x07, 0x02, 0x01, 0x03, 0x04, 0x00, 0x80, 0x00}
+	msg, err := pcap.ParseLDAP(wire)
+	if err != nil {
+		panic(err)
+	}
+	fmt.Println(msg.MessageID, msg.Version, msg.AuthType)
+	// Output:
+	// 1 3 simple
+}
+
 func buildExampleEthernetUDPFrame() []byte {
 	frame := make([]byte, 14+20+8+4)
 	binary.BigEndian.PutUint16(frame[12:14], pcap.EtherTypeIPv4)

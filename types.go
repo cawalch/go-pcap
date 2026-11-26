@@ -403,9 +403,15 @@ const (
 	MaxKRB5PrincipalParts = 16
 	MaxKRB5ETypes         = 32
 	MaxKRB5RecordsPerScan = 16_384
-	MaxRDPPacketBytes     = 16 << 10
-	MaxRDPCookieBytes     = 512
-	MaxRDPRecordsPerScan  = 16_384
+
+	// Bounds for LDAP request metadata decoding.
+	MaxLDAPPacketBytes   = 64 << 10
+	MaxLDAPFilterDepth   = 16
+	MaxLDAPFilterBytes   = 16 << 10
+	MaxLDAPAttributes    = 64
+	MaxRDPPacketBytes    = 16 << 10
+	MaxRDPCookieBytes    = 512
+	MaxRDPRecordsPerScan = 16_384
 )
 
 // Kerberos v5 message types and encryption types (RFC 4120).
@@ -575,6 +581,8 @@ var (
 	ErrInvalidSMB = errors.New("invalid SMB2 or NTLM message")
 	// ErrInvalidKRB5 indicates a malformed Kerberos v5 ASN.1 message.
 	ErrInvalidKRB5 = errors.New("invalid Kerberos v5 message")
+	// ErrInvalidLDAP indicates malformed LDAP request framing or an unsupported operation.
+	ErrInvalidLDAP = errors.New("invalid or unsupported LDAP request")
 	// ErrInvalidRDP indicates a malformed TPKT/X.224 RDP negotiation PDU.
 	ErrInvalidRDP = errors.New("invalid RDP negotiation packet")
 	// ErrUnsupportedDataLink indicates a live datalink the backend cannot capture.
@@ -615,6 +623,8 @@ var (
 	ErrSMBLimit = errors.New("SMB2 or NTLM message exceeds limit")
 	// ErrKRB5Limit indicates a Kerberos v5 message or capture exceeds limits.
 	ErrKRB5Limit = errors.New("Kerberos v5 message exceeds limit")
+	// ErrLDAPLimit indicates an LDAP packet, filter, or attribute list exceeds a limit.
+	ErrLDAPLimit = errors.New("LDAP request exceeds limit")
 	// ErrRDPLimit indicates an RDP negotiation message or capture exceeds limits.
 	ErrRDPLimit = errors.New("RDP negotiation message exceeds limit")
 )

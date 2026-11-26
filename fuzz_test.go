@@ -331,6 +331,18 @@ func FuzzParseKRB5(f *testing.F) {
 	})
 }
 
+func FuzzParseLDAP(f *testing.F) {
+	f.Add(ldapTestMessage(0x60, []byte{2, 1, 3}, ldapTestText(4, ""), ldapTestText(0x80, "")))
+	f.Add(ldapTestSearch(ldapTestTLV(0xa0, ldapTestText(0x87, "cn"), ldapTestAssertion(0xa3, "sn", "Test"))))
+	f.Add([]byte{0x30, 0x84, 0xff, 0xff, 0xff, 0xff})
+	f.Fuzz(func(t *testing.T, data []byte) {
+		msg, err := ParseLDAP(data)
+		if err == nil && (msg.MessageID <= 0 || len(msg.Filter) > MaxLDAPFilterBytes || len(msg.Attributes) > MaxLDAPAttributes) {
+			t.Fatal("LDAP request exceeded its metadata bounds")
+		}
+	})
+}
+
 func FuzzParseRDPNegotiation(f *testing.F) {
 	f.Add(buildRDPConnReqPDU("mstshash=USER", RDPProtoCredSSP))
 

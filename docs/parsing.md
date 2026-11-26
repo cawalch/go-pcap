@@ -128,6 +128,10 @@ These limits apply to capture scans. Streaming writers check individual calls an
 | `MaxHTTP2FramePayload` | 1 MiB | Bounds individual HTTP/2 frame payload size |
 | `MaxKRB5PacketBytes` | 64 KiB | Bounds Kerberos v5 message length |
 | `MaxKRB5RecordsPerScan` | 16,384 records | Bounds Kerberos v5 records returned per capture scan |
+| `MaxLDAPPacketBytes` | 64 KiB | Bounds a single LDAP request |
+| `MaxLDAPFilterDepth` | 16 levels | Bounds nested LDAP search filters, including the outer filter |
+| `MaxLDAPFilterBytes` | 16 KiB | Bounds the rendered LDAP filter |
+| `MaxLDAPAttributes` | 64 selectors | Bounds the LDAP search attribute list |
 | `MaxRDPPacketBytes` | 16 KiB | Bounds RDP TPKT/X.224 negotiation PDU length |
 | `MaxRDPRecordsPerScan` | 16,384 records | Bounds RDP negotiation records returned per capture scan |
 
@@ -1403,6 +1407,19 @@ Call `ParseRDPNegotiation(buf)` or `capture.RDP(data)` to decode TPKT / X.224
 Connection Request and Connection Confirm PDUs, `Cookie: mstshash=...` tokens,
 and `RDP_NEG_REQ` / `RDP_NEG_RSP` security protocol flags (`RDPProtoTLS`,
 `RDPProtoCredSSP`, `RDPProtoHybridEx`).
+
+## Parse LDAP requests
+
+Pass one complete LDAPv3 `LDAPMessage` to `ParseLDAP`. Bind requests return
+the version, bind DN, authentication type, and SASL mechanism where present.
+Search requests return the base DN, scope, escaped RFC 4515 filter, and
+attribute selectors in wire order. The parser discards authentication
+credentials and skips the optional controls envelope.
+
+The parser accepts definite BER lengths with up to four length octets,
+including non-minimal encodings. `ErrInvalidLDAP` covers malformed or
+unsupported input. `ErrLDAPLimit` covers the request size, filter limits,
+and selector count. The returned metadata owns its strings and slices.
 
 ## Compute C2 beacon and flow statistics
 
