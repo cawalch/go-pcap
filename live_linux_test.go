@@ -6,6 +6,7 @@ import (
 	"bytes"
 	"encoding/binary"
 	"errors"
+	"fmt"
 	"net"
 	"os"
 	"slices"
@@ -119,7 +120,10 @@ func TestLiveLinuxQueuedTimestamp(t *testing.T) {
 	}
 	defer func() { _ = receiver.Close() }()
 	addr := receiver.LocalAddr().(*net.UDPAddr)
-	filter := BPFFilterUDPPort(uint16(addr.Port))
+	filter, err := CompileBPFFilter(fmt.Sprintf("ip and port %d", addr.Port), LinkTypeEthernet)
+	if err != nil {
+		t.Fatal(err)
+	}
 	filter[len(filter)-2].K = 64
 	lc, err := OpenLive("lo", LiveOptions{SnapLen: 96, BPFFilter: filter, Timeout: 2 * time.Second})
 	if errors.Is(err, syscall.EPERM) || errors.Is(err, syscall.EACCES) {

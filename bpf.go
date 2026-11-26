@@ -2,7 +2,12 @@ package pcap
 
 import (
 	"encoding/binary"
+	"errors"
+	"fmt"
 	"net/netip"
+	"slices"
+	"strconv"
+	"strings"
 )
 
 // Classic BPF instruction class, size, mode, and operation flags.
@@ -55,14 +60,75 @@ func BPFFilterIPProtocol(proto uint8) []BPFInstruction {
 	}
 }
 
-// BPFFilterTCPPort returns a classic BPF program for unfragmented IPv4 Ethernet
-// frames that accepts TCP packets whose source or destination port equals port.
+// ErrUnsupportedBPFFilterExpression indicates a filter outside the grammar
+// or input limits of [CompileBPFFilter].
+var ErrUnsupportedBPFFilterExpression = errors.New("unsupported BPF filter expression")
+
+// CompileBPFFilter compiles a numeric IPv4 port filter for untagged Ethernet.
+// It accepts "ip and port N", "ip and tcp port N", and "ip and udp port N".
+// Use a decimal port from 0 to 65535 without leading zeros and separate the
+// lower-case tokens with ASCII whitespace (space, tab, CR, or LF).
+//
+// The filter matches source or destination ports. The unqualified "port"
+// form includes TCP, UDP, and SCTP. IPv4 options and first fragments with
+// the requested port field present are supported.
+//
+// The expression can use at most 128 bytes. An empty or whitespace-only
+// expression returns a nil program that accepts all packets for any link
+// type. A non-empty filter for another link type returns
+// [ErrUnsupportedDataLink]. Other unsupported expressions return
+// [ErrUnsupportedBPFFilterExpression].
+func CompileBPFFilter(expression string, linkType LinkType) ([]BPFInstruction, error) {
+	if len(expression) > 128 {
+		return nil, ErrUnsupportedBPFFilterExpression
+	}
+	fields := strings.FieldsFunc(expression, func(r rune) bool {
+		return r == ' ' || r == '\t' || r == '\r' || r == '\n'
+	})
+	if len(fields) == 0 {
+		return nil, nil
+	}
+	if linkType != LinkTypeEthernet {
+		return nil, fmt.Errorf("%w: filter expression needs Ethernet, got %v", ErrUnsupportedDataLink, linkType)
+	}
+	number := fields[len(fields)-1]
+	if len(number) > 1 && number[0] == '0' {
+		return nil, ErrUnsupportedBPFFilterExpression
+	}
+	port, err := strconv.ParseUint(number, 10, 16)
+	if err != nil {
+		return nil, ErrUnsupportedBPFFilterExpression
+	}
+	prefix := fields[:len(fields)-1]
+	switch {
+	case slices.Equal(prefix, []string{"ip", "and", "port"}):
+		program := BPFFilterUDPPort(uint16(port))
+		// Insert two checks before the protocol comparison. They jump
+		// to the fragment check on a match or continue to the UDP test.
+		program[1].JF += 2 // Keep the EtherType mismatch pointed at reject.
+		return slices.Insert(program, 3,
+			BPFInstruction{Code: bpfClassJMP | bpfOpJEQ | bpfSrcK, JT: 2, K: uint32(IPProtoSCTP)},
+			BPFInstruction{Code: bpfClassJMP | bpfOpJEQ | bpfSrcK, JT: 1, K: uint32(IPProtoTCP)},
+		), nil
+	case slices.Equal(prefix, []string{"ip", "and", "tcp", "port"}):
+		return BPFFilterTCPPort(uint16(port)), nil
+	case slices.Equal(prefix, []string{"ip", "and", "udp", "port"}):
+		return BPFFilterUDPPort(uint16(port)), nil
+	default:
+		return nil, ErrUnsupportedBPFFilterExpression
+	}
+}
+
+// BPFFilterTCPPort returns a classic BPF program for untagged IPv4 Ethernet
+// frames that accepts TCP packets whose source or destination port equals
+// port. The filter can read ports in an IPv4 first fragment.
 func BPFFilterTCPPort(port uint16) []BPFInstruction {
 	return bpfFilterIPv4L4Port(IPProtoTCP, port)
 }
 
-// BPFFilterUDPPort returns a classic BPF program for unfragmented IPv4 Ethernet
-// frames that accepts UDP packets whose source or destination port equals port.
+// BPFFilterUDPPort returns a classic BPF program for untagged IPv4 Ethernet
+// frames that accepts UDP packets whose source or destination port equals
+// port. The filter can read ports in an IPv4 first fragment.
 func BPFFilterUDPPort(port uint16) []BPFInstruction {
 	return bpfFilterIPv4L4Port(IPProtoUDP, port)
 }
