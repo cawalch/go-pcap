@@ -1728,6 +1728,40 @@ interface using standard-library `syscall` descriptors (`/dev/bpf*` on macOS,
 and `BPFFilterIPv4Host` to construct classic BPF filter programs, or `EvalBPF`
 to evaluate a classic BPF program in memory.
 
+### Compile a live capture filter
+
+Use `CompileBPFFilter(expression, device.LinkType)` for numeric port
+selections on untagged IPv4 Ethernet. Pass the result as
+`LiveOptions.BPFFilter` or evaluate it with `EvalBPF`.
+
+| Expression | Matches source or destination port |
+| --- | --- |
+| `ip and port N` | TCP, UDP and SCTP |
+| `ip and tcp port N` | TCP |
+| `ip and udp port N` | UDP |
+
+Use lower-case keywords and a decimal port from 0 through 65535 without
+leading zeros. The expression can use up to 128 bytes, including ASCII
+spaces, tabs or line breaks. An empty or whitespace-only expression accepts
+all packets, regardless of datalink. Other expressions return
+`ErrUnsupportedBPFFilterExpression`. A non-empty filter on a non-Ethernet
+datalink returns `ErrUnsupportedDataLink`.
+
+The compiler follows the IPv4 header length when reading ports. A first
+fragment can match if the selected port field is present. Later fragments,
+VLAN-tagged frames, and IPv6 packets are outside these filters.
+
+Run the [live capture example](../examples/live-capture/main.go) on a
+supported Ethernet interface with capture permissions. It writes PcapNG to
+standard output. Replace `eth0` with your interface name.
+
+```sh
+go run ./examples/live-capture -i eth0 -c 20 'ip and port 53' > dns.pcapng
+go run ./examples/dns-transactions dns.pcapng
+```
+
+### Discover interfaces
+
 Call `LiveDevices()` to discover interface names, indexes, MTUs and flags
 before opening a capture. The list is sorted by index. Use `HasLinkType`
 to check whether the backend resolved a supported datalink. Linux resolves

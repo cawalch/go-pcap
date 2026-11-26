@@ -46,6 +46,7 @@ be added compatibly.
 | `ExtractKeyedHTTP2TransactionPCAPNG`, `ExtractKeyedHTTP2TransactionPCAPNGFromReaderAt` | The source ID and matching keys select original ciphertext packets and directional HPACK history. Reopening requires separate secrets. [Export coverage](parsing.md#export-a-keyed-http2-exchange-as-ciphertext) |
 | `DecompressCapture` | Non-gzip input passes through by reference. A successful gzip decode returns decompressed bytes. |
 | `LiveCapture.ReadPacket` | For portable code, copy a packet that must survive the next read. The macOS backend reuses its buffer. |
+| `CompileBPFFilter` | Numeric TCP, UDP and SCTP port filters compile for untagged IPv4 Ethernet. An empty expression accepts all datalinks. |
 
 For other low-level parsers, consult the individual API before modifying an
 input while its result is still in use. An offset in a result refers to the
