@@ -43,6 +43,28 @@ still count against the selected-input limit. Reassembly, output and scratch
 memory have separate costs. For concurrent reads, keep the input and exported
 capture fields unchanged. [Input and buffer lifetimes](compatibility.md#inputs-and-payloads)
 
+### Read compressed or non-seekable input
+
+When your input comes from a pipe or exceeds the in-memory gzip limit, copy
+the uncompressed capture to a temporary file with a caller-defined size limit.
+For gzip, wrap the input in `compress/gzip.NewReader` before copying. For
+uncompressed input, copy directly from the pipe. Use `io.LimitReader` with
+the limit plus one byte so you can detect excess output. If copying fails
+or exceeds the limit, discard the temporary file. Finish the copy before
+opening the capture so gzip trailer errors reach the caller.
+
+Pass the temporary file and the copied byte count to `NewFromReaderAt`.
+Keep the file available during analysis and remove it after closing.
+Check `InputTruncated()` if your application requires complete packets.
+The normal ReaderAt scan limits apply to the temporary file.
+
+For other wrappers, supply decompressed bytes from an application-selected
+decoder using the same limit. The library's capture open functions expect
+classic PCAP or PcapNG bytes.
+
+Run `go test -run '^ExampleNewFromReaderAt_spoolGzip$' .` to check the
+[gzip staging example](../example_test.go).
+
 ## Work and output limits
 
 These limits apply to capture scans. Streaming writers check individual calls and can exceed the cumulative scan totals.
