@@ -46,6 +46,7 @@ const (
 	LinkTypeIEEE80211         LinkType = 105 // IEEE 802.11 MAC frames
 	LinkTypeLinuxSLL          LinkType = 113 // Linux cooked capture v1
 	LinkTypeIEEE80211RadioTap LinkType = 127 // Radiotap followed by IEEE 802.11
+	LinkTypeApplePktap        LinkType = 149 // Apple PKTAP version 1
 	LinkTypeIPv4              LinkType = 228 // Raw IPv4
 	LinkTypeIPv6              LinkType = 229 // Raw IPv6
 	LinkTypeLinuxSLL2         LinkType = 276 // Linux cooked capture v2
@@ -193,6 +194,7 @@ const (
 	LayerIEEE80211
 	LayerESP
 	LayerIKEv2
+	LayerApplePktap
 )
 
 // String returns the lowercase layer identifier.
@@ -242,6 +244,8 @@ func (p LayerProto) String() string {
 		return "ieee80211"
 	case LayerESP:
 		return "esp"
+	case LayerApplePktap:
+		return "apple_pktap"
 	case LayerIKEv2:
 		return "ikev2"
 	default:

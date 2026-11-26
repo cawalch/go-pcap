@@ -198,12 +198,67 @@ func DecodeFrame(data []byte, linkType LinkType) (Frame, error) {
 		decodeIEEE80211(r, length, padded, &f)
 		return f, nil
 
+	case LinkTypeApplePktap:
+		return decodeApplePktap(data), nil
+
 	default:
 		return Frame{}, fmt.Errorf("%w: unsupported link type %d", ErrInvalidFrame, linkType)
 	}
 
 	dispatchEtherType(r, offset, r.Size(), &f)
 	return f, nil
+}
+
+// decodeApplePktap handles the little-endian version 1 packet wrapper. The
+// embedded DLT is a native Darwin value. Keep all offsets in the outer frame.
+func decodeApplePktap(data []byte) Frame {
+	const minHeader = 156
+	const version2 = 0x00080000 // XNU PTH_FLAG_V2_HDR, at the same offset in both versions.
+	f := Frame{LinkType: LinkTypeApplePktap}
+	if len(data) < minHeader {
+		f.Anomalies.TruncatedLayer = true
+		return f
+	}
+	length := int64(binary.LittleEndian.Uint32(data[:4]))
+	if length < minHeader || length > int64(len(data)) ||
+		binary.LittleEndian.Uint32(data[4:8]) != 1 || binary.LittleEndian.Uint32(data[36:40])&version2 != 0 {
+		f.Anomalies.TruncatedLayer = true
+		return f
+	}
+	f.pushLayer(LayerApplePktap, 0, length)
+	dlt := binary.LittleEndian.Uint32(data[8:12])
+	if dlt == 12 { // Darwin DLT_RAW.
+		dlt = uint32(LinkTypeRaw)
+	}
+	linkType := LinkType(dlt)
+	if dlt != uint32(linkType) || linkType == LinkTypeApplePktap || !isKnownLinkType(linkType) {
+		return f // Leave unsupported embedded datalinks opaque.
+	}
+	inner, err := DecodeFrame(data[length:], linkType)
+	if err != nil {
+		f.Anomalies.TruncatedLayer = true
+		return f
+	}
+	outerLayer := f.Layers[0]
+	f = inner
+	f.LinkType = LinkTypeApplePktap
+	if f.LayerCount == MaxFrameLayers {
+		f.LayerCount--
+		f.Anomalies.TruncatedLayer = true
+	}
+	copy(f.Layers[1:], f.LayerSlices())
+	f.Layers[0] = outerLayer
+	f.LayerCount++
+	for i := 1; i < int(f.LayerCount); i++ {
+		f.Layers[i].Offset += uint32(length)
+	}
+	if f.PayloadOffset != 0 || f.PayloadLength != 0 {
+		f.PayloadOffset += uint32(length)
+	}
+	if f.TCPOptionsOffset != 0 {
+		f.TCPOptionsOffset += uint32(length)
+	}
+	return f
 }
 
 // radiotapDataPadding reads only the optional Flags field. Its only possible

@@ -43,6 +43,28 @@ still count against the selected-input limit. Reassembly, output and scratch
 memory have separate costs. For concurrent reads, keep the input and exported
 capture fields unchanged. [Input and buffer lifetimes](compatibility.md#inputs-and-payloads)
 
+### Read compressed or non-seekable input
+
+When your input comes from a pipe or exceeds the in-memory gzip limit, copy
+the uncompressed capture to a temporary file with a caller-defined size limit.
+For gzip, wrap the input in `compress/gzip.NewReader` before copying. For
+uncompressed input, copy directly from the pipe. Use `io.LimitReader` with
+the limit plus one byte so you can detect excess output. If copying fails
+or exceeds the limit, discard the temporary file. Finish the copy before
+opening the capture so gzip trailer errors reach the caller.
+
+Pass the temporary file and the copied byte count to `NewFromReaderAt`.
+Keep the file available during analysis and remove it after closing.
+Check `InputTruncated()` if your application requires complete packets.
+The normal ReaderAt scan limits apply to the temporary file.
+
+For other wrappers, supply decompressed bytes from an application-selected
+decoder using the same limit. The library's capture open functions expect
+classic PCAP or PcapNG bytes.
+
+Run `go test -run '^ExampleNewFromReaderAt_spoolGzip$' .` to check the
+[gzip staging example](../example_test.go).
+
 ## Work and output limits
 
 These limits apply to capture scans. Streaming writers check individual calls and can exceed the cumulative scan totals.
@@ -211,7 +233,9 @@ without heap allocations:
 - Supported link types: `LinkTypeEthernet` (with up to 4 nested 802.1Q / 802.1ad
   VLAN tags), `LinkTypeLinuxSLL`, `LinkTypeLinuxSLL2`, `LinkTypeNull` (BSD
   loopback), `LinkTypeRaw`, `LinkTypeIPv4`, `LinkTypeIPv6`,
-  `LinkTypeIEEE80211` (105), and `LinkTypeIEEE80211RadioTap` (127).
+  `LinkTypeIEEE80211` (105), `LinkTypeIEEE80211RadioTap` (127), and
+  `LinkTypeApplePktap` (149). Apple PKTAP decoding uses the little-endian
+  version 1 packet header and reports offsets relative to the original frame.
 - Supported tunnel encapsulations: `MPLS` (`0x8847` / `0x8848`, up to 8 labels),
   `PPPoE` Session (`0x8864` over IPv4 or IPv6), `GRE` (`IPProto 47` over IPv4,
   IPv6, or Transparent Ethernet Bridging), `VXLAN` (`UDP 4789`), and `Geneve`
