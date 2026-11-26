@@ -246,6 +246,15 @@ func reassembleTCPWithBudget(segments []TCPSegmentInput, remainingBudget int64, 
 // copyContiguousTCP copies the direction only when all payloads fit the budget
 // and arrive consecutively from baseSeq. Other inputs use the general path.
 func copyContiguousTCP(segments []TCPSegmentInput, baseSeq uint32, limit int64, written tcpWriteObserver) []byte {
+	// A discontinuity between the last two data packets rules out this path
+	// before we walk the batch. SYN and empty packets need the full check.
+	last := &segments[len(segments)-1]
+	prior := &segments[len(segments)-2]
+	if len(last.Payload) != 0 && len(prior.Payload) != 0 &&
+		(last.Flags|prior.Flags)&TCPFlagSYN == 0 && last.Seq != prior.Seq+uint32(len(prior.Payload)) {
+		return nil
+	}
+
 	var size int64
 	for i := range segments {
 		seg := &segments[i]
