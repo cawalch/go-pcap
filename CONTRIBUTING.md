@@ -33,6 +33,28 @@ for the README, repository documentation, and prose in code comments. Follow
 - Start exported API comments with the identifier's name. Link related symbols
   with Go doc links, such as `[New]`.
 
+## Write the change description
+
+Start an issue or pull request with the affected files or symbols and the
+intended behavior. Include the commands reviewers can run, the results you
+observed, and the specific feedback you want.
+
+Before submitting, check paths, symbols, and line references against the
+revision you are describing. Check a pull request's claims about changed
+behavior against its diff. For example, use `go doc . NewFromReaderAt` to
+check an exported contract and `git grep -n 'func NewFromReaderAt' -- '*.go'`
+to locate its declaration.
+
+Open every reference link and check that it supports the nearby claim.
+For source code, use a commit permalink and include a short quoted excerpt
+from the referenced lines. Identify any references you could not verify.
+
+When several claims need checking, you can list them under `Claims`.
+Use a file and symbol or a file and line, followed by the assertion.
+For example, `readerat.go#NewFromReaderAt` accepts an `io.ReaderAt` and a
+capture length. For assisted changes, name the tool, model, relevant
+settings, and scope of the assistance.
+
 ## Merge a change
 
 Open a pull request against `main` and resolve its review conversations.
