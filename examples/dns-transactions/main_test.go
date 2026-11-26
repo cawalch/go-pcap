@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"io"
 	"os"
 	"testing"
 
@@ -21,7 +22,7 @@ flow=0 reply_frame=12 id=0005 name="orphan.example" type=1 class=1 header_rcode=
 flow=0 query_frame=13 id=0006 name="pending.example" type=1 class=1 no_reply_observed
 `
 	var out bytes.Buffer
-	if err := run(path, &out); err != nil {
+	if err := run(path, nil, &out); err != nil {
 		t.Fatal(err)
 	}
 	if out.String() != want {
@@ -30,6 +31,19 @@ flow=0 query_frame=13 id=0006 name="pending.example" type=1 class=1 no_reply_obs
 	data, err := os.ReadFile(path)
 	if err != nil {
 		t.Fatal(err)
+	}
+	reader, writer := io.Pipe()
+	defer func() { _ = reader.Close() }()
+	go func() {
+		_, err := writer.Write(data)
+		_ = writer.CloseWithError(err)
+	}()
+	out.Reset()
+	if err := run("-", reader, &out); err != nil {
+		t.Fatal(err)
+	}
+	if out.String() != want {
+		t.Fatalf("piped report:\n%s", &out)
 	}
 	c, err := pcap.New(data)
 	if err != nil {

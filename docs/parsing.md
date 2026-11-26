@@ -602,6 +602,12 @@ Frame numbers start at one so you can jump to them in Wireshark.
 go run ./examples/dns-transactions testdata/deployments/dns-transactions.pcap
 ```
 
+The DNS transaction and keyed HTTP/1 export commands also accept a `.gz`
+file, a named pipe, or `-` for standard input. Pipe and standard input can
+carry either raw or gzip-compressed capture bytes. The commands stage up to
+128 MiB of uncompressed input before analysis and reject incomplete staged
+captures.
+
 | Frames in the synthetic capture | Observation |
 | --- | --- |
 | 1 → 2 | A successful lookup took 8 ms at the capture point. |
@@ -930,6 +936,9 @@ request target matches the argument. Run it on the synthetic TLS 1.3 fixture:
 ```sh
 go run ./examples/keyed-http1-export testdata/keyed-http1-export.pcapng /second > selected.pcapng
 ```
+
+The same [gzip and pipe inputs](#diagnose-dns-transactions) work for this
+command.
 
 The [offline verification](../testdata/tls-provenance.md#packet-only-export-across-a-tls-13-keyupdate)
 shows how to reopen that file with a separate key log.
