@@ -444,49 +444,48 @@ func (b *scanReadBudget) ReadAt(p []byte, off int64) (int, error) {
 // extendFramePrefix resolves incomplete headers and nested tunnel lengths.
 func extendFramePrefix(budget *scanReadBudget, size int64, pkt PacketRecord, f *Frame, data []byte, scratch *[]byte) ([]byte, error) {
 	for {
+		if pkt.LinkType == LinkTypeNFLOG || (pkt.LinkType == LinkTypeApplePktap && f.Layers[1].Proto == LayerNFLOG) {
+			// NFLOG needs the complete TLV list to distinguish byte orders.
+			full, err := readFrameTail(budget, size, pkt.PayloadOffset, data, pkt.PayloadLength, scratch)
+			if err != nil {
+				return nil, err
+			}
+			*f, _ = DecodeFrame(full, pkt.LinkType)
+			return full, nil
+		}
+		complete, required := completeFlowPrefix(f, data, pkt.PayloadLength)
+		if complete {
+			return data, nil
+		}
 		n := int64(len(data))
-		next, limit := pkt.PayloadLength, pkt.PayloadLength
-		// NFLOG needs the entire TLV list to distinguish the two byte orders.
-		if pkt.LinkType != LinkTypeNFLOG && (pkt.LinkType != LinkTypeApplePktap || f.Layers[1].Proto != LayerNFLOG) {
-			complete, required := completeFlowPrefix(f, data, pkt.PayloadLength)
-			if complete {
-				return data, nil
+		next := pkt.PayloadLength
+		// Bytes after the outer IP datagram cannot affect any nested header.
+		for _, layer := range f.LayerSlices() {
+			offset := int(layer.Offset)
+			switch layer.Proto {
+			case LayerIPv4:
+				next = min(next, int64(offset)+int64(binary.BigEndian.Uint16(data[offset+2:])))
+			case LayerIPv6:
+				next = min(next, int64(offset)+40+int64(binary.BigEndian.Uint16(data[offset+4:])))
+			default:
+				continue
 			}
-			// Bytes after the outer IP datagram cannot affect any nested header.
-			for _, layer := range f.LayerSlices() {
-				offset := int(layer.Offset)
-				switch layer.Proto {
-				case LayerIPv4:
-					limit = min(limit, int64(offset)+int64(binary.BigEndian.Uint16(data[offset+2:])))
-				case LayerIPv6:
-					limit = min(limit, int64(offset)+40+int64(binary.BigEndian.Uint16(data[offset+4:])))
-				default:
-					continue
-				}
-				break
-			}
-			next = limit
-			if required != 0 {
-				next = min(next, required)
-			} else if f.Anomalies.TruncatedLayer {
-				next = min(next, 2*n)
-			}
+			break
 		}
 		if next <= n {
 			return data, nil
 		}
-		if err := budget.check(next - n); err != nil {
+		limit := next
+		if required != 0 {
+			next = min(next, required)
+		} else if f.Anomalies.TruncatedLayer {
+			next = min(next, 2*n)
+		}
+		var err error
+		data, err = readFrameTail(budget, size, pkt.PayloadOffset, data, next, scratch)
+		if err != nil {
 			return nil, err
 		}
-		if int64(cap(*scratch)) < next {
-			*scratch = make([]byte, next)
-		}
-		copy((*scratch)[:n], data)
-		data = (*scratch)[:next]
-		if err := readExactAt(budget.r, data[n:], pkt.PayloadOffset+n, size); err != nil {
-			return nil, err
-		}
-		budget.remaining -= next - n
 		// DecodeFrame has already accepted this link header. Extending its
 		// backing data cannot shorten the header or change its link type.
 		*f, _ = DecodeFrame(data, pkt.LinkType)
@@ -494,6 +493,23 @@ func extendFramePrefix(budget *scanReadBudget, size int64, pkt PacketRecord, f *
 			return data, nil
 		}
 	}
+}
+
+func readFrameTail(budget *scanReadBudget, size, offset int64, data []byte, end int64, scratch *[]byte) ([]byte, error) {
+	n := int64(len(data))
+	if err := budget.check(end - n); err != nil {
+		return nil, err
+	}
+	if int64(cap(*scratch)) < end {
+		*scratch = make([]byte, end)
+	}
+	copy((*scratch)[:n], data)
+	data = (*scratch)[:end]
+	if err := readExactAt(budget.r, data[n:], offset+n, size); err != nil {
+		return nil, err
+	}
+	budget.remaining -= end - n
+	return data, nil
 }
 
 func (s ipFrameSource) walkReaderAt(visit func(PacketRecord, Frame, []byte) error) error {
