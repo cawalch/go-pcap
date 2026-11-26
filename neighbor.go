@@ -126,7 +126,7 @@ func (c *Capture) scanNeighbors(r io.ReaderAt, observe func(NeighborRecord, neig
 // decodeNeighbor returns the required prefix length when the link-local IPv6
 // datagram is a candidate but its declared bytes are not in the prefix.
 func decodeNeighbor(data []byte, link LinkType, scope *neighborScope) (NeighborRecord, int) {
-	f, err := DecodeFrame(data, link)
+	f, err := decodeCaptureFrame(data, link)
 	if err != nil {
 		return NeighborRecord{}, 0
 	}

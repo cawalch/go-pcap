@@ -44,12 +44,13 @@ func (a FrameAnomalies) Any() bool {
 // It uses a fixed-capacity layer array and value types so [DecodeFrame] performs
 // zero heap allocations.
 type Frame struct {
-	LinkType   LinkType
-	EtherType  uint16
-	VLANCount  uint8
-	VLANTags   [MaxVLANTags]uint16
-	LayerCount uint8
-	Layers     [MaxFrameLayers]LayerSpan
+	LinkType      LinkType
+	EtherType     uint16
+	VLANCount     uint8
+	VLANTags      [MaxVLANTags]uint16
+	LayerCount    uint8
+	keepIPIPOuter bool
+	Layers        [MaxFrameLayers]LayerSpan
 
 	// Network layer (IPv4 / IPv6).
 	IPVersion       uint8
@@ -108,10 +109,20 @@ func (f *Frame) pushLayer(proto LayerProto, offset, length int64) {
 // header is shorter than its minimum size or has invalid Radiotap framing.
 // Truncated inner headers are recorded in [Frame.Anomalies] without discarding
 // outer layers. Protected IEEE 802.11 frames and ESP bodies remain opaque.
-func DecodeFrame(data []byte, linkType LinkType) (f Frame, err error) {
+func DecodeFrame(data []byte, linkType LinkType) (Frame, error) {
+	return decodeFrame(data, linkType, false)
+}
+
+// Capture scans share first-seen flow indices and keep the enclosing IP tuple.
+func decodeCaptureFrame(data []byte, linkType LinkType) (Frame, error) {
+	return decodeFrame(data, linkType, true)
+}
+
+func decodeFrame(data []byte, linkType LinkType, keepIPIPOuter bool) (f Frame, err error) {
 	r := NewSafeReader(data)
 	// Fill the result directly to avoid copying its fixed-size layer array.
 	f.LinkType = linkType
+	f.keepIPIPOuter = keepIPIPOuter
 
 	var offset int64
 	switch linkType {
@@ -200,7 +211,7 @@ func DecodeFrame(data []byte, linkType LinkType) (f Frame, err error) {
 		return f, nil
 
 	case LinkTypeApplePktap:
-		return decodeApplePktap(data), nil
+		return decodeApplePktap(data, keepIPIPOuter), nil
 
 	default:
 		if err := decodeUncommonLinkType(r, linkType, &f); err != nil {
@@ -328,10 +339,10 @@ func decodePFLOG(r *SafeReader, f *Frame) {
 
 // decodeApplePktap handles the little-endian version 1 packet wrapper. The
 // embedded DLT is a native Darwin value. Keep all offsets in the outer frame.
-func decodeApplePktap(data []byte) Frame {
+func decodeApplePktap(data []byte, keepIPIPOuter bool) Frame {
 	const minHeader = 156
 	const version2 = 0x00080000 // XNU PTH_FLAG_V2_HDR, at the same offset in both versions.
-	f := Frame{LinkType: LinkTypeApplePktap}
+	f := Frame{LinkType: LinkTypeApplePktap, keepIPIPOuter: keepIPIPOuter}
 	if len(data) < minHeader {
 		f.Anomalies.TruncatedLayer = true
 		return f
@@ -351,7 +362,7 @@ func decodeApplePktap(data []byte) Frame {
 	if dlt != uint32(linkType) || linkType == LinkTypeApplePktap || !isKnownLinkType(linkType) {
 		return f // Leave unsupported embedded datalinks opaque.
 	}
-	inner, err := DecodeFrame(data[length:], linkType)
+	inner, err := decodeFrame(data[length:], linkType, keepIPIPOuter)
 	if err != nil {
 		f.Anomalies.TruncatedLayer = true
 		return f
@@ -765,6 +776,9 @@ func isIPv6ExtHeader(proto uint8) bool {
 func decodeTransport(r *SafeReader, offset, ipBound int64, proto uint8, f *Frame) {
 	avail := ipBound - offset
 	if avail <= 0 && proto != IPProtoESP {
+		if !f.keepIPIPOuter && (proto == IPProtoIPv4Encap || proto == IPProtoIPv6) {
+			f.Anomalies.TruncatedLayer = true
+		}
 		f.PayloadOffset = uint32(offset)
 		f.PayloadLength = 0
 		return
@@ -894,9 +908,39 @@ func decodeTransport(r *SafeReader, offset, ipBound int64, proto uint8, f *Frame
 		f.PayloadLength = uint32(avail - hdrLen)
 
 	default:
+		if (proto == IPProtoIPv4Encap || proto == IPProtoIPv6) && !f.keepIPIPOuter {
+			decodeIPIP(r, offset, ipBound, proto, f)
+			return
+		}
 		f.PayloadOffset = uint32(offset)
 		f.PayloadLength = uint32(avail)
 	}
+}
+
+func decodeIPIP(r *SafeReader, offset, bound int64, proto uint8, f *Frame) {
+	if int(f.LayerCount)+2 > MaxFrameLayers {
+		f.Anomalies.TruncatedLayer = true
+		f.PayloadOffset = uint32(offset)
+		f.PayloadLength = uint32(bound - offset)
+		return
+	}
+	marker := f.LayerCount
+	outerEtherType := f.EtherType
+	f.pushLayer(LayerIPIP, offset, 0)
+	if proto == IPProtoIPv4Encap {
+		f.EtherType = EtherTypeIPv4
+		decodeIPv4(r, offset, bound, f)
+	} else {
+		f.EtherType = EtherTypeIPv6
+		decodeIPv6(r, offset, bound, f)
+	}
+	if f.LayerCount == marker+1 {
+		f.LayerCount = marker
+		f.Layers[marker] = LayerSpan{}
+		f.EtherType = outerEtherType
+		return
+	}
+	f.Layers[marker].Length = f.Layers[marker+1].Length
 }
 
 func isIKEPort(port uint16) bool {

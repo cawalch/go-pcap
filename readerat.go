@@ -276,7 +276,7 @@ func (c *Capture) FlowsFromReaderAt(r io.ReaderAt) ([]FlowSummary, error) {
 		if err := readExactAt(&budget, payload, pkt.PayloadOffset, c.fileSize); err != nil {
 			return err
 		}
-		frame, err := DecodeFrame(payload, pkt.LinkType)
+		frame, err := decodeCaptureFrame(payload, pkt.LinkType)
 		if err != nil {
 			return nil
 		}
@@ -450,7 +450,7 @@ func extendFramePrefix(budget *scanReadBudget, size int64, pkt PacketRecord, f *
 			if err != nil {
 				return nil, err
 			}
-			*f, _ = DecodeFrame(full, pkt.LinkType)
+			*f, _ = decodeCaptureFrame(full, pkt.LinkType)
 			return full, nil
 		}
 		complete, required := completeFlowPrefix(f, data, pkt.PayloadLength)
@@ -488,7 +488,7 @@ func extendFramePrefix(budget *scanReadBudget, size int64, pkt PacketRecord, f *
 		}
 		// DecodeFrame has already accepted this link header. Extending its
 		// backing data cannot shorten the header or change its link type.
-		*f, _ = DecodeFrame(data, pkt.LinkType)
+		*f, _ = decodeCaptureFrame(data, pkt.LinkType)
 		if next == limit {
 			return data, nil
 		}
@@ -559,7 +559,7 @@ func (c *Capture) walkFlowPrefixes(budget *scanReadBudget, visit func(PacketReco
 		if err := readExactAt(budget, data, pkt.PayloadOffset, c.fileSize); err != nil {
 			return err
 		}
-		f, err := DecodeFrame(data, pkt.LinkType)
+		f, err := decodeCaptureFrame(data, pkt.LinkType)
 		if err != nil {
 			if pkt.LinkType != LinkTypeIEEE80211RadioTap {
 				return nil
@@ -606,7 +606,7 @@ func extendRadiotapPrefix(budget *scanReadBudget, size int64, pkt *PacketRecord,
 	if err := readExactAt(budget, result[n:], pkt.PayloadOffset+n, size); err != nil {
 		return nil, err
 	}
-	*f, _ = DecodeFrame(result, pkt.LinkType)
+	*f, _ = decodeCaptureFrame(result, pkt.LinkType)
 	return result, nil
 }
 
