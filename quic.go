@@ -516,6 +516,11 @@ func (c *Capture) QUIC(data []byte) ([]QUICRecord, error) {
 	return scanQUIC(ipFrameSource{capture: c, data: data})
 }
 
+func quicInitialPayload(f Frame, start []byte) bool {
+	return f.mayContainUDPFragment() || f.IPProtocol == IPProtoUDP &&
+		f.PayloadLength >= 7 && (len(start) == 0 || start[0]&0x80 != 0 && (start[0]&0x40 != 0 || len(start) < 5 || binary.BigEndian.Uint32(start[1:5]) == 0))
+}
+
 // quicScanHeader checks an Initial, Retry, or Version Negotiation header for
 // flow correlation. The returned IDs borrow the UDP payload.
 func quicScanHeader(udpPayload []byte) (version uint32, dcid, scid []byte, initialLength int, vn, retry, ok bool) {
@@ -637,6 +642,11 @@ func (fb *quicFlowBuf) canProbe() bool {
 }
 
 func scanQUIC(source ipFrameSource) ([]QUICRecord, error) {
+	return scanQUICInitials(source, nil)
+}
+
+// Append server IDs in record order when a keyed application scan needs them.
+func scanQUICInitials(source ipFrameSource, serverIDs *[]quicCID) ([]QUICRecord, error) {
 	var table flowIndexTable
 	var defrag ipFragAccumulator
 	var flows []quicFlowBuf
@@ -878,13 +888,21 @@ func scanQUIC(source ipFrameSource) ([]QUICRecord, error) {
 		}
 		hs.HasRetry = fb.hasRetry
 		hs.HasVersionNegotiation = fb.hasVN
+		var serverID quicCID
+		var idOut *quicCID
+		if serverIDs != nil {
+			idOut = &serverID
+		}
 		// Optionally decrypt server Initial packets using the active client DCID.
 		if len(serverPkt) > 0 {
-			if sh, ok := decryptQUICServerInitial(serverPkt, hs.DCID, hs.Version); ok {
+			if sh, ok := decryptQUICServerInitial(serverPkt, hs.DCID, hs.Version, idOut); ok {
 				hs.ServerHello = sh
 				hs.HasServerHello = true
 				hs.Anomalies = mergeTLSAnomalies(hs.Anomalies, sh.Anomalies)
 			}
+		}
+		if serverIDs != nil {
+			*serverIDs = append(*serverIDs, serverID)
 		}
 		records = append(records, QUICRecord{
 			FlowIndex: fb.flowIndex,
@@ -932,7 +950,7 @@ func quicSameInitials(datagram []byte, n int, version uint32, dcid, scid []byte)
 	return datagram[:n]
 }
 
-func decryptQUICServerInitial(datagrams [][]byte, clientDCID []byte, version uint32) (TLSServerHello, bool) {
+func decryptQUICServerInitial(datagrams [][]byte, clientDCID []byte, version uint32, serverID *quicCID) (TLSServerHello, bool) {
 	keys, err := deriveQUICInitialKeys(clientDCID, version, false)
 	if err != nil {
 		return TLSServerHello{}, false
@@ -946,6 +964,10 @@ func decryptQUICServerInitial(datagrams [][]byte, clientDCID []byte, version uin
 				break
 			}
 			if plain, err := decryptSingleQUICInitial(rem[:hdr.PacketLength], hdr, keys); err == nil {
+				if serverID != nil {
+					*serverID = makeQUICCID(hdr.SCID)
+					serverID = nil
+				}
 				_ = extractQUICCryptoFrames(plain, &chunks)
 			}
 			rem = rem[hdr.PacketLength:]
