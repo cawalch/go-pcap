@@ -108,7 +108,7 @@ func (d *http1Direction) observe(f Frame, index, size int) {
 func collectHTTPTransactionDirections(source ipFrameSource, interfaces map[int]uint32, selected map[int]bool) ([]http1Direction, error) {
 	collector := tcpMessageCollector{separateInterfaces: source.capture != nil && source.capture.SeparateTCPInterfaces}
 	var dirs []http1Direction
-	err := walkHTTPPackets(source, func(pkt PacketRecord, frame Frame, flow int, payload []byte) error {
+	err := walkTCPMessagePackets(source, func(pkt PacketRecord, frame Frame, flow int, payload []byte) error {
 		if selected != nil && !selected[pkt.Index] || !keepTCPMessageSegment(&frame, len(payload), TCPFlagSYN|TCPFlagFIN|TCPFlagRST) {
 			return nil
 		}

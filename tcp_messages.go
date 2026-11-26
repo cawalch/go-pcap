@@ -36,6 +36,29 @@ type messagePacket struct {
 	timestamp int64
 }
 
+func collectTCPMessages(source ipFrameSource) (tcpMessageCollector, error) {
+	collector := tcpMessageCollector{separateInterfaces: source.capture != nil && source.capture.SeparateTCPInterfaces}
+	err := walkTCPMessagePackets(source, collector.add)
+	return collector, err
+}
+
+func walkTCPMessagePackets(source ipFrameSource, visit func(PacketRecord, Frame, int, []byte) error) error {
+	var table flowIndexTable
+	remaining := MaxTotalStreamBytes
+	return source.walk(func(pkt PacketRecord, f Frame, payload []byte) error {
+		key, _ := makeCanonicalFlowKey(f.IPProtocol, f.SrcAddr, f.SrcPort, f.DstAddr, f.DstPort)
+		flow, _, err := table.lookupOrInsert(key)
+		if err != nil || f.IPProtocol != IPProtoTCP {
+			return err
+		}
+		if len(payload) > remaining {
+			return ErrReassemblyLimit
+		}
+		remaining -= len(payload)
+		return visit(pkt, f, flow, payload)
+	})
+}
+
 func (c *tcpMessageCollector) add(pkt PacketRecord, frame Frame, flow int, payload []byte) error {
 	if !keepTCPMessageSegment(&frame, len(payload), TCPFlagSYN) {
 		return nil

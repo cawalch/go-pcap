@@ -412,10 +412,13 @@ const (
 	MaxLDAPRecordsPerScan   = 16_384
 	MaxLDAPTextBytesPerScan = 16 << 20
 	// MaxDCERPCContexts bounds presentation context offers and acknowledgment results in one DCE/RPC PDU.
-	MaxDCERPCContexts    = 64
-	MaxRDPPacketBytes    = 16 << 10
-	MaxRDPCookieBytes    = 512
-	MaxRDPRecordsPerScan = 16_384
+	MaxDCERPCContexts = 64
+	// Bounds for DCE/RPC capture results.
+	MaxDCERPCRecordsPerScan  = 16_384
+	MaxDCERPCContextsPerScan = 65_536
+	MaxRDPPacketBytes        = 16 << 10
+	MaxRDPCookieBytes        = 512
+	MaxRDPRecordsPerScan     = 16_384
 )
 
 // Kerberos v5 message types and encryption types (RFC 4120).
@@ -631,7 +634,7 @@ var (
 	ErrKRB5Limit = errors.New("Kerberos v5 message exceeds limit")
 	// ErrLDAPLimit indicates an LDAP request or scan exceeds a limit.
 	ErrLDAPLimit = errors.New("LDAP request exceeds limit")
-	// ErrDCERPCLimit indicates a DCE/RPC presentation context list exceeds the limit.
+	// ErrDCERPCLimit indicates a DCE/RPC fragment or capture scan exceeds a limit.
 	ErrDCERPCLimit = errors.New("DCE/RPC fragment exceeds limit")
 	// ErrRDPLimit indicates an RDP negotiation message or capture exceeds limits.
 	ErrRDPLimit = errors.New("RDP negotiation message exceeds limit")

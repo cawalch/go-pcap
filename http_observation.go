@@ -34,31 +34,8 @@ func (c *Capture) HTTPRequestsFromReaderAt(r io.ReaderAt) ([]HTTPRequestObservat
 	return scanHTTPRequests(c.tcpReaderAt(r))
 }
 
-func collectHTTPRequestStreams(source ipFrameSource) (tcpMessageCollector, error) {
-	collector := tcpMessageCollector{separateInterfaces: source.capture != nil && source.capture.SeparateTCPInterfaces}
-	err := walkHTTPPackets(source, collector.add)
-	return collector, err
-}
-
-func walkHTTPPackets(source ipFrameSource, visit func(PacketRecord, Frame, int, []byte) error) error {
-	var table flowIndexTable
-	remaining := MaxTotalStreamBytes
-	return source.walk(func(pkt PacketRecord, f Frame, payload []byte) error {
-		key, _ := makeCanonicalFlowKey(f.IPProtocol, f.SrcAddr, f.SrcPort, f.DstAddr, f.DstPort)
-		flow, _, err := table.lookupOrInsert(key)
-		if err != nil || f.IPProtocol != IPProtoTCP {
-			return err
-		}
-		if len(payload) > remaining {
-			return ErrReassemblyLimit
-		}
-		remaining -= len(payload)
-		return visit(pkt, f, flow, payload)
-	})
-}
-
 func scanHTTPRequests(source ipFrameSource) ([]HTTPRequestObservation, error) {
-	collector, err := collectHTTPRequestStreams(source)
+	collector, err := collectTCPMessages(source)
 	if err != nil {
 		return nil, err
 	}

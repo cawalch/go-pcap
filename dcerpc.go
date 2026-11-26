@@ -55,8 +55,16 @@ type DCERPCMessage struct {
 // Malformed or unsupported fragments return [ErrInvalidDCERPC].
 // Oversized context and result lists return [ErrDCERPCLimit].
 func ParseDCERPC(buf []byte) (DCERPCMessage, error) {
+	fragment, order, err := readDCERPCFragment(buf)
+	if err != nil {
+		return DCERPCMessage{}, err
+	}
+	return parseDCERPCFragment(fragment, order)
+}
+
+func readDCERPCFragment(buf []byte) ([]byte, binary.ByteOrder, error) {
 	if len(buf) < dcerpcHeaderBytes || buf[0] != 5 || buf[1] != 0 {
-		return DCERPCMessage{}, fmt.Errorf("%w: expected DCE/RPC 5.0 header", ErrInvalidDCERPC)
+		return nil, nil, fmt.Errorf("%w: expected DCE/RPC 5.0 header", ErrInvalidDCERPC)
 	}
 	var order binary.ByteOrder
 	switch buf[4] {
@@ -65,14 +73,18 @@ func ParseDCERPC(buf []byte) (DCERPCMessage, error) {
 	case 0x10:
 		order = binary.LittleEndian
 	default:
-		return DCERPCMessage{}, fmt.Errorf("%w: unsupported data representation %#x", ErrInvalidDCERPC, buf[4])
+		return nil, nil, fmt.Errorf("%w: unsupported data representation %#x", ErrInvalidDCERPC, buf[4])
 	}
 
-	length := order.Uint16(buf[8:10])
-	end := int(length)
+	end := int(order.Uint16(buf[8:10]))
 	if end < dcerpcHeaderBytes || end > len(buf) {
-		return DCERPCMessage{}, fmt.Errorf("%w: fragment length %d", ErrInvalidDCERPC, length)
+		return nil, nil, fmt.Errorf("%w: fragment length %d", ErrInvalidDCERPC, end)
 	}
+	return buf[:end], order, nil
+}
+
+func parseDCERPCFragment(buf []byte, order binary.ByteOrder) (DCERPCMessage, error) {
+	end := len(buf)
 	if authLength := int(order.Uint16(buf[10:12])); authLength != 0 {
 		trailer := end - authLength - dcerpcAuthTrailerBytes
 		if trailer < dcerpcHeaderBytes || int(buf[trailer+2]) > trailer-dcerpcHeaderBytes {
@@ -84,7 +96,7 @@ func ParseDCERPC(buf []byte) (DCERPCMessage, error) {
 	body := buf[dcerpcHeaderBytes:end]
 	out := DCERPCMessage{
 		PacketType: DCERPCPacketType(buf[2]), Flags: buf[3],
-		FragmentLength: length, CallID: order.Uint32(buf[12:16]),
+		FragmentLength: uint16(len(buf)), CallID: order.Uint32(buf[12:16]),
 	}
 	switch out.PacketType {
 	case DCERPCRequest, DCERPCResponse:

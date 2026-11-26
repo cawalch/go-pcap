@@ -135,6 +135,8 @@ These limits apply to capture scans. Streaming writers check individual calls an
 | `MaxLDAPRecordsPerScan` | 16,384 records | Bounds LDAP requests returned per capture scan |
 | `MaxLDAPTextBytesPerScan` | 16 MiB | Bounds decoded LDAP string bytes retained per scan |
 | `MaxDCERPCContexts` | 64 entries | Bounds DCE/RPC presentation context offers and acknowledgment results |
+| `MaxDCERPCRecordsPerScan` | 16,384 records | Bounds DCE/RPC fragments returned per capture scan |
+| `MaxDCERPCContextsPerScan` | 65,536 entries | Bounds DCE/RPC presentation context offers retained per scan |
 | `MaxRDPPacketBytes` | 16 KiB | Bounds RDP TPKT/X.224 negotiation PDU length |
 | `MaxRDPRecordsPerScan` | 16,384 records | Bounds RDP negotiation records returned per capture scan |
 
@@ -1446,6 +1448,15 @@ major and minor versions in wire order. The result owns its context list
 and UUID strings. RPC stub data and authentication tokens stay opaque.
 `ErrInvalidDCERPC` covers malformed or unsupported fragments.
 `ErrDCERPCLimit` covers context and result lists beyond `MaxDCERPCContexts`.
+
+Use `Capture.DCERPC` or `Capture.DCERPCFromReaderAt` for direct TCP.
+The scanner considers all TCP ports, including dynamically selected server
+ports. It checks each contiguous direction from its first available byte
+and advances by declared fragment lengths. It skips complete fragments of
+unsupported types and stops at a gap or invalid common header. Results use
+capture-wide flow indices and follow the order of the packets supplying the
+first byte of each fragment. The existing stream and ReaderAt read limits
+apply to the TCP scan.
 
 ## Compute C2 beacon and flow statistics
 
