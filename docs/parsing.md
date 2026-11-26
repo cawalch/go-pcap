@@ -1435,6 +1435,23 @@ direction, stops at a gap or incomplete envelope, and skips unsupported
 messages. The ReaderAt scan reads unrelated packets only through the headers
 and any prefix already fetched by the frame walker.
 
+Use `Capture.KeyedLDAP` or `Capture.KeyedLDAPFromReaderAt` for LDAPS on
+TCP port 636. Pass `nil` for the extra key log to use the capture's
+PcapNG decryption secrets. Each request comes from authenticated TLS 1.2
+or TLS 1.3 application bytes in the client direction.
+
+```go
+requests, err := capture.KeyedLDAP(data, nil)
+```
+
+The plaintext offset identifies the request within the recovered direction.
+`Records` and `PacketIndices` identify the ciphertext records and packets
+that contributed to it. A TLS record can contain parts of several requests.
+The scan applies the LDAP output limits and the shared TLS provenance
+budget. Missing keys yield no request. Coverage reports gaps, invalid
+records, and other cases where the recovered direction has an opaque prefix
+or incomplete tail.
+
 ## Parse DCE/RPC fragments
 
 Pass bytes starting at a connection-oriented DCE/RPC 5.0 fragment to

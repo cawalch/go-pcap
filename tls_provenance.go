@@ -215,6 +215,10 @@ func truncatedTCPPayload(source ipFrameSource, pkt PacketRecord, frame *Frame) (
 // Reassemble the contiguous TCP prefix and recover record provenance for each
 // TLS opening. The source supplies either capture bytes or a ReaderAt.
 func scanTLSProvenance(source ipFrameSource, extraKeyLog []byte) ([]tlsProvenanceStream, error) {
+	return scanTLSProvenanceOnPort(source, extraKeyLog, 0)
+}
+
+func scanTLSProvenanceOnPort(source ipFrameSource, extraKeyLog []byte, port uint16) ([]tlsProvenanceStream, error) {
 	if err := source.capture.validateContainer(); err != nil {
 		return nil, err
 	}
@@ -241,7 +245,7 @@ func scanTLSProvenance(source ipFrameSource, extraKeyLog []byte) ([]tlsProvenanc
 		source.reader = &scanReadBudget{r: source.reader, remaining: MaxReaderAtScanBytes}
 	}
 	var meta []streamMetadata
-	streams, err := collectStreams(source, 0, &meta, tcpWireAll)
+	streams, err := collectStreams(source, port, &meta, tcpWireAll)
 	if err != nil {
 		return nil, err
 	}
