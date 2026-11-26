@@ -285,6 +285,20 @@ attribution separate, since a quote may contain only the transport header.
 The scan skips fragmented outer errors and quotes without transport ports.
 The group limit is `MaxICMPFlowErrorGroups`. ReaderAt uses its normal
 per-call read budget. Errors return no groups.
+
+Use `capture.TCPZeroWindows(data)` or `capture.TCPZeroWindowsFromReaderAt(reader)`
+to count captured advertisements of a zero TCP receive window. Each
+`TCPZeroWindowSummary` names the advertising endpoint and its peer, the
+flow index, and the zero-based indices and timestamps of the first and last
+matching packets. Rows follow the order of their first matching packet.
+
+A packet must have a complete TCP header and advertise a zero window with
+ACK set and SYN, FIN, and RST clear. The scan skips IP fragments. It counts
+repeated advertisements and can combine several connections that reuse a
+five-tuple. Use a capture from one observation point to interpret these
+observations. They do not establish how long a receive window stayed closed.
+The scan uses `MaxFlows`, with at most two rows per flow, and returns no
+results on error. ReaderAt uses the normal per-call read budget.
   For ReaderAt captures, get the frame bytes with `PacketPayloadFromReaderAt`.
 - Supported network headers: `IPv4` (with fragment detection), `IPv6` (with
   bounded extension-header traversal for Hop-by-Hop, Routing, Fragment,
@@ -624,6 +638,12 @@ captures.
 Pass `-icmp` to the DNS transaction command to include counts and frame
 references for ICMP errors that quote an observed DNS flow. The ICMP rows
 are flow-level observations and follow the DNS report.
+
+Pass `-tcp-zero-window` to see which endpoint advertised a zero receive
+window on unicast TCP port 53 flows. The command reports counts and first and
+last frame numbers even if the capture contains no complete DNS message for
+that flow. These rows describe the flow independently of individual DNS
+transactions.
 
 | Frames in the synthetic capture | Observation |
 | --- | --- |
