@@ -63,7 +63,9 @@ func htons(v uint16) uint16 {
 }
 
 // OpenLive opens a live packet capture handle on ifaceName using an AF_PACKET
-// raw socket and standard library syscalls without cgo or libpcap.
+// raw socket and standard library syscalls without cgo or libpcap. It accepts
+// Ethernet and Linux loopback interfaces. An unsupported interface hardware
+// type returns an error wrapping [ErrInvalidHeader].
 func OpenLive(ifaceName string, opts LiveOptions) (*LiveCapture, error) {
 	if ifaceName == "" {
 		return nil, fmt.Errorf("%w: empty interface name", ErrInvalidHeader)
@@ -88,6 +90,19 @@ func OpenLive(ifaceName string, opts LiveOptions) (*LiveCapture, error) {
 			_ = syscall.Close(fd)
 		}
 	}()
+
+	// SIOCGIFHWADDR returns sa_family as the ARPHRD type. Reserve space for
+	// the largest Linux ifreq union (24 bytes on 64-bit architectures).
+	var req [syscall.IFNAMSIZ + 24]byte
+	copy(req[:syscall.IFNAMSIZ], iface.Name)
+	_, _, errno := syscall.Syscall(syscall.SYS_IOCTL, uintptr(fd), syscall.SIOCGIFHWADDR, uintptr(unsafe.Pointer(&req)))
+	if errno != 0 {
+		return nil, fmt.Errorf("SIOCGIFHWADDR for %s: %w", ifaceName, errno)
+	}
+	hardwareType := binary.NativeEndian.Uint16(req[syscall.IFNAMSIZ:])
+	if hardwareType != syscall.ARPHRD_ETHER && hardwareType != syscall.ARPHRD_LOOPBACK {
+		return nil, fmt.Errorf("%w: unsupported Linux live interface %q hardware type %d", ErrInvalidHeader, ifaceName, hardwareType)
+	}
 
 	if normOpts.Promiscuous {
 		// Linux packet_mreq contains the interface index, membership type,

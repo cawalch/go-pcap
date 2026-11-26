@@ -1375,8 +1375,11 @@ interface using standard-library `syscall` descriptors (`/dev/bpf*` on macOS,
 and `BPFFilterIPv4Host` to construct classic BPF filter programs, or `EvalBPF`
 to evaluate a classic BPF program in memory.
 
-On Linux, `Promiscuous` requests membership for the capture socket until it
-closes. `OriginalLen` retains the wire length when the socket filter or
+On Linux, `OpenLive` accepts Ethernet and loopback interfaces and reports
+`LinkTypeEthernet` for both. Linux presents loopback packets with a synthetic
+Ethernet header. Other interface hardware types return an error wrapping
+`ErrInvalidHeader`. `Promiscuous` requests membership for the capture socket
+until it closes. `OriginalLen` retains the wire length when the socket filter or
 `SnapLen` shortens a packet. `TimestampNs` comes from the kernel when it
 captures the packet and uses nanosecond resolution. The receive ring holds at
 least two blocks sized to fit the requested snapshot, so its allocation can
