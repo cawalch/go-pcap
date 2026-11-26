@@ -77,7 +77,7 @@ func (c *Capture) HTTP1RequestEvidenceFromReaderAt(r io.ReaderAt) ([]HTTP1Reques
 }
 
 func scanHTTP1RequestEvidence(source ipFrameSource) ([]HTTP1RequestEvidence, error) {
-	collector, err := collectHTTPRequestStreams(source)
+	collector, err := collectTCPMessages(source)
 	if err != nil {
 		return nil, err
 	}
