@@ -1604,6 +1604,27 @@ On Windows, `TimestampNs` uses the userspace wall clock when `ReadPacket`
 accepts the packet. A positive `Timeout` applies to each `ReadPacket` call,
 including time spent waiting for a filter match.
 
+### Framing, direction, and interface mode
+
+Use `live.LinkType()` to decode packets or choose a link type for a capture
+writer. `OpenLive` uses the interface's existing wireless mode and the
+backend's default packet direction. `LiveOptions` configures the snapshot length,
+buffering, timeout, immediate delivery, promiscuous mode, and classic BPF
+filter.
+
+| Platform | Framing returned by go-pcap | Kernel capabilities |
+| --- | --- | --- |
+| Linux | Ethernet for the supported interface hardware types. | Packet sockets can suppress outgoing copies with `PACKET_IGNORE_OUTGOING`. The wireless subsystem manages monitor interfaces. [Linux packet sockets][linux-packet-direction] · [Linux wireless modes][linux-wireless-modes] |
+| macOS | The capture-file link type mapped from the interface's native BPF datalink. | BPF can list and select datalinks offered by the interface and control whether to include sent packets. [Apple BPF ioctls][apple-bpf-ioctls] |
+| Windows | IPv4 from a raw socket. | `SIO_RCVALL` delivers IP datagrams for the bound interface. go-pcap enables it when you request promiscuous mode. [Winsock raw capture][winsock-rcvall] |
+
+[linux-packet-direction]: https://github.com/torvalds/linux/blob/adc218676eef25575469234709c2d87185ca223a/net/packet/af_packet.c#L4072-L4085
+[linux-wireless-modes]: https://wireless.docs.kernel.org/en/latest/en/users/documentation/modes.html#monitor-mode
+[apple-bpf-ioctls]: https://github.com/apple-oss-distributions/xnu/blob/ac9718fb1af618d5ce8678d0dc6e8a58f252216f/bsd/net/bpf.h#L194-L196
+[winsock-rcvall]: https://learn.microsoft.com/en-us/windows/win32/winsock/sio-rcvall#remarks
+
+### Live packet counters
+
 Call `live.Stats()` before closing the handle to check kernel packet loss:
 
 ```go
