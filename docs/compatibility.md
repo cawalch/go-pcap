@@ -62,6 +62,7 @@ from a failed call.
 | Container open | A valid header followed by an incomplete trailing record can produce a usable snapshot. Check `InputTruncated()` and `DeclaredExtent()` to distinguish this from a complete capture. |
 | Compressed signatures | A leading Zstandard data frame or XZ stream signature returns `ErrUnsupportedZstd` or `ErrUnsupportedXZ` with a nil capture. Both errors also match `ErrNotPCAP` and `ErrInvalidMagic`. |
 | Link-type coverage | `UnsupportedLinkTypePackets` and `UnsupportedLinkTypePacketsFromReaderAt` report complete records on unsupported interfaces. The ReaderAt metadata pass is bounded by `MaxReaderAtScanBytes`. Packet iteration still exposes those records, and frame-based scans can return empty or partial results. |
+| ICMP flow errors | Summaries count observations by quoted direction, type, and code. Flow indices use the regular flow order, and first and last packet indices follow capture order. |
 | Packet iteration and collection | Iterators can yield complete packets followed by one terminal error. Breaking stops iteration. On a walk error the collecting methods discard the accumulated records. |
 | ReaderAt flow, DNS, TLS and QUIC scans | The per-call read budget covers selected payload and metadata. Exceeding `MaxReaderAtScanBytes` returns `ErrPacketLimit`. A larger file can fit within the budget. |
 | QUIC 1-RTT packet decryption | `QUIC1RTTDecoder.Open` returns owned, authenticated frame bytes on success. Oversized input returns `ErrQUICLimit`. Invalid context, headers or authentication return `ErrInvalidQUIC`. |
