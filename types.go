@@ -44,6 +44,7 @@ const (
 	LinkTypeEthernet          LinkType = 1   // IEEE 802.3 Ethernet
 	LinkTypePPP               LinkType = 9   // Point-to-Point Protocol
 	LinkTypePPPHDLC           LinkType = 50  // PPP in HDLC-like framing
+	LinkTypePPPEther          LinkType = 51  // PPPoE without an Ethernet header
 	LinkTypeRaw               LinkType = 101 // Raw IP (IPv4 or IPv6)
 	LinkTypeIEEE80211         LinkType = 105 // IEEE 802.11 MAC frames
 	LinkTypeLinuxSLL          LinkType = 113 // Linux cooked capture v1
@@ -54,6 +55,7 @@ const (
 	LinkTypePPPWithDir        LinkType = 204 // PPP with preceding direction byte
 	LinkTypeIPv4              LinkType = 228 // Raw IPv4
 	LinkTypeIPv6              LinkType = 229 // Raw IPv6
+	LinkTypeNFLOG             LinkType = 239 // Linux netfilter log
 	LinkTypeLinuxSLL2         LinkType = 276 // Linux cooked capture v2
 )
 
@@ -202,6 +204,7 @@ const (
 	LayerApplePktap
 	LayerPPP
 	LayerPFLOG
+	LayerNFLOG
 )
 
 // String returns the lowercase layer identifier.
@@ -255,6 +258,8 @@ func (p LayerProto) String() string {
 		return "ppp"
 	case LayerPFLOG:
 		return "pflog"
+	case LayerNFLOG:
+		return "nflog"
 	case LayerApplePktap:
 		return "apple_pktap"
 	case LayerIKEv2:

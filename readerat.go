@@ -444,33 +444,36 @@ func (b *scanReadBudget) ReadAt(p []byte, off int64) (int, error) {
 // extendFramePrefix resolves incomplete headers and nested tunnel lengths.
 func extendFramePrefix(budget *scanReadBudget, size int64, pkt PacketRecord, f *Frame, data []byte, scratch *[]byte) ([]byte, error) {
 	for {
-		complete, required := completeFlowPrefix(f, data, pkt.PayloadLength)
-		if complete {
-			return data, nil
-		}
 		n := int64(len(data))
-		next := pkt.PayloadLength
-		// Bytes after the outer IP datagram cannot affect any nested header.
-		for _, layer := range f.LayerSlices() {
-			offset := int(layer.Offset)
-			switch layer.Proto {
-			case LayerIPv4:
-				next = min(next, int64(offset)+int64(binary.BigEndian.Uint16(data[offset+2:])))
-			case LayerIPv6:
-				next = min(next, int64(offset)+40+int64(binary.BigEndian.Uint16(data[offset+4:])))
-			default:
-				continue
+		next, limit := pkt.PayloadLength, pkt.PayloadLength
+		// NFLOG needs the entire TLV list to distinguish the two byte orders.
+		if pkt.LinkType != LinkTypeNFLOG && (pkt.LinkType != LinkTypeApplePktap || f.Layers[1].Proto != LayerNFLOG) {
+			complete, required := completeFlowPrefix(f, data, pkt.PayloadLength)
+			if complete {
+				return data, nil
 			}
-			break
+			// Bytes after the outer IP datagram cannot affect any nested header.
+			for _, layer := range f.LayerSlices() {
+				offset := int(layer.Offset)
+				switch layer.Proto {
+				case LayerIPv4:
+					limit = min(limit, int64(offset)+int64(binary.BigEndian.Uint16(data[offset+2:])))
+				case LayerIPv6:
+					limit = min(limit, int64(offset)+40+int64(binary.BigEndian.Uint16(data[offset+4:])))
+				default:
+					continue
+				}
+				break
+			}
+			next = limit
+			if required != 0 {
+				next = min(next, required)
+			} else if f.Anomalies.TruncatedLayer {
+				next = min(next, 2*n)
+			}
 		}
 		if next <= n {
 			return data, nil
-		}
-		limit := next
-		if required != 0 {
-			next = min(next, required)
-		} else if f.Anomalies.TruncatedLayer {
-			next = min(next, 2*n)
 		}
 		if err := budget.check(next - n); err != nil {
 			return nil, err

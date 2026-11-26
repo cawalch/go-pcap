@@ -203,7 +203,7 @@ func DecodeFrame(data []byte, linkType LinkType) (f Frame, err error) {
 		return decodeApplePktap(data), nil
 
 	default:
-		if err := decodePPPOrPFLOG(r, linkType, &f); err != nil {
+		if err := decodeUncommonLinkType(r, linkType, &f); err != nil {
 			return Frame{}, err
 		}
 		return f, nil
@@ -213,16 +213,38 @@ func DecodeFrame(data []byte, linkType LinkType) (f Frame, err error) {
 	return f, nil
 }
 
-func decodePPPOrPFLOG(r *SafeReader, linkType LinkType, f *Frame) error {
+func decodeUncommonLinkType(r *SafeReader, linkType LinkType, f *Frame) error {
 	switch linkType {
 	case LinkTypePPP, LinkTypePPPHDLC, LinkTypePPPPPPD, LinkTypePPPWithDir:
 		decodePPP(r, linkType, f)
+	case LinkTypePPPEther:
+		decodePPPEther(r, f)
 	case LinkTypePFLOG:
 		decodePFLOG(r, f)
+	case LinkTypeNFLOG:
+		decodeNFLOG(r, f)
 	default:
 		return fmt.Errorf("%w: unsupported link type %d", ErrInvalidFrame, linkType)
 	}
 	return nil
+}
+
+func decodePPPEther(r *SafeReader, f *Frame) {
+	const headerLen = 6
+	if r.Size() < headerLen {
+		f.Anomalies.TruncatedLayer = true
+		return
+	}
+	if r.data[0] != 0x11 || r.data[1] != 0 { // Version 1, type 1, session stage.
+		return
+	}
+	bound := headerLen + int64(binary.BigEndian.Uint16(r.data[4:6]))
+	if bound > r.Size() {
+		f.Anomalies.TruncatedLayer = true
+		return
+	}
+	f.EtherType = EtherTypePPPoESession
+	dispatchEtherType(r, 0, bound, f)
 }
 
 func decodePPP(r *SafeReader, linkType LinkType, f *Frame) {
