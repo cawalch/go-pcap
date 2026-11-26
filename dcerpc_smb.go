@@ -43,25 +43,14 @@ func isRPCSMBPort(src, dst uint16) bool {
 	return src == 139 || src == 445 || dst == 139 || dst == 445
 }
 
-func (s *smbRPCScan) addTCP(c *tcpMessageCollector, pkt PacketRecord, f Frame, flow int, data []byte) error {
-	if !isRPCSMBPort(f.SrcPort, f.DstPort) {
-		return c.add(pkt, f, flow, data)
+func (s *smbRPCScan) pairOpening(srcPort, dstPort uint16, first, peer int) {
+	if !isRPCSMBPort(srcPort, dstPort) {
+		return
 	}
-	if !keepTCPMessageSegment(&f, len(data), TCPFlagSYN) {
-		return nil
-	}
-	before := len(c.directions)
-	dirs, err := c.addSegment(pkt, f, flow, data)
-	if err != nil || len(c.directions) == before || dirs[1] == 0 {
-		return err
-	}
-	first := c.directions[dirs[0]-1].packets[0].index
-	peer := c.directions[dirs[1]-1].packets[0].index
 	if s.openings == nil {
 		s.openings = make(map[int]int)
 	}
 	s.openings[first], s.openings[peer] = min(first, peer), min(first, peer)
-	return nil
 }
 
 func (s *smbRPCScan) collect(dir *tcpMessageDirection, data []byte, spans []packetSpan) error {
@@ -105,11 +94,17 @@ func (s *smbRPCScan) collect(dir *tcpMessageDirection, data []byte, spans []pack
 		var previous smbRPCEvent
 		for frame := data[start:consumed]; len(frame) != 0; {
 			commandAt := consumed - len(frame)
-			cmd, rest, err := splitSMB2Command(frame)
-			if err != nil {
+			cmd := frame
+			if len(cmd) < 64 || !bytes.HasPrefix(cmd, smb2Magic) || binary.LittleEndian.Uint16(cmd[4:6]) != 64 {
 				break
 			}
-			frame = rest
+			frame = nil
+			if next := binary.LittleEndian.Uint32(cmd[20:24]); next != 0 {
+				if !validSMB2NextCommand(next, len(cmd)) {
+					break
+				}
+				cmd, frame = cmd[:next], cmd[next:]
+			}
 			e := readSMBRPCEvent(cmd, previous)
 			previous = e
 			if !e.keep(cmd[64:]) {

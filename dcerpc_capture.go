@@ -35,11 +35,12 @@ func (c *Capture) DCERPCFromReaderAt(r io.ReaderAt) ([]DCERPCRecord, error) {
 }
 
 func scanDCERPC(source ipFrameSource) ([]DCERPCRecord, error) {
-	collector := tcpMessageCollector{separateInterfaces: source.capture != nil && source.capture.SeparateTCPInterfaces}
 	var smb smbRPCScan
-	err := walkTCPMessagePackets(source, func(pkt PacketRecord, f Frame, flow int, data []byte) error {
-		return smb.addTCP(&collector, pkt, f, flow, data)
-	})
+	collector := tcpMessageCollector{
+		separateInterfaces: source.capture != nil && source.capture.SeparateTCPInterfaces,
+		onPair:             smb.pairOpening,
+	}
+	err := walkTCPMessagePackets(source, collector.add)
 	if err != nil {
 		return nil, err
 	}
@@ -57,8 +58,11 @@ func scanDCERPC(source ipFrameSource) ([]DCERPCRecord, error) {
 		return nil
 	}
 	err = collector.walkContiguous(func(dir *tcpMessageDirection, data []byte, spans []packetSpan, _ StreamAnomalies) error {
-		if isRPCSMBPort(dir.src.Port(), dir.dst.Port()) && !hasDCERPCPrefix(data) {
-			return smb.collect(dir, data, spans)
+		if !hasDCERPCPrefix(data) {
+			if isRPCSMBPort(dir.src.Port(), dir.dst.Port()) {
+				return smb.collect(dir, data, spans)
+			}
+			return nil
 		}
 		span := 0
 		return walkDCERPCFragments(data, func(off int, msg DCERPCMessage) error {
@@ -83,7 +87,7 @@ func hasDCERPCPrefix(data []byte) bool {
 }
 
 func walkDCERPCFragments(data []byte, visit func(int, DCERPCMessage) error) error {
-	for off := 0; hasDCERPCPrefix(data[off:]); {
+	for off := 0; off < len(data); {
 		fragment, order, err := readDCERPCFragment(data[off:])
 		if err != nil {
 			break

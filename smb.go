@@ -110,9 +110,21 @@ func parseSMBCommand(buf []byte) (SMB2Message, []byte, error) {
 			SessionID:           binary.LittleEndian.Uint64(buf[44:52]),
 		}, nil, nil
 	}
-	buf, rest, err := splitSMB2Command(buf)
-	if err != nil {
-		return SMB2Message{}, nil, err
+	if len(buf) < 64 || !bytes.HasPrefix(buf, smb2Magic) {
+		return SMB2Message{}, nil, fmt.Errorf("%w: missing 64-byte SMB2 header", ErrInvalidSMB)
+	}
+	structSize := binary.LittleEndian.Uint16(buf[4:6])
+	if structSize != 64 {
+		return SMB2Message{}, nil, fmt.Errorf("%w: invalid SMB2 header structure size %d", ErrInvalidSMB, structSize)
+	}
+
+	var rest []byte
+	if next := binary.LittleEndian.Uint32(buf[20:24]); next != 0 {
+		if !validSMB2NextCommand(next, len(buf)) {
+			return SMB2Message{}, nil, fmt.Errorf("%w: invalid compound command offset %d", ErrInvalidSMB, next)
+		}
+		rest = buf[next:]
+		buf = buf[:next]
 	}
 
 	status := binary.LittleEndian.Uint32(buf[8:12])
@@ -214,25 +226,9 @@ func parseSMBCommand(buf []byte) (SMB2Message, []byte, error) {
 	return msg, rest, nil
 }
 
-func splitSMB2Command(buf []byte) ([]byte, []byte, error) {
-	if len(buf) < 64 || !bytes.HasPrefix(buf, smb2Magic) {
-		return nil, nil, fmt.Errorf("%w: missing 64-byte SMB2 header", ErrInvalidSMB)
-	}
-	structSize := binary.LittleEndian.Uint16(buf[4:6])
-	if structSize != 64 {
-		return nil, nil, fmt.Errorf("%w: invalid SMB2 header structure size %d", ErrInvalidSMB, structSize)
-	}
-
-	var rest []byte
-	if next := binary.LittleEndian.Uint32(buf[20:24]); next != 0 {
-		if next < 64 || next%8 != 0 || uint64(next)+64 > uint64(len(buf)) {
-			return nil, nil, fmt.Errorf("%w: invalid compound command offset %d", ErrInvalidSMB, next)
-		}
-		rest = buf[next:]
-		buf = buf[:next]
-	}
-
-	return buf, rest, nil
+// A compound offset must leave room for the next SMB2 header.
+func validSMB2NextCommand(next uint32, length int) bool {
+	return next >= 64 && next%8 == 0 && uint64(next)+64 <= uint64(length)
 }
 
 func smbRequestName(buf, descriptor []byte, minOffset int) (string, error) {
