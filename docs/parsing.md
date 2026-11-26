@@ -45,8 +45,9 @@ capture fields unchanged. [Input and buffer lifetimes](compatibility.md#inputs-a
 
 ### Read compressed or non-seekable input
 
-When your input comes from a pipe or exceeds the in-memory gzip limit, copy
-the uncompressed capture to a temporary file with a caller-defined size limit.
+Capture parsing uses a byte slice or an `io.ReaderAt` source with a known size.
+For a pipe or gzip input beyond the in-memory limit, stage the
+uncompressed capture in a temporary file with a caller-defined size limit.
 For gzip, wrap the input in `compress/gzip.NewReader` before copying. For
 uncompressed input, copy directly from the pipe. Use `io.LimitReader` with
 the limit plus one byte so you can detect excess output. If copying fails
@@ -55,8 +56,9 @@ opening the capture so gzip trailer errors reach the caller.
 
 Pass the temporary file and the copied byte count to `NewFromReaderAt`.
 Keep the file available during analysis and remove it after closing.
-Check `InputTruncated()` if your application requires complete packets.
-The normal ReaderAt scan limits apply to the temporary file.
+Check `InputTruncated()` if your application requires a complete capture.
+Packet offsets and `DeclaredExtent()` refer to the uncompressed file. The
+normal ReaderAt scan limits apply to that file.
 
 Capture open functions expect classic PCAP or PcapNG bytes. They report
 `ErrUnsupportedZstd` for a leading Zstandard data frame and `ErrUnsupportedXZ`
@@ -521,6 +523,15 @@ let you repeat these checks on the synthetic fixtures.
 Call `capture.Streams(data)` to reassemble ordered directional TCP byte streams
 (`Client` and `Server`) for every TCP flow in the capture, or call
 `ReassembleTCP(segments)` directly on a slice of `TCPSegmentInput`.
+Both APIs return results in batches. For live collection, `ReadPacket`
+delivers individual packets. You can record a capture and reassemble its
+streams afterward.
+
+`StreamAnomalies.SequenceGap` identifies missing bytes between the captured
+segments. It cannot attribute the gap to network loss or loss at the capture
+point. For packet-level inspection, `DecodeFrame` exposes TCP flags and the
+advertised window on `Frame`.
+
 Overlapping segments use capture order unless the caller provides
 [checksum evidence](#verify-packet-checksums). Differing bytes at the same
 sequence offset set `StreamAnomalies.OverlapConflict`.
@@ -1569,6 +1580,10 @@ interface using standard-library `syscall` descriptors (`/dev/bpf*` on macOS,
 `libpcap`. Use `BPFFilterTCPPort`, `BPFFilterUDPPort`, `BPFFilterIPProtocol`,
 and `BPFFilterIPv4Host` to construct classic BPF filter programs, or `EvalBPF`
 to evaluate a classic BPF program in memory.
+
+`LiveOptions.BPFFilter` takes classic BPF instructions. If your application
+accepts pcap-filter expressions, compile them outside go-pcap for the capture
+link type before supplying the instructions.
 
 Call `LiveDevices()` to discover interface names, indexes, MTUs and flags
 before opening a capture. The list is sorted by index. Use `HasLinkType`
