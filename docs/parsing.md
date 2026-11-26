@@ -332,6 +332,21 @@ matching offload seed can return `(false, true)`. This reports a possible
 transmit offload or, for zero-checksum IPv4 UDP, an omitted checksum.
 A checksum mismatch or malformed helper input can return `(false, false)`.
 
+Use `DecodeFrameWithChecksums` when you have the frame bytes and want the
+result in `Frame.Anomalies`. The check uses the innermost decoded IP header.
+It reports an observed IPv4 header mismatch in `InvalidIPChecksum`, and a
+complete TCP or UDP checksum mismatch in `InvalidL4Checksum`. Truncated
+frames leave these flags clear. Transport verification skips fragmented
+datagrams, possible offload values, and source or routing options that can
+change the pseudo-header addresses. IPv4 UDP may omit its checksum.
+
+When calling `ReassembleTCP` directly, copy `InvalidL4Checksum` into
+`TCPSegmentInput.InvalidChecksum` for TCP payloads you inspected. If
+copies overlap, the first copy without a reported mismatch supplies the
+overlapping bytes. When every copy is flagged, capture order decides.
+Differing bytes still set `OverlapConflict`, and the reassembler retains
+ranges supported by a single segment. Unchecked inputs use capture order.
+
 ## Observe ARP and IPv6 neighbors
 
 Use `Capture.Neighbors` or `Capture.NeighborsFromReaderAt` to read local-link
@@ -504,10 +519,10 @@ let you repeat these checks on the synthetic fixtures.
 
 Call `capture.Streams(data)` to reassemble ordered directional TCP byte streams
 (`Client` and `Server`) for every TCP flow in the capture, or call
-`ReassembleTCP(segments)` directly on a slice of `TCPSegmentInput`. Reassembly
-resolves overlapping segments using a first-seen-wins policy and sets
-`StreamAnomalies.OverlapConflict` when a later overlapping segment contains
-differing bytes at the same sequence offset.
+`ReassembleTCP(segments)` directly on a slice of `TCPSegmentInput`.
+Overlapping segments use capture order unless the caller provides
+[checksum evidence](#verify-packet-checksums). Differing bytes at the same
+sequence offset set `StreamAnomalies.OverlapConflict`.
 
 `Streams` starts a new connection when an opening SYN follows a midstream
 capture or changes the opening sequence number or sending endpoint. A matching

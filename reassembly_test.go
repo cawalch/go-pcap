@@ -250,3 +250,27 @@ func TestReusedTupleSharesDirectionalByteLimit(t *testing.T) {
 		t.Fatalf("directional byte limit: first %d bytes, second %+v", len(streams[0].Client.Data), streams[1])
 	}
 }
+
+func TestReassembleTCPChecksumEvidence(t *testing.T) {
+	for _, tc := range []struct {
+		name                string
+		firstBad, secondBad bool
+		want                string
+	}{
+		{"unchecked", false, false, "stale bytes"},
+		{"mismatch on first copy", true, false, "sfreshbytes"},
+		{"mismatch on second copy", false, true, "stale bytes"},
+		{"both flagged", true, true, "stale bytes"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			result, err := ReassembleTCP([]TCPSegmentInput{
+				{Seq: 40, InvalidChecksum: tc.firstBad, Payload: []byte("stale bytes")},
+				{Seq: 41, InvalidChecksum: tc.secondBad, Payload: []byte("fresh")},
+			})
+			if err != nil || string(result.Data) != tc.want || !result.Anomalies.OverlapConflict ||
+				!result.Anomalies.Retransmission || result.OverlapBytes != 5 {
+				t.Fatalf("got %q, %+v, %v. Want %q with five conflicting overlap bytes", result.Data, result.Anomalies, err, tc.want)
+			}
+		})
+	}
+}
