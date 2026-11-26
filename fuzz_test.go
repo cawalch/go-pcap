@@ -81,6 +81,8 @@ func FuzzDecodeFrame(f *testing.F) {
 	f.Add(frame, uint16(LinkTypeEthernet))
 	f.Add(frame[14:], uint16(LinkTypeRaw))
 	f.Add(ipipIPv4(IPProtoIPv4Encap, frame[14:]), uint16(LinkTypeRaw))
+	f.Add(icmpErrorFrame(4, 3, frame[14:42]), uint16(LinkTypeRaw))
+	f.Add(icmpErrorFrame(6, 1, ipipIPv6(IPProtoTCP, frame[34:])), uint16(LinkTypeRaw))
 	f.Add(pktapFrame(156, 1, frame), uint16(LinkTypeApplePktap))
 	f.Add(append([]byte{0xff, 0x03, 0x00, 0x21}, frame[14:]...), uint16(LinkTypePPP))
 	pflog := make([]byte, 48)
@@ -113,6 +115,7 @@ func FuzzDecodeFrame(f *testing.F) {
 			}
 		}
 		_, _ = decoded.JA4T(data)
+		_, _ = decoded.ICMPEmbeddedPacket(data)
 	})
 }
 

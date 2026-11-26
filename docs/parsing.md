@@ -256,6 +256,12 @@ without heap allocations:
   datagram length and `MaxFrameLayers`. Each `LayerIPIP` marks the encapsulated
   IP header. Capture-level flow summaries, exports, and protocol scans use the
   enclosing IP addresses and protocol to preserve flow indices and Community IDs.
+- Use `frame.ICMPEmbeddedPacket(payload)` with the original frame bytes to
+  read the invoking packet from ICMPv4 errors of types 3, 4, 11 and 12 and
+  ICMPv6 errors of types 1, 2 and 3. The result contains the quoted IP addresses
+  and protocol. `HasPorts` tells you whether the quote contains both TCP or
+  UDP ports. The outer ICMP packet retains its endpoints and flow identity.
+  For ReaderAt captures, get the frame bytes with `PacketPayloadFromReaderAt`.
 - Supported network headers: `IPv4` (with fragment detection), `IPv6` (with
   bounded extension-header traversal for Hop-by-Hop, Routing, Fragment,
   Destination Options, and Authentication headers), and `ARP`.

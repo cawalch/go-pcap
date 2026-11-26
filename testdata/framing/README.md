@@ -101,3 +101,22 @@ tshark -n -r ipip.pcapng -T fields -e frame.number -e frame.protocols \
 | 1 | `eth:ethertype:ip:ip:tcp` | 40000 → 8080 |
 | 2 | `eth:ethertype:ip:ipv6:tcp` | 41000 → 8443 |
 | 3 | `eth:ethertype:ipv6:ipv6:tcp` | 41000 → 8443 |
+
+## ICMP quoted packets
+
+`icmp-errors.hex` contains synthetic ICMPv4 and ICMPv6 errors with documentation
+addresses. The ICMPv4 error quotes its IPv4 header and eight TCP bytes.
+Generate the fixture with Wireshark tools 4.6.10 (commit `eac916f07299`).
+
+```sh
+fixture_tmp=$(mktemp -d)
+TZ=UTC text2pcap -q -t ISO -l 1 icmp-errors.hex "$fixture_tmp/icmp-errors.pcapng"
+editcap --discard-capture-comment "$fixture_tmp/icmp-errors.pcapng" icmp-errors.pcapng
+tshark -n -r icmp-errors.pcapng -T fields -e frame.number -e frame.protocols \
+  -e tcp.srcport -e tcp.dstport
+```
+
+| Frame | TShark protocols | Quoted TCP ports |
+| --- | --- | --- |
+| 1 | `eth:ethertype:ip:icmp:ip:tcp` | 40000 → 8080 |
+| 2 | `eth:ethertype:ipv6:icmpv6:ipv6:tcp` | 41000 → 8443 |
