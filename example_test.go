@@ -101,6 +101,15 @@ func ExampleNewFromReaderAt() {
 	// format=pcapng packets=1 pid=4242
 }
 
+func ExampleNew_compressedSignature() {
+	_, err := pcap.New([]byte("\x28\xb5\x2f\xfd"))
+	if errors.Is(err, pcap.ErrUnsupportedZstd) {
+		fmt.Println("decode zstd before opening the capture")
+	}
+	// Output:
+	// decode zstd before opening the capture
+}
+
 func ExampleNewFromReaderAt_spoolGzip() {
 	// Simulate gzip bytes read from a pipe.
 	var compressed bytes.Buffer

@@ -58,9 +58,11 @@ Keep the file available during analysis and remove it after closing.
 Check `InputTruncated()` if your application requires complete packets.
 The normal ReaderAt scan limits apply to the temporary file.
 
-For other wrappers, supply decompressed bytes from an application-selected
-decoder using the same limit. The library's capture open functions expect
-classic PCAP or PcapNG bytes.
+Capture open functions expect classic PCAP or PcapNG bytes. They report
+`ErrUnsupportedZstd` for a leading Zstandard data frame and `ErrUnsupportedXZ`
+for an XZ stream signature. Use `errors.Is` to select an external decoder and
+stage its output with the same limit. For bzip2, callers can use the standard
+library's `compress/bzip2.NewReader` with that staging workflow.
 
 Run `go test -run '^ExampleNewFromReaderAt_spoolGzip$' .` to check the
 [gzip staging example](../example_test.go).

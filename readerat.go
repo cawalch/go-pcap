@@ -112,6 +112,7 @@ func (c *Capture) scanReadAhead() int64 {
 
 // NewFromReaderAt parses a classic PCAP or PcapNG container from an [io.ReaderAt]
 // of total byte length size. File-backed scans can prefetch up to 64 KiB at a time.
+// See [New] for signature errors.
 func NewFromReaderAt(r io.ReaderAt, size int64) (*Capture, error) {
 	if r == nil {
 		return nil, fmt.Errorf("%w: nil ReaderAt", ErrInvalidHeader)
@@ -140,6 +141,18 @@ func NewFromReaderAt(r io.ReaderAt, size int64) (*Capture, error) {
 	case PCAPNGSectionHeaderMagic:
 		return parsePCAPNGFromReaderAt(r, size)
 	default:
+		if magic == zstdFrameMagic {
+			return nil, ErrUnsupportedZstd
+		}
+		if magic == xzMagicPrefix && size >= int64(4+len(xzMagicSuffix)) {
+			var suffix [len(xzMagicSuffix)]byte
+			if err := readExactAt(r, suffix[:], 4, size); err != nil {
+				return nil, fmt.Errorf("%w: reading xz signature: %w", errNotPCAPInvalidMagic, err)
+			}
+			if string(suffix[:]) == xzMagicSuffix {
+				return nil, ErrUnsupportedXZ
+			}
+		}
 		return nil, errNotPCAPInvalidMagic
 	}
 }

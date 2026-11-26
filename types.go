@@ -530,6 +530,12 @@ var (
 	ErrNotPCAP = errors.New("not a PCAP or PcapNG capture")
 	// ErrInvalidMagic indicates an unrecognized magic signature or byte-order marker.
 	ErrInvalidMagic = errors.New("invalid magic signature")
+	// ErrUnsupportedZstd indicates a Zstandard frame at the start of the input.
+	// It matches [ErrNotPCAP] and [ErrInvalidMagic] via errors.Is.
+	ErrUnsupportedZstd = fmt.Errorf("zstd compression is unsupported: %w", errNotPCAPInvalidMagic)
+	// ErrUnsupportedXZ indicates an XZ stream signature at the start of the input.
+	// It matches [ErrNotPCAP] and [ErrInvalidMagic] via errors.Is.
+	ErrUnsupportedXZ = fmt.Errorf("xz compression is unsupported: %w", errNotPCAPInvalidMagic)
 	// ErrInvalidHeader indicates a malformed or unsupported container header.
 	ErrInvalidHeader = errors.New("invalid capture header")
 	// ErrInvalidBlock indicates a malformed PcapNG block structure or length mismatch.
