@@ -59,12 +59,14 @@ type DHCPv4Record struct {
 // DHCPv4 returns address-assignment observations in packet order. It skips
 // malformed, fragmented and oversized datagrams. It returns [ErrDHCPv4Limit]
 // above 4096 records or 64 MiB of candidate datagrams.
+// See [Capture.UnsupportedLinkTypePackets] for link-type coverage.
 func (c *Capture) DHCPv4(data []byte) ([]DHCPv4Record, error) {
 	return scanDHCPv4(ipFrameSource{capture: c, data: data})
 }
 
 // DHCPv4FromReaderAt reads the observations described by [Capture.DHCPv4]
 // under the additional [MaxReaderAtScanBytes] read budget.
+// See [Capture.UnsupportedLinkTypePackets] for link-type coverage.
 func (c *Capture) DHCPv4FromReaderAt(r io.ReaderAt) ([]DHCPv4Record, error) {
 	return scanDHCPv4(ipFrameSource{capture: c, reader: r, needsPayload: func(f Frame, _ []byte) bool { return isDHCPv4(&f) }})
 }

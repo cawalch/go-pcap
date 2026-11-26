@@ -495,6 +495,7 @@ func isDNSPort(port uint16) bool {
 
 // DNS extracts and parses DNS messages across all UDP (ports 53, 5353, 5355)
 // and TCP (port 53 length-prefixed) packets in the capture.
+// See [Capture.UnsupportedLinkTypePackets] for link-type coverage.
 func (c *Capture) DNS(data []byte) ([]DNSRecord, error) {
 	return scanDNS(ipFrameSource{capture: c, data: data})
 }

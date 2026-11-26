@@ -313,6 +313,44 @@ func (c *Capture) Anomalies() CaptureAnomalies {
 	return c.anomalies
 }
 
+// UnsupportedLinkTypePackets reports the number of complete packet records
+// whose link layer [DecodeFrame] does not support and their interface IDs in
+// ascending order. Pass the unchanged source bytes. The interface IDs index
+// [Capture.Interfaces]. Compare the count with [Capture.PacketCount] to
+// distinguish an empty, all-unsupported or partially supported capture.
+// For PcapNG with unsupported declarations, it walks packet metadata.
+func (c *Capture) UnsupportedLinkTypePackets(data []byte) (count int, interfaceIDs []uint32, err error) {
+	return c.unsupportedLinkTypePackets(c.PacketSeq(data))
+}
+
+func (c *Capture) unsupportedLinkTypePackets(packets iter.Seq2[PacketRecord, error]) (count int, interfaceIDs []uint32, err error) {
+	if err := c.validateContainer(); err != nil {
+		return 0, nil, err
+	}
+	if !c.anomalies.UnknownLinkType || c.PacketCount == 0 {
+		return 0, nil, nil
+	}
+	if c.Format == FormatPCAP {
+		return c.PacketCount, []uint32{0}, nil
+	}
+	var used [MaxInterfaces]bool
+	for pkt, err := range packets {
+		if err != nil {
+			return 0, nil, err
+		}
+		if !isKnownLinkType(pkt.LinkType) {
+			count++
+			used[pkt.InterfaceID] = true
+		}
+	}
+	for id, unsupported := range used {
+		if unsupported {
+			interfaceIDs = append(interfaceIDs, uint32(id))
+		}
+	}
+	return count, interfaceIDs, nil
+}
+
 // PacketPayload returns a zero-copy slice of data corresponding to pkt's
 // captured frame bytes. It validates that pkt's byte range lies within data.
 func (c *Capture) PacketPayload(data []byte, pkt PacketRecord) ([]byte, error) {

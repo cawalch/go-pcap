@@ -228,10 +228,22 @@ func (c *Capture) PacketPayloadFromReaderAt(r io.ReaderAt, pkt PacketRecord) ([]
 	return buf, nil
 }
 
+// UnsupportedLinkTypePacketsFromReaderAt reports the same coverage as
+// [Capture.UnsupportedLinkTypePackets] using the unchanged reader. PcapNG
+// metadata reads share [MaxReaderAtScanBytes].
+func (c *Capture) UnsupportedLinkTypePacketsFromReaderAt(r io.ReaderAt) (count int, interfaceIDs []uint32, err error) {
+	if r == nil {
+		return 0, nil, ErrInvalidHeader
+	}
+	budget := scanReadBudget{r: r, remaining: MaxReaderAtScanBytes}
+	return c.unsupportedLinkTypePackets(c.PacketSeqFromReaderAt(&budget))
+}
+
 // FlowsFromReaderAt aggregates deterministic 5-tuple flows from an [io.ReaderAt]
 // using a 256-byte prefix for common transport headers. When the prefix is
 // insufficient it extends the read up to the IP datagram boundary. Container
 // and frame reads together are limited to [MaxReaderAtScanBytes].
+// See [Capture.UnsupportedLinkTypePackets] for link-type coverage.
 func (c *Capture) FlowsFromReaderAt(r io.ReaderAt) ([]FlowSummary, error) {
 	if err := c.validateContainer(); err != nil {
 		return nil, err
@@ -374,6 +386,7 @@ func completeFlowPrefix(f *Frame, prefix []byte, captured int64) (complete bool,
 
 // DNSFromReaderAt extracts DNS records using bounded metadata, frame header,
 // DNS transport and UDP fragment reads under [MaxReaderAtScanBytes].
+// See [Capture.UnsupportedLinkTypePackets] for link-type coverage.
 func (c *Capture) DNSFromReaderAt(r io.ReaderAt) ([]DNSRecord, error) {
 	return scanDNS(ipFrameSource{capture: c, reader: r, needsPayload: func(f Frame, _ []byte) bool {
 		return f.mayContainUDPFragment() ||
@@ -388,6 +401,7 @@ func (c *Capture) tcpReaderAt(r io.ReaderAt) ipFrameSource {
 
 // TLSFromReaderAt extracts TLS handshakes and fingerprints from reassembled
 // TCP payloads on any port under [MaxReaderAtScanBytes].
+// See [Capture.UnsupportedLinkTypePackets] for link-type coverage.
 func (c *Capture) TLSFromReaderAt(r io.ReaderAt) ([]TLSRecord, error) {
 	streams, err := collectStreams(c.tcpReaderAt(r), 0, nil, tcpWireNone)
 	if err != nil {
@@ -398,6 +412,7 @@ func (c *Capture) TLSFromReaderAt(r io.ReaderAt) ([]TLSRecord, error) {
 
 // QUICFromReaderAt extracts QUIC v1/v2 Initial handshakes and fingerprints
 // using bounded UDP datagram and fragment reads under [MaxReaderAtScanBytes].
+// See [Capture.UnsupportedLinkTypePackets] for link-type coverage.
 func (c *Capture) QUICFromReaderAt(r io.ReaderAt) ([]QUICRecord, error) {
 	return scanQUIC(ipFrameSource{capture: c, reader: r, needsPayload: func(f Frame, start []byte) bool {
 		return f.mayContainUDPFragment() || f.IPProtocol == IPProtoUDP &&

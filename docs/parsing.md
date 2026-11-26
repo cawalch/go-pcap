@@ -132,6 +132,18 @@ input ends before a declared packet record or PcapNG block finishes. Call
 In PcapNG, each section defines its own interface table and byte order. Packet
 and statistics records expose the resolved index into `Capture.Interfaces`.
 
+Call `capture.UnsupportedLinkTypePackets(data)` or
+`capture.UnsupportedLinkTypePacketsFromReaderAt(r)` before interpreting an
+empty or partial analysis result. These methods return the number of complete
+records with an unsupported link type and the IDs of the interfaces that
+carried them. A
+nonzero count equal to `capture.PacketCount` means every complete packet has
+an unsupported link type. A smaller nonzero count means only part of the
+capture has a supported link type. An unused interface can set
+`UnknownLinkType` without affecting either count or scan coverage. PcapNG
+captures with unsupported interfaces require a packet metadata pass. The
+ReaderAt variant applies `MaxReaderAtScanBytes` to that pass.
+
 ## Read packet records
 
 To stream packet records in file order without allocating a slice, use

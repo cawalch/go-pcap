@@ -508,6 +508,7 @@ func decryptQUICInitial(datagrams [][]byte, observedRetryID []byte, inferRetry b
 // fingerprints. Distinct exchanges on a UDP tuple share its flow index. QUIC
 // correlates unique nonempty connection IDs across client port changes and
 // reports observed Retry and Version Negotiation responses.
+// See [Capture.UnsupportedLinkTypePackets] for link-type coverage.
 func (c *Capture) QUIC(data []byte) ([]QUICRecord, error) {
 	return scanQUIC(ipFrameSource{capture: c, data: data})
 }

@@ -60,6 +60,7 @@ from a failed call.
 | Operation | What the caller receives |
 | --- | --- |
 | Container open | A valid header followed by an incomplete trailing record can produce a usable snapshot. Check `InputTruncated()` and `DeclaredExtent()` to distinguish this from a complete capture. |
+| Link-type coverage | `UnsupportedLinkTypePackets` and `UnsupportedLinkTypePacketsFromReaderAt` report complete records on unsupported interfaces. The ReaderAt metadata pass is bounded by `MaxReaderAtScanBytes`. Packet iteration still exposes those records, and frame-based scans can return empty or partial results. |
 | Packet iteration and collection | Iterators can yield complete packets followed by one terminal error. Breaking stops iteration. On a walk error the collecting methods discard the accumulated records. |
 | ReaderAt flow, DNS, TLS and QUIC scans | The per-call read budget covers selected payload and metadata. Exceeding `MaxReaderAtScanBytes` returns `ErrPacketLimit`. A larger file can fit within the budget. |
 | TCP reassembly | A directional byte cap produces a bounded stream with `Anomalies.Truncated`. Exceeding `MaxSegmentsPerFlow` in `ReassembleTCP` returns `ErrReassemblyLimit`. |
