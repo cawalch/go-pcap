@@ -42,11 +42,16 @@ type LinkType uint16
 const (
 	LinkTypeNull              LinkType = 0   // BSD loopback encapsulation
 	LinkTypeEthernet          LinkType = 1   // IEEE 802.3 Ethernet
+	LinkTypePPP               LinkType = 9   // Point-to-Point Protocol
+	LinkTypePPPHDLC           LinkType = 50  // PPP in HDLC-like framing
 	LinkTypeRaw               LinkType = 101 // Raw IP (IPv4 or IPv6)
 	LinkTypeIEEE80211         LinkType = 105 // IEEE 802.11 MAC frames
 	LinkTypeLinuxSLL          LinkType = 113 // Linux cooked capture v1
+	LinkTypePFLOG             LinkType = 117 // PF packet filter log
 	LinkTypeIEEE80211RadioTap LinkType = 127 // Radiotap followed by IEEE 802.11
 	LinkTypeApplePktap        LinkType = 149 // Apple PKTAP version 1
+	LinkTypePPPPPPD           LinkType = 166 // PPP with direction in place of the HDLC address
+	LinkTypePPPWithDir        LinkType = 204 // PPP with preceding direction byte
 	LinkTypeIPv4              LinkType = 228 // Raw IPv4
 	LinkTypeIPv6              LinkType = 229 // Raw IPv6
 	LinkTypeLinuxSLL2         LinkType = 276 // Linux cooked capture v2
@@ -195,6 +200,8 @@ const (
 	LayerESP
 	LayerIKEv2
 	LayerApplePktap
+	LayerPPP
+	LayerPFLOG
 )
 
 // String returns the lowercase layer identifier.
@@ -244,6 +251,10 @@ func (p LayerProto) String() string {
 		return "ieee80211"
 	case LayerESP:
 		return "esp"
+	case LayerPPP:
+		return "ppp"
+	case LayerPFLOG:
+		return "pflog"
 	case LayerApplePktap:
 		return "apple_pktap"
 	case LayerIKEv2:

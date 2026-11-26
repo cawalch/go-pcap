@@ -237,7 +237,7 @@ func TestUnsupportedLinkTypeCoverage(t *testing.T) {
 	if _, ok := any(new(pcap.Capture)).(coverage); !ok {
 		t.Skip("link-type coverage is unavailable in this module version")
 	}
-	const unsupported pcap.LinkType = 9 // LINKTYPE_PPP
+	const unsupported pcap.LinkType = 239 // LINKTYPE_NFLOG
 	for _, tc := range []struct {
 		name    string
 		links   []pcap.LinkType

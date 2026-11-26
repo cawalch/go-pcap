@@ -81,6 +81,10 @@ func FuzzDecodeFrame(f *testing.F) {
 	f.Add(frame, uint16(LinkTypeEthernet))
 	f.Add(frame[14:], uint16(LinkTypeRaw))
 	f.Add(pktapFrame(156, 1, frame), uint16(LinkTypeApplePktap))
+	f.Add(append([]byte{0xff, 0x03, 0x00, 0x21}, frame[14:]...), uint16(LinkTypePPP))
+	pflog := make([]byte, 48)
+	pflog[0], pflog[1] = 45, 2
+	f.Add(append(pflog, frame[14:]...), uint16(LinkTypePFLOG))
 	raw, c, packets := readFramingFixture(f)
 	for _, pkt := range packets {
 		payload, err := c.PacketPayload(raw, pkt)

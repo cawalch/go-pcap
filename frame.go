@@ -108,9 +108,10 @@ func (f *Frame) pushLayer(proto LayerProto, offset, length int64) {
 // header is shorter than its minimum size or has invalid Radiotap framing.
 // Truncated inner headers are recorded in [Frame.Anomalies] without discarding
 // outer layers. Protected IEEE 802.11 frames and ESP bodies remain opaque.
-func DecodeFrame(data []byte, linkType LinkType) (Frame, error) {
+func DecodeFrame(data []byte, linkType LinkType) (f Frame, err error) {
 	r := NewSafeReader(data)
-	f := Frame{LinkType: linkType}
+	// Fill the result directly to avoid copying its fixed-size layer array.
+	f.LinkType = linkType
 
 	var offset int64
 	switch linkType {
@@ -202,11 +203,105 @@ func DecodeFrame(data []byte, linkType LinkType) (Frame, error) {
 		return decodeApplePktap(data), nil
 
 	default:
-		return Frame{}, fmt.Errorf("%w: unsupported link type %d", ErrInvalidFrame, linkType)
+		if err := decodePPPOrPFLOG(r, linkType, &f); err != nil {
+			return Frame{}, err
+		}
+		return f, nil
 	}
 
 	dispatchEtherType(r, offset, r.Size(), &f)
 	return f, nil
+}
+
+func decodePPPOrPFLOG(r *SafeReader, linkType LinkType, f *Frame) error {
+	switch linkType {
+	case LinkTypePPP, LinkTypePPPHDLC, LinkTypePPPPPPD, LinkTypePPPWithDir:
+		decodePPP(r, linkType, f)
+	case LinkTypePFLOG:
+		decodePFLOG(r, f)
+	default:
+		return fmt.Errorf("%w: unsupported link type %d", ErrInvalidFrame, linkType)
+	}
+	return nil
+}
+
+func decodePPP(r *SafeReader, linkType LinkType, f *Frame) {
+	data := r.data
+	offset := 0
+	if linkType == LinkTypePPPWithDir {
+		if len(data) == 0 {
+			f.Anomalies.TruncatedLayer = true
+			return
+		}
+		offset++
+	}
+	hasAddressControl := len(data)-offset >= 2 && data[offset] == 0xff && data[offset+1] == 0x03
+	switch linkType {
+	case LinkTypePPPPPPD, LinkTypePPPHDLC:
+		if len(data) < 2 {
+			f.Anomalies.TruncatedLayer = true
+			return
+		}
+		// PPPD replaces the HDLC address with direction. Cisco HDLC
+		// records use a different protocol namespace.
+		if data[1] != 0x03 || (linkType == LinkTypePPPHDLC && !hasAddressControl) ||
+			(linkType == LinkTypePPPPPPD && data[0] > 1) {
+			return
+		}
+		offset += 2
+	default:
+		if hasAddressControl {
+			offset += 2
+		}
+	}
+	if offset == len(data) {
+		f.Anomalies.TruncatedLayer = true
+		return
+	}
+	protocol := uint16(data[offset])
+	offset++
+	if protocol&1 == 0 {
+		if offset == len(data) {
+			f.Anomalies.TruncatedLayer = true
+			return
+		}
+		protocol = protocol<<8 | uint16(data[offset])
+		offset++
+	}
+	f.pushLayer(LayerPPP, 0, int64(offset))
+	f.EtherType = pppEtherType(protocol)
+	dispatchEtherType(r, int64(offset), r.Size(), f)
+}
+
+func pppEtherType(protocol uint16) uint16 {
+	switch protocol {
+	case 0x0021:
+		return EtherTypeIPv4
+	case 0x0057:
+		return EtherTypeIPv6
+	default:
+		return 0
+	}
+}
+
+func decodePFLOG(r *SafeReader, f *Frame) {
+	if r.Size() == 0 || r.data[0] < 45 {
+		f.Anomalies.TruncatedLayer = true
+		return
+	}
+	offset := (int64(r.data[0]) + 3) &^ 3
+	if offset >= r.Size() {
+		f.Anomalies.TruncatedLayer = true
+		return
+	}
+	f.pushLayer(LayerPFLOG, 0, offset)
+	switch r.data[offset] >> 4 {
+	case 4:
+		f.EtherType = EtherTypeIPv4
+	case 6:
+		f.EtherType = EtherTypeIPv6
+	}
+	dispatchEtherType(r, offset, r.Size(), f)
 }
 
 // decodeApplePktap handles the little-endian version 1 packet wrapper. The
@@ -383,12 +478,9 @@ func dispatchEtherType(r *SafeReader, offset, bound int64, f *Frame) {
 		pppProto := binary.BigEndian.Uint16(r.data[offset+6 : offset+8])
 		f.pushLayer(LayerPPPoE, offset, 8)
 		offset += 8
-		switch pppProto {
-		case 0x0021:
-			f.EtherType = EtherTypeIPv4
-		case 0x0057:
-			f.EtherType = EtherTypeIPv6
-		default:
+		if etherType := pppEtherType(pppProto); etherType != 0 {
+			f.EtherType = etherType
+		} else {
 			f.PayloadOffset = uint32(offset)
 			if bound > offset {
 				f.PayloadLength = uint32(bound - offset)

@@ -236,6 +236,11 @@ without heap allocations:
   `LinkTypeIEEE80211` (105), `LinkTypeIEEE80211RadioTap` (127), and
   `LinkTypeApplePktap` (149). Apple PKTAP decoding uses the little-endian
   version 1 packet header and reports offsets relative to the original frame.
+- PPP captures can use `LinkTypePPP` (9), `LinkTypePPPHDLC` (50),
+  `LinkTypePPPPPPD` (166), or `LinkTypePPPWithDir` (204). The decoder peels
+  one- and two-byte PPP protocol fields for IPv4 and IPv6.
+- `LinkTypePFLOG` (117) uses the rounded header length to reach the inner
+  IPv4 or IPv6 datagram.
 - Supported tunnel encapsulations: `MPLS` (`0x8847` / `0x8848`, up to 8 labels),
   `PPPoE` Session (`0x8864` over IPv4 or IPv6), `GRE` (`IPProto 47` over IPv4,
   IPv6, or Transparent Ethernet Bridging), `VXLAN` (`UDP 4789`), and `Geneve`

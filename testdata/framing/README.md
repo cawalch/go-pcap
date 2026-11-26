@@ -40,3 +40,24 @@ tshark -n -r wireless-ipsec.pcapng -T fields \
 
 The Go tests use this capture and checked-in expectations. They require no
 external decoder.
+
+## PPP and PFLOG
+
+These captures use synthetic IPv4 SYNs and documentation addresses. Generate
+them with Wireshark tools 4.6.10 (commit `eac916f07299`).
+
+```sh
+fixture_tmp=$(mktemp -d)
+TZ=UTC text2pcap -q -t ISO -l 9 ppp.hex "$fixture_tmp/ppp.pcapng"
+TZ=UTC text2pcap -q -t ISO -l 117 pflog.hex "$fixture_tmp/pflog.pcapng"
+mergecap -a -w "$fixture_tmp/merged.pcapng" "$fixture_tmp/ppp.pcapng" "$fixture_tmp/pflog.pcapng"
+editcap --discard-capture-comment "$fixture_tmp/merged.pcapng" ppp-pflog.pcapng
+tshark -n -r ppp-pflog.pcapng -T fields -e frame.number -e frame.protocols \
+  -e ip.src -e ip.dst -e tcp.srcport -e tcp.dstport
+```
+
+| Frame | Framing | TCP tuple |
+| --- | --- | --- |
+| 1 | PPP with address, control and two-byte protocol | 198.51.100.10:50000 → 203.0.113.20:443 |
+| 2 | PPP with one-byte protocol | 198.51.100.10:50001 → 203.0.113.20:443 |
+| 3 | PFLOG with a 45-byte header rounded to 48 bytes | 198.51.100.10:40000 → 203.0.113.20:8080 |
