@@ -61,3 +61,24 @@ tshark -n -r ppp-pflog.pcapng -T fields -e frame.number -e frame.protocols \
 | 1 | PPP with address, control and two-byte protocol | 198.51.100.10:50000 → 203.0.113.20:443 |
 | 2 | PPP with one-byte protocol | 198.51.100.10:50001 → 203.0.113.20:443 |
 | 3 | PFLOG with a 45-byte header rounded to 48 bytes | 198.51.100.10:40000 → 203.0.113.20:8080 |
+
+## Standalone PPPoE and NFLOG
+
+These captures use synthetic IPv4 SYNs and documentation addresses. The NFLOG
+TLV headers use little-endian lengths and types. Generate the fixture on a
+little-endian host with Wireshark tools 4.6.10 (commit `eac916f07299`).
+
+```sh
+fixture_tmp=$(mktemp -d)
+TZ=UTC text2pcap -q -t ISO -l 51 pppoe.hex "$fixture_tmp/pppoe.pcapng"
+TZ=UTC text2pcap -q -t ISO -l 239 nflog.hex "$fixture_tmp/nflog.pcapng"
+mergecap -a -w "$fixture_tmp/merged.pcapng" "$fixture_tmp/pppoe.pcapng" "$fixture_tmp/nflog.pcapng"
+editcap --discard-capture-comment "$fixture_tmp/merged.pcapng" pppoe-nflog.pcapng
+tshark -n -r pppoe-nflog.pcapng -T fields -e frame.number -e frame.protocols \
+  -e tcp.srcport -e tcp.dstport
+```
+
+| Frame | TShark protocols | TCP ports |
+| --- | --- | --- |
+| 1 | `pppoes:ppp:ip:tcp` | 50100 → 443 |
+| 2 | `nflog:ip:tcp` | 50101 → 443 |

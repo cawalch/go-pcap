@@ -296,7 +296,7 @@ func TestOpenFile(t *testing.T) {
 
 func ExampleCapture_UnsupportedLinkTypePackets() {
 	var buf bytes.Buffer
-	writer, err := NewPCAPWriter(&buf, LinkType(239), 64) // LINKTYPE_NFLOG
+	writer, err := NewPCAPWriter(&buf, LinkType(249), 64) // LINKTYPE_USBPCAP
 	if err != nil {
 		panic(err)
 	}

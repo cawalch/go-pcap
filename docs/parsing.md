@@ -239,8 +239,15 @@ without heap allocations:
 - PPP captures can use `LinkTypePPP` (9), `LinkTypePPPHDLC` (50),
   `LinkTypePPPPPPD` (166), or `LinkTypePPPWithDir` (204). The decoder peels
   one- and two-byte PPP protocol fields for IPv4 and IPv6.
+- `LinkTypePPPEther` (51) starts at the PPPoE session header and bounds decoding
+  by the session payload length. The decoder reads a two-byte protocol field.
 - `LinkTypePFLOG` (117) uses the rounded header length to reach the inner
   IPv4 or IPv6 datagram.
+- `LinkTypeNFLOG` (239) walks up to 256 aligned attributes and decodes IPv4 or
+  IPv6 from the packet payload attribute. Exactly one TLV byte order must
+  validate across the captured frame. Ambiguous or malformed TLVs set
+  `Anomalies.TruncatedLayer`. ReaderAt scans use the entire NFLOG packet to
+  validate the list within the normal scan budget.
 - Supported tunnel encapsulations: `MPLS` (`0x8847` / `0x8848`, up to 8 labels),
   `PPPoE` Session (`0x8864` over IPv4 or IPv6), `GRE` (`IPProto 47` over IPv4,
   IPv6, or Transparent Ethernet Bridging), `VXLAN` (`UDP 4789`), and `Geneve`
