@@ -6,6 +6,7 @@ import (
 	"encoding/binary"
 	"errors"
 	"fmt"
+	"io"
 	"log"
 	"net/netip"
 	"os"
@@ -98,6 +99,52 @@ func ExampleNewFromReaderAt() {
 	}
 	// Output:
 	// format=pcapng packets=1 pid=4242
+}
+
+func ExampleNewFromReaderAt_spoolGzip() {
+	// Simulate gzip bytes read from a pipe.
+	var compressed bytes.Buffer
+	writer := gzip.NewWriter(&compressed)
+	if _, err := writer.Write(buildExamplePCAPNG()); err != nil {
+		panic(err)
+	}
+	if err := writer.Close(); err != nil {
+		panic(err)
+	}
+	input, err := gzip.NewReader(&compressed)
+	if err != nil {
+		panic(err)
+	}
+	defer func() { _ = input.Close() }()
+
+	file, err := os.CreateTemp("", "capture-*.pcapng")
+	if err != nil {
+		panic(err)
+	}
+	defer func() {
+		_ = file.Close()
+		_ = os.Remove(file.Name())
+	}()
+
+	const maxCaptureBytes = 128 << 20 // The application's disk budget per capture.
+	size, err := io.Copy(file, io.LimitReader(input, maxCaptureBytes+1))
+	if err != nil {
+		panic(err)
+	}
+	if size > maxCaptureBytes {
+		panic("capture exceeds the temporary file budget")
+	}
+
+	capture, err := pcap.NewFromReaderAt(file, size)
+	if err != nil {
+		panic(err)
+	}
+	if capture.InputTruncated() {
+		panic("incomplete capture")
+	}
+	fmt.Printf("format=%s packets=%d\n", capture.Format, capture.PacketCount)
+	// Output:
+	// format=pcapng packets=1
 }
 
 func ExampleCapture_PacketSeq() {
