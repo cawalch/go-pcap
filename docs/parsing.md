@@ -834,6 +834,35 @@ no frame bytes. [Packet protection](https://www.rfc-editor.org/rfc/rfc9001.html#
 Run `go test -run '^ExampleQUIC1RTTDecoder_Open$' .` to exercise the
 [key-log example](../quic_1rtt_test.go).
 
+### Reassemble authenticated QUIC streams
+
+Pass authenticated payloads from `QUIC1RTTDecoder.Open` to
+`ReassembleQUIC1RTTStreams`. Use one call per connection and sender.
+The same numeric stream ID can carry separate bytes in each direction.
+Keep each packet's frame payload in a separate slice element. Packet order
+can vary.
+
+Each result contains the contiguous prefix starting at stream offset zero.
+`Gap` indicates that an observed offset or final size extends beyond the
+prefix. `Complete` requires a FIN at the end of the prefix. An observed
+`Reset` prevents completion even when the prefix reaches the final size.
+Repeated bytes contribute once. Conflicting bytes or final sizes cause an
+error, including when the conflict occurs beyond a gap.
+
+The function parses STREAM and RESET_STREAM frames and skips the layouts of
+other base QUIC frames and DATAGRAM frames. An unknown frame type or
+malformed layout returns `ErrInvalidQUIC` with no streams. Directional
+limits are 256 packets, 8 MiB of frame payloads, 16,384 STREAM or RESET_STREAM
+frames, and 1,024 stream IDs. Stream offsets plus data length and final sizes
+are limited to 4 MiB per stream. ACK frames can carry up to 256 additional
+ranges. Exceeding a limit returns `ErrQUICLimit` with no streams.
+[QUIC final size](https://www.rfc-editor.org/rfc/rfc9000.html#section-4.5) ·
+[QUIC frame layouts](https://www.rfc-editor.org/rfc/rfc9000.html#section-19) ·
+[DATAGRAM frame layout](https://www.rfc-editor.org/rfc/rfc9221.html#section-4)
+
+Run `go test -run '^ExampleReassembleQUIC1RTTStreams$' .` to check the
+[out-of-order packet example](../quic_stream_test.go).
+
 ## Decrypt TLS 1.2 and TLS 1.3 streams offline
 
 Call `capture.DecryptedTLSStreams(data, extraKeyLog)` to decrypt TLS 1.2
