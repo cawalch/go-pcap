@@ -12,7 +12,6 @@ type tcpMessageCollector struct {
 	interfaces         map[tcpObservationKey]*tcpMessageOpening
 	directions         []tcpMessageDirection
 	separateInterfaces bool
-	onPair             func(srcPort, dstPort uint16, first, peer int)
 }
 
 type tcpMessageOpening struct {
@@ -111,9 +110,6 @@ func (c *tcpMessageCollector) addSegment(pkt PacketRecord, frame Frame, flow int
 			src: netip.AddrPortFrom(frame.SrcAddr, frame.SrcPort), dst: netip.AddrPortFrom(frame.DstAddr, frame.DstPort), flowIndex: flow,
 		})
 		active.directions[side] = len(c.directions)
-		if peer := active.directions[1-side]; peer != 0 && c.onPair != nil {
-			c.onPair(frame.SrcPort, frame.DstPort, pkt.Index, c.directions[peer-1].packets[0].index)
-		}
 	}
 	dir := &c.directions[active.directions[side]-1]
 	c.flows[key] = state

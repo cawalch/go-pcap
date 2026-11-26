@@ -36,11 +36,19 @@ func (c *Capture) DCERPCFromReaderAt(r io.ReaderAt) ([]DCERPCRecord, error) {
 
 func scanDCERPC(source ipFrameSource) ([]DCERPCRecord, error) {
 	var smb smbRPCScan
-	collector := tcpMessageCollector{
-		separateInterfaces: source.capture != nil && source.capture.SeparateTCPInterfaces,
-		onPair:             smb.pairOpening,
-	}
-	err := walkTCPMessagePackets(source, collector.add)
+	collector := tcpMessageCollector{separateInterfaces: source.capture != nil && source.capture.SeparateTCPInterfaces}
+	err := walkTCPMessagePackets(source, func(pkt PacketRecord, frame Frame, flow int, data []byte) error {
+		if !keepTCPMessageSegment(&frame, len(data), TCPFlagSYN) {
+			return nil
+		}
+		before := len(collector.directions)
+		pair, err := collector.addSegment(pkt, frame, flow, data)
+		if err == nil && pair[1] != 0 && len(collector.directions) != before &&
+			isRPCSMBPort(frame.SrcPort, frame.DstPort) {
+			smb.pairOpening(pkt.Index, collector.directions[pair[1]-1].packets[0].index)
+		}
+		return err
+	})
 	if err != nil {
 		return nil, err
 	}

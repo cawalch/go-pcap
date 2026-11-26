@@ -120,7 +120,7 @@ func parseSMBCommand(buf []byte) (SMB2Message, []byte, error) {
 
 	var rest []byte
 	if next := binary.LittleEndian.Uint32(buf[20:24]); next != 0 {
-		if !validSMB2NextCommand(next, len(buf)) {
+		if next < 64 || next%8 != 0 || uint64(next)+64 > uint64(len(buf)) {
 			return SMB2Message{}, nil, fmt.Errorf("%w: invalid compound command offset %d", ErrInvalidSMB, next)
 		}
 		rest = buf[next:]
@@ -224,11 +224,6 @@ func parseSMBCommand(buf []byte) (SMB2Message, []byte, error) {
 	}
 
 	return msg, rest, nil
-}
-
-// A compound offset must leave room for the next SMB2 header.
-func validSMB2NextCommand(next uint32, length int) bool {
-	return next >= 64 && next%8 == 0 && uint64(next)+64 <= uint64(length)
 }
 
 func smbRequestName(buf, descriptor []byte, minOffset int) (string, error) {

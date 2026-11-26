@@ -3,6 +3,7 @@ package pcap
 import (
 	"bytes"
 	"encoding/binary"
+	"errors"
 	"reflect"
 	"testing"
 )
@@ -147,6 +148,34 @@ func TestDCERPCSMB2RelatedCompound(t *testing.T) {
 	contexts := rows[1].Message.Contexts
 	if len(contexts) != 1 || contexts[0].AbstractSyntaxUUID != "11223344-5566-7788-99aa-bbccddeeff00" {
 		t.Fatalf("got %v, %v", rows, err)
+	}
+}
+
+func TestDCERPCSMB2TrackingLimit(t *testing.T) {
+	conn := smbRPCFixtureTCP{port: 445}
+	conn.add(true, smbRPCFixtureFrame(smbRPCFixtureTree(17, 2)))
+	conn.add(false, smbRPCFixtureFrame(smbRPCFixtureWrite(17, smbRPCFixturePDU(42))))
+	const perSegment = 8
+	for first := 0; first < MaxSMBRecordsPerScan; first += perSegment {
+		var segment []byte
+		for i := range perSegment {
+			segment = append(segment, smbRPCFixtureFrame(smbRPCFixtureReadRequest(17, uint64(first+i)+10))...)
+		}
+		conn.add(false, segment)
+	}
+	raw := conn.capture()
+	c, err := New(raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, scan := range []func() ([]DCERPCRecord, error){
+		func() ([]DCERPCRecord, error) { return c.DCERPC(raw) },
+		func() ([]DCERPCRecord, error) { return c.DCERPCFromReaderAt(bytes.NewReader(raw)) },
+	} {
+		rows, err := scan()
+		if rows != nil || !errors.Is(err, ErrDCERPCLimit) {
+			t.Fatalf("received %d records and %v", len(rows), err)
+		}
 	}
 }
 

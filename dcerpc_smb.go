@@ -43,10 +43,7 @@ func isRPCSMBPort(src, dst uint16) bool {
 	return src == 139 || src == 445 || dst == 139 || dst == 445
 }
 
-func (s *smbRPCScan) pairOpening(srcPort, dstPort uint16, first, peer int) {
-	if !isRPCSMBPort(srcPort, dstPort) {
-		return
-	}
+func (s *smbRPCScan) pairOpening(first, peer int) {
 	if s.openings == nil {
 		s.openings = make(map[int]int)
 	}
@@ -100,7 +97,7 @@ func (s *smbRPCScan) collect(dir *tcpMessageDirection, data []byte, spans []pack
 			}
 			frame = nil
 			if next := binary.LittleEndian.Uint32(cmd[20:24]); next != 0 {
-				if !validSMB2NextCommand(next, len(cmd)) {
+				if next < 64 || next%8 != 0 || uint64(next)+64 > uint64(len(cmd)) {
 					break
 				}
 				cmd, frame = cmd[:next], cmd[next:]
