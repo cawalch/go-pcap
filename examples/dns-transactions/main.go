@@ -2,6 +2,7 @@
 package main
 
 import (
+	"flag"
 	"fmt"
 	"io"
 	"net/netip"
@@ -13,17 +14,23 @@ import (
 )
 
 func main() {
-	if len(os.Args) != 2 {
-		fmt.Fprintln(os.Stderr, "usage: dns-transactions {capture.pcap[ng][.gz]|-}")
+	includeICMP := flag.Bool("icmp", false, "report ICMP errors quoting observed DNS flows")
+	flag.Usage = func() {
+		fmt.Fprintln(os.Stderr, "usage: dns-transactions [-icmp] {capture.pcap[ng][.gz]|-}")
+		flag.PrintDefaults()
+	}
+	flag.Parse()
+	if flag.NArg() != 1 {
+		flag.Usage()
 		os.Exit(2)
 	}
-	if err := run(os.Args[1], os.Stdin, os.Stdout); err != nil {
+	if err := run(flag.Arg(0), os.Stdin, os.Stdout, *includeICMP); err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)
 	}
 }
 
-func run(path string, stdin io.Reader, out io.Writer) error {
+func run(path string, stdin io.Reader, out io.Writer, includeICMP bool) error {
 	input, err := captureinput.Open(path, stdin)
 	if err != nil {
 		return err
@@ -33,7 +40,43 @@ func run(path string, stdin io.Reader, out io.Writer) error {
 	if err != nil {
 		return err
 	}
-	return report(out, records)
+	if !includeICMP {
+		return report(out, records)
+	}
+	quoted, err := input.Capture.ICMPFlowErrorsFromReaderAt(input.File)
+	if err != nil {
+		return err
+	}
+	if err := report(out, records); err != nil {
+		return err
+	}
+	return reportICMPErrors(out, records, quoted)
+}
+
+func reportICMPErrors(out io.Writer, records []pcap.DNSRecord, quoted []pcap.ICMPFlowErrorSummary) error {
+	if len(quoted) == 0 {
+		return nil
+	}
+	dnsFlows := make(map[int]bool)
+	for _, record := range records {
+		if (record.SrcPort == 53 || record.DstPort == 53) && !record.SrcAddr.IsMulticast() && !record.DstAddr.IsMulticast() {
+			dnsFlows[record.FlowIndex] = true
+		}
+	}
+	for _, group := range quoted {
+		if !dnsFlows[group.FlowIndex] {
+			continue
+		}
+		src := netip.AddrPortFrom(group.Quote.SrcAddr, group.Quote.SrcPort)
+		dst := netip.AddrPortFrom(group.Quote.DstAddr, group.Quote.DstPort)
+		_, err := fmt.Fprintf(out, "flow=%d icmp_ip=%d icmp_type=%d icmp_code=%d quoted_src=%s quoted_dst=%s count=%d first_error_frame=%d last_error_frame=%d\n",
+			group.FlowIndex, group.Quote.IPVersion, group.Type, group.Code, src, dst, group.Count,
+			group.FirstPacketIndex+1, group.LastPacketIndex+1)
+		if err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 type key struct {

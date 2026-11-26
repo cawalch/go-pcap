@@ -272,6 +272,19 @@ without heap allocations:
   ICMPv6 errors of types 1, 2 and 3. The result contains the quoted IP addresses
   and protocol. `HasPorts` tells you whether the quote contains both TCP or
   UDP ports. The outer ICMP packet retains its endpoints and flow identity.
+
+Use `capture.ICMPFlowErrors(data)` or
+`capture.ICMPFlowErrorsFromReaderAt(reader)` to count captured ICMP errors
+that quote observed TCP or UDP flows. The summaries are grouped by quoted
+direction, ICMP type, and code. Each group includes its capture-wide flow
+index and first and last error packet indices and timestamps in capture
+order. Quotes with ports can match a transport observation later in the
+file. A match identifies the flow. Keep packet and application-request
+attribution separate, since a quote may contain only the transport header.
+
+The scan skips fragmented outer errors and quotes without transport ports.
+The group limit is `MaxICMPFlowErrorGroups`. ReaderAt uses its normal
+per-call read budget. Errors return no groups.
   For ReaderAt captures, get the frame bytes with `PacketPayloadFromReaderAt`.
 - Supported network headers: `IPv4` (with fragment detection), `IPv6` (with
   bounded extension-header traversal for Hop-by-Hop, Routing, Fragment,
@@ -607,6 +620,10 @@ file, a named pipe, or `-` for standard input. Pipe and standard input can
 carry either raw or gzip-compressed capture bytes. The commands stage up to
 128 MiB of uncompressed input before analysis and reject incomplete staged
 captures.
+
+Pass `-icmp` to the DNS transaction command to include counts and frame
+references for ICMP errors that quote an observed DNS flow. The ICMP rows
+are flow-level observations and follow the DNS report.
 
 | Frames in the synthetic capture | Observation |
 | --- | --- |
