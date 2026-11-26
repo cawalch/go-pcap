@@ -1575,6 +1575,9 @@ before opening a capture. The list is sorted by index. Use `HasLinkType`
 to check whether the backend resolved a supported datalink. Linux resolves
 it without capture privileges. macOS returns the names even when BPF access
 is unavailable. Windows reports the IPv4 framing of its capture socket.
+On Linux, one rtnetlink link listing supplies the device metadata and
+hardware type. `OpenLive` resolves the interface index and hardware type
+from the same kind of kernel record.
 
 On Linux, `OpenLive` accepts Ethernet, loopback and Metricom interfaces and
 reports `LinkTypeEthernet` for those devices. Linux presents loopback packets with a synthetic
