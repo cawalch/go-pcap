@@ -117,6 +117,10 @@ func reassembleTCPWithBudget(segments []TCPSegmentInput, remainingBudget int64, 
 	var inline [8]normSegment
 	norm := inline[:0]
 	if len(segments) > len(inline) {
+		if data := copyContiguousTCP(segments, baseSeq, min(int64(MaxFlowStreamBytes), remainingBudget), written); data != nil {
+			out.Data = data
+			return out, int64(len(data)), nil
+		}
 		norm = make([]normSegment, 0, len(segments))
 	}
 	for i := range segments {
@@ -237,6 +241,44 @@ func reassembleTCPWithBudget(segments []TCPSegmentInput, remainingBudget int64, 
 
 	out.Data = buf.Bytes()
 	return out, int64(len(out.Data)), nil
+}
+
+// copyContiguousTCP copies the direction only when all payloads fit the budget
+// and arrive consecutively from baseSeq. Other inputs use the general path.
+func copyContiguousTCP(segments []TCPSegmentInput, baseSeq uint32, limit int64, written tcpWriteObserver) []byte {
+	var size int64
+	for i := range segments {
+		seg := &segments[i]
+		if len(seg.Payload) == 0 {
+			continue
+		}
+		seq := seg.Seq
+		if seg.Flags&TCPFlagSYN != 0 {
+			seq++
+		}
+		if seq != baseSeq+uint32(size) || int64(len(seg.Payload)) > limit-size {
+			return nil
+		}
+		size += int64(len(seg.Payload))
+	}
+	if size == 0 {
+		return nil
+	}
+
+	data := make([]byte, int(size))
+	offset := 0
+	for i := range segments {
+		payload := segments[i].Payload
+		if len(payload) == 0 {
+			continue
+		}
+		end := offset + copy(data[offset:], payload)
+		if written != nil {
+			written(i, end, baseSeq+uint32(offset), false)
+		}
+		offset = end
+	}
+	return data
 }
 
 // appendTCPOverlap assigns each range by checksum evidence and capture order.
