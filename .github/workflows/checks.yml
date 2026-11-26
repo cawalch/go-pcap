@@ -76,6 +76,15 @@ jobs:
           go-version: stable
           cache: false
       - run: go test ./...
+      - name: Test macOS datalink discovery with BPF access
+        if: matrix.os == 'macos-latest'
+        env:
+          GO_PCAP_TEST_REQUIRE_BPF: '1'
+        run: |
+          go test -c -o "$RUNNER_TEMP/live-bpf.test" .
+          sudo -n chmod 0400 /dev/bpf[0-9]*
+          sudo -n chown "$(id -u)" /dev/bpf[0-9]*
+          "$RUNNER_TEMP/live-bpf.test" -test.v -test.run '^TestLiveDevicesDarwinLoopback$'
 
   vulnerabilities:
     runs-on: ubuntu-latest
