@@ -579,6 +579,10 @@ func (c *Capture) Streams(data []byte) ([]TCPStream, error) {
 
 // A nonzero port restricts reassembly after global flow indices are assigned.
 func collectStreams(source ipFrameSource, port uint16, meta *[]streamMetadata, trackWire tcpWireMode) ([]TCPStream, error) {
+	return collectStreamPayloads(source, port, meta, trackWire, nil)
+}
+
+func collectStreamPayloads(source ipFrameSource, port uint16, meta *[]streamMetadata, trackWire tcpWireMode, tlsReader *tlsStreamReader) ([]TCPStream, error) {
 	var table flowIndexTable
 	var inline [8]tcpFlowUsage
 	usage := inline[:0]
@@ -586,7 +590,7 @@ func collectStreams(source ipFrameSource, port uint16, meta *[]streamMetadata, t
 	var wire []tcpWireCapture
 	var interfaces map[tcpObservationKey]*tcpStreamOpening
 
-	err := source.walk(func(pkt PacketRecord, frame Frame, l4 []byte) error {
+	collect := func(pkt PacketRecord, frame Frame, l4 []byte) error {
 		key, canonical := makeCanonicalFlowKey(frame.IPProtocol, frame.SrcAddr, frame.SrcPort, frame.DstAddr, frame.DstPort)
 		flowIdx, _, err := table.lookupOrInsert(key)
 		if err != nil {
@@ -639,6 +643,9 @@ func collectStreams(source ipFrameSource, port uint16, meta *[]streamMetadata, t
 		if canonical != entry.canonical {
 			dir, segments = 1, &entry.server
 		}
+		if tlsReader != nil {
+			l4 = tlsReader.retain(active.slot-1, dir, len(*segments), pkt, frame, l4)
+		}
 		*segments = append(*segments, TCPSegmentInput{Seq: frame.TCPSeq, Flags: frame.TCPFlags, Payload: l4})
 		if trackWire != tcpWireNone {
 			var missing int64
@@ -651,7 +658,13 @@ func collectStreams(source ipFrameSource, port uint16, meta *[]streamMetadata, t
 			wire[active.slot-1].observe(dir, len(*segments)-1, pkt.Index, &frame, len(l4) != 0, trackWire, missing)
 		}
 		return nil
-	})
+	}
+	var err error
+	if tlsReader != nil {
+		err = tlsReader.walk(source.capture, collect)
+	} else {
+		err = source.walk(collect)
+	}
 	if err != nil || len(collected) == 0 {
 		return nil, err
 	}
@@ -663,6 +676,11 @@ func collectStreams(source ipFrameSource, port uint16, meta *[]streamMetadata, t
 	remaining := int64(MaxTotalStreamBytes)
 	for i := range collected {
 		entry := &collected[i]
+		if tlsReader != nil {
+			if err := tlsReader.complete(i, entry); err != nil {
+				return nil, err
+			}
+		}
 		st := TCPStream{
 			FlowIndex: entry.flowIndex, SrcAddr: entry.srcAddr, DstAddr: entry.dstAddr,
 			SrcPort: entry.srcPort, DstPort: entry.dstPort,

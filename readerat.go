@@ -418,8 +418,19 @@ func (c *Capture) tcpReaderAt(r io.ReaderAt) ipFrameSource {
 // direction stops at its first known TCP sequence gap.
 // See [Capture.UnsupportedLinkTypePackets] for link-type coverage.
 func (c *Capture) TLSFromReaderAt(r io.ReaderAt) ([]TLSRecord, error) {
+	if err := c.validateContainer(); err != nil {
+		return nil, err
+	}
+	if r == nil {
+		return nil, fmt.Errorf("%w: nil ReaderAt", ErrInvalidHeader)
+	}
+	if window := fileWindow(r, c.fileSize, c.scanReadAhead()); window != nil {
+		defer window.release()
+		r = window
+	}
+	reader := tlsStreamReader{budget: scanReadBudget{r: r, remaining: MaxReaderAtScanBytes}, size: c.fileSize}
 	var meta []streamMetadata
-	streams, err := collectStreams(c.tcpReaderAt(r), 0, &meta, tcpWireNone)
+	streams, err := collectStreamPayloads(ipFrameSource{capture: c}, 0, &meta, tcpWireNone, &reader)
 	if err != nil {
 		return nil, err
 	}
