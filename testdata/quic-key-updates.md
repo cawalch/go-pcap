@@ -28,3 +28,10 @@ packet number 6 and contains no authenticated data. Go packet indices are
 zero-based. Tests also omit the entire first observed client update and
 verify that the later client generation remains unavailable. A separate test
 exercises the exact update limit for QUIC v1 and v2.
+
+Regenerate the combined case by passing `--rotate` as the final generator
+argument. The client changes its destination CID just before its first key
+update. TShark verifies both changes on frame 8. The earlier CID and
+generation-zero data remain recoverable on the delayed frame 10. The second
+key update and stream bytes appear on frame 14. The test checks those
+original packets in both capture input paths.

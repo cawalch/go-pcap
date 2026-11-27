@@ -7,6 +7,7 @@ import (
 	"os"
 	"reflect"
 	"slices"
+	"strconv"
 	"testing"
 )
 
@@ -29,6 +30,7 @@ func TestDoQTransactions(t *testing.T) {
 	if len(rows) != 2 {
 		t.Fatalf("got %d DoQ streams", len(rows))
 	}
+	retained := 0
 	for i, qname := range []string{"one.example", "two.example"} {
 		row := rows[i]
 		wantAddress := []string{"192.0.2.10", "192.0.2.11"}[i]
@@ -38,8 +40,15 @@ func TestDoQTransactions(t *testing.T) {
 			!slices.Equal(row.Query.PacketIndices, []int{5 + i}) || !slices.Equal(row.Reply.PacketIndices, []int{8 - i}) {
 			t.Fatalf("unexpected stream %d: %+v", i, row)
 		}
+		retained += len(row.Query.DNS.Questions[0].Name) + len(row.Reply.DNS.Questions[0].Name)
+		retained += row.Reply.DNS.Answers[0].Address.BitLen() / 8
+		retained += (len(row.Query.PacketIndices) + len(row.Reply.PacketIndices)) * (strconv.IntSize / 8)
 	}
 
+	if retained != 52+4*(strconv.IntSize/8) {
+		t.Fatalf("retained field content = %d bytes", retained)
+	}
+	t.Logf("retained DNS name, address and packet index content: %d bytes", retained)
 	b := &measuredReaderAt{Reader: bytes.NewReader(raw)}
 	if observed, err := c.DoQTransactionsFromReaderAt(b, keys); err != nil || !reflect.DeepEqual(observed, rows) {
 		t.Fatalf("counted ReaderAt results differ: %v", err)

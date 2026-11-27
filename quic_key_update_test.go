@@ -134,3 +134,33 @@ func TestQUIC1RTTTrackerKeepsPreviousLowerFence(t *testing.T) {
 		t.Fatal("reordered packet generation was unavailable")
 	}
 }
+
+func TestKeyedQUICKeyUpdatesWithCIDRotation(t *testing.T) {
+	raw, err := os.ReadFile("testdata/quic-key-updates-rotated.pcap")
+	if err != nil {
+		t.Fatal(err)
+	}
+	keys, err := os.ReadFile("testdata/quic-key-updates-rotated.keys")
+	if err != nil {
+		t.Fatal(err)
+	}
+	rows := keyedQUICBoth(t, raw, keys)
+	if len(rows) != 1 {
+		t.Fatalf("got %d QUIC connections", len(rows))
+	}
+	messages := map[int]string{7: "generation-one", 9: "generation-zero", 13: "generation-two"}
+	generations := map[int]uint8{7: 1, 9: 0, 13: 2}
+	for _, packet := range rows[0].Client {
+		message, found := messages[packet.PacketIndex]
+		if !found {
+			continue
+		}
+		if packet.KeyGeneration != generations[packet.PacketIndex] || !bytes.Contains(packet.Payload, []byte(message)) {
+			t.Fatalf("incorrect generation or data in original packet %d", packet.PacketIndex)
+		}
+		delete(messages, packet.PacketIndex)
+	}
+	if len(messages) != 0 {
+		t.Fatalf("missing messages after combining key and CID changes: %v", messages)
+	}
+}

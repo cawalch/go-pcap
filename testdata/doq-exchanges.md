@@ -27,3 +27,18 @@ opening. The slice scan uses the existing input bytes. Both return two rows
 with the same decoded DNS fields and original packet references. The rows
 retain decoded messages and packet indices. Authenticated QUIC frame and
 stream bytes are transient during the scan.
+
+The two results retain 84 bytes of query and reply question names, IPv4
+answer data, and packet indices on a 64-bit Go runtime, or 68 bytes on a
+32-bit runtime. This counts logical field content and excludes Go container
+overhead, result metadata and transient decoder memory. Both input paths
+return identical content.
+
+To exercise an independent resolver client, install dnspython 2.9.2
+alongside aioquic 1.3.0 and pass the same temporary certificate and key to the
+loopback diagnostic. It starts a temporary DoQ responder, makes two actual
+DoQ lookups with dnspython and checks the answers above.
+
+```sh
+python3 testdata/check_doq_resolver.py "$fixture_dir/cert.pem" "$fixture_dir/key.pem"
+```

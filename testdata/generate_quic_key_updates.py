@@ -14,7 +14,9 @@ from aioquic.quic.events import StreamDataReceived
 from aioquic.quic.packet import QuicProtocolVersion, pull_quic_header
 from aioquic.tls import CipherSuite
 
-output, cert, key = map(Path, sys.argv[1:])
+output, cert, key = map(Path, sys.argv[1:4])
+rotate = "--rotate" in sys.argv[4:]
+stem = "quic-key-updates-rotated" if rotate else "quic-key-updates"
 client_addr = ("192.0.2.1", 45678)
 server_addr = ("192.0.2.2", 4433)
 settings = dict(
@@ -71,6 +73,8 @@ settle()
 first = send_message(b"generation-zero")
 settle()
 client.request_key_update()
+if rotate:
+    client.change_connection_id()
 second = send_message(b"generation-one")
 settle()
 client.request_key_update()
@@ -82,7 +86,7 @@ src, dst, early = packets[first]
 packets.insert(second, (src, dst, packets[second][2][:-1] + bytes([packets[second][2][-1] ^ 1])))
 packets.insert(second + 2, packets.pop(first))
 print("Original endpoint indices (before perturbing the capture):", first, second, third)
-with (output / "quic-key-updates.pcap").open("wb") as capture:
+with (output / f"{stem}.pcap").open("wb") as capture:
     capture.write(struct.pack("<IHHIIII", 0xA1B2C3D4, 2, 4, 0, 0, 65535, 101))
     for i, (src, dst, data) in enumerate(packets):
         ip = struct.pack(
@@ -92,4 +96,4 @@ with (output / "quic-key-updates.pcap").open("wb") as capture:
         udp = struct.pack("!HHHH", src[1], dst[1], 8 + len(data), 0)
         frame = ip + udp + data
         capture.write(struct.pack("<IIII", 1723720305, i * 1000, len(frame), len(frame)) + frame)
-(output / "quic-key-updates.keys").write_text(key_log.getvalue())
+(output / f"{stem}.keys").write_text(key_log.getvalue())
