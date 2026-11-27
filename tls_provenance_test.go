@@ -319,7 +319,7 @@ func TestTLSRecordProvenanceWithApplicationKeysOnly(t *testing.T) {
 	f := makeTLSProofFixture(t, TLSVersion13)
 	_, keys, _ := bytes.Cut(f.keys, []byte("\n"))
 	rows := tlsProofScan(t, buildPCAPNGFixture(binary.LittleEndian, keys, f.packets(100, "", false, false)), nil)
-	if len(rows) != 1 || rows[0].client.before != (tlsProvenanceBoundary{f.clientProtected, tlsStopMissingKey}) ||
+	if len(rows) != 1 || rows[0].client.before != (tlsProvenanceBoundary{f.clientProtected, tlsStopIndeterminate}) ||
 		rows[0].client.stop.reason != tlsStopEnd || string(rows[0].Client.Data) != tlsProofFirst+tlsProofSecond ||
 		len(rows[0].client.records) != 2 || rows[0].client.records[0].plainStart != 0 {
 		t.Fatalf("got %+v", rows)
