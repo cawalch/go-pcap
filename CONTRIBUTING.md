@@ -70,6 +70,33 @@ reapply the label to test the new revision. Squash-merge after both Go
 test jobs, macOS and Windows tests, lint, and the vulnerability check pass.
 The sole maintainer can merge their own PR after these checks.
 
+## Validate a batch of reviewed changes
+
+Review each focused commit before combining it with the others on a branch
+from the current `main`. Keep one commit per change for review and list the
+issues it resolves in the integration pull request. Use a single set of
+required checks for that combined candidate.
+
+From a trusted checkout with Go and the pinned linter installed, run
+preflight against the committed candidate before opening the pull request.
+Pass the SSH destination of a Linux AMD64 host with the Go compatibility
+toolchain on its PATH. The local machine should use the stable Go release.
+
+```sh
+bash scripts/preflight.sh HEAD linux-test-host
+```
+
+Both hosts unpack the same committed source. Preflight runs format, vet,
+race tests and the external consumer contract. It also runs lint locally and
+32-bit arithmetic tests on Linux. Use only reviewed refs on personal or
+shared machines. The GitHub-hosted checks validate the merge candidate,
+including native Windows and macOS tests, privileged live-capture tests,
+vulnerability analysis and timed fuzzing.
+
+Review the combined diff and confirm its base before applying `run-ci`.
+If `main` changes before merge, update the batch and apply the label again
+as described above.
+
 ## Validate a change
 
 From the repository root, format the Go files and run the tests and static checks:
