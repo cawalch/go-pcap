@@ -2,7 +2,6 @@ package pcap
 
 import (
 	"bytes"
-	"cmp"
 	"crypto/sha256"
 	"crypto/x509"
 	"encoding/asn1"
@@ -11,7 +10,6 @@ import (
 	"fmt"
 	"net/netip"
 	"slices"
-	"strconv"
 	"strings"
 	"time"
 )
@@ -1423,9 +1421,3 @@ func (c *Capture) HasTLSSNI(data []byte, sni string) (bool, error) {
 	}
 	return false, nil
 }
-
-// Unused helper imports check.
-var (
-	_ = cmp.Compare[int]
-	_ = strconv.Itoa
-)

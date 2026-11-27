@@ -1,10 +1,8 @@
 # SMB command evidence
 
-`smb-evidence.pcapng` contains a synthetic direct Ethernet TCP opening and
-a TREE_CONNECT request naming `\\server\share`. There are no session secrets.
-The request is command 3, message ID 42 and one-based frame 3. Its magic
-starts after a four-byte NetBIOS prefix. The example uses zero-based packet
-0 as the opening reference.
+`smb-evidence.pcapng` contains a synthetic TREE_CONNECT to `\\server\share`
+with command 3 and message ID 42 in frame 3. The magic follows a four-byte
+NetBIOS prefix. The Go example identifies the opening by packet index 0.
 
 Run these commands from the repository root with Python 3.13.18 and
 TShark 4.6.10 (commit `eac916f07299`).

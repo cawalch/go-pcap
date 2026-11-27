@@ -5,7 +5,7 @@ import (
 	"fmt"
 )
 
-// Capture container formats.
+// Format identifies the capture container format.
 type Format uint8
 
 const (
@@ -311,13 +311,13 @@ const (
 	MaxMPLSLabels               = 8
 	MaxIPv6ExtHeaders           = 8
 
-	// TCP stream reassembly limits.
+	// MaxSegmentsPerFlow bounds buffered TCP segments per direction.
 	MaxSegmentsPerFlow  = 4096
 	MaxFlowStreamBytes  = 4 << 20  // 4 MiB per direction per flow
 	MaxTotalStreamBytes = 64 << 20 // 64 MiB total reassembled stream bytes per call
 	MaxTCPOptions       = 32
 
-	// DNS parser limits.
+	// MaxDNSQuestions bounds questions in one DNS message.
 	MaxDNSQuestions        = 64
 	MaxDNSResourceRecords  = 256
 	MaxDNSCompressionJumps = 16
@@ -326,10 +326,10 @@ const (
 	MaxDNSALPNProtocols    = 32 // Maximum ALPN identifiers per SVCB or HTTPS record.
 	MaxDNSMessagesPerScan  = 65_536
 
-	// TLS parser limits.
-	MaxTLSRecordBytes         = 16384 + 2048 // RFC 8446 record expansion limit
-	MaxTLSHandshakeRecords    = 128          // Maximum records inspected per directional plaintext handshake scan.
-	MaxTLSHandshakeBytes      = 256 << 10    // 256 KiB coalesced handshake message
+	// MaxTLSRecordBytes bounds a TLS record payload, including expansion.
+	MaxTLSRecordBytes         = 16384 + 2048
+	MaxTLSHandshakeRecords    = 128       // Maximum records inspected per directional plaintext handshake scan.
+	MaxTLSHandshakeBytes      = 256 << 10 // 256 KiB coalesced handshake message
 	MaxTLSCipherSuites        = 256
 	MaxTLSExtensions          = 128
 	MaxTLSSignatureSchemes    = 128
@@ -340,14 +340,14 @@ const (
 	MaxTLSKeyUpdatesPerStream = 32 // Maximum application traffic key updates per direction.
 	MaxTLSKeyLogEntries       = 4096
 
-	// QUIC Initial parser limits.
+	// MaxQUICConnIDBytes bounds the length of a QUIC connection ID.
 	MaxQUICConnIDBytes    = 20
 	MaxQUICTokenBytes     = 4096
 	MaxQUICCryptoBytes    = 64 << 10 // 64 KiB reassembled CRYPTO stream
 	MaxQUICPacketsPerFlow = 64
 	MaxQUICFlowsPerScan   = 16_384
 
-	// HTTP parser limits.
+	// MaxHTTPHeaders bounds header lines in one HTTP/1 message.
 	MaxHTTPHeaders         = 128
 	MaxHTTPHeaderLineBytes = 8192
 	MaxHTTPCookies         = 64
@@ -363,25 +363,27 @@ const (
 	// wire-header, and retained body bytes in [Capture.HTTP1RequestEvidence].
 	MaxHTTP1RequestEvidenceBytesPerScan = 64 << 20
 
-	// SSH parser limits.
+	// MaxSSHBannerBytes bounds an SSH identification line before its newline.
 	MaxSSHBannerBytes       = 255
 	MaxSSHKexPacketBytes    = 32768
 	MaxSSHNameListBytes     = 16384
 	MaxSSHHandshakesPerScan = 16_384
 
-	// SMB2 / NTLM parser limits.
+	// MaxSMB2PacketBytes bounds an SMB2 or SMB3 message carried over NetBIOS.
 	MaxSMB2PacketBytes   = 64 << 10
 	MaxNTLMTokenBytes    = 16 << 10
 	MaxNTLMAvPairs       = 32
 	MaxSMBRecordsPerScan = 16_384
 
-	// Live capture and ReaderAt scan limits.
+	// MaxBPFFilterInstructions bounds instructions in a classic BPF program.
 	MaxBPFFilterInstructions = 4096
 	DefaultLiveSnapLen       = 65535
 	DefaultLiveBufferSize    = 256 << 10
-	MaxReaderAtScanBytes     = 64 << 20 // 64 MiB per call: all flow/DNS/TLS/QUIC scan reads
 
-	// IPv4 / IPv6 defragmentation limits.
+	// MaxReaderAtScanBytes bounds metadata and payload reads in a bounded ReaderAt scan.
+	MaxReaderAtScanBytes = 64 << 20
+
+	// MaxFragmentGroups bounds pending IP fragment groups in a scan.
 	MaxFragmentGroups           = 1024
 	MaxFragmentsPerGroup        = 16
 	MaxReassembledIPPacketBytes = 65535
@@ -389,7 +391,7 @@ const (
 	// MaxWebSocketFramesPerStream bounds frames in each direction, including continuations.
 	MaxWebSocketFramesPerStream = 1024
 
-	// HTTP/2 parser limits.
+	// MaxHTTP2FramesPerStream bounds frames in one directional HTTP/2 stream.
 	MaxHTTP2FramesPerStream     = 1024
 	MaxHTTP2Settings            = 64
 	MaxHTTP2DynamicTableBytes   = 4096
@@ -398,13 +400,13 @@ const (
 	MaxHTTP2DecodedHeaderBytes  = 4 << 20 // Logical header storage budget, shared per scan.
 	MaxHTTP2FramePayload        = 1 << 20
 
-	// Kerberos v5 and RDP parser limits.
+	// MaxKRB5PacketBytes bounds one Kerberos message.
 	MaxKRB5PacketBytes    = 64 << 10
 	MaxKRB5PrincipalParts = 16
 	MaxKRB5ETypes         = 32
 	MaxKRB5RecordsPerScan = 16_384
 
-	// Bounds for LDAP request metadata decoding.
+	// MaxLDAPPacketBytes bounds one LDAP message.
 	MaxLDAPPacketBytes      = 64 << 10
 	MaxLDAPFilterDepth      = 16
 	MaxLDAPFilterBytes      = 16 << 10
@@ -413,7 +415,7 @@ const (
 	MaxLDAPTextBytesPerScan = 16 << 20
 	// MaxDCERPCContexts bounds presentation context offers and acknowledgment results in one DCE/RPC PDU.
 	MaxDCERPCContexts = 64
-	// Bounds for DCE/RPC capture results.
+	// MaxDCERPCRecordsPerScan bounds retained DCE/RPC records in a scan.
 	MaxDCERPCRecordsPerScan  = 16_384
 	MaxDCERPCContextsPerScan = 65_536
 	MaxRDPPacketBytes        = 16 << 10

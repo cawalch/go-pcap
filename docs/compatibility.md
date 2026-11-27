@@ -1,98 +1,56 @@
 # Consumer API compatibility
 
-The v0.1.0 tag is the baseline for these behaviors. Consumers can rely on
-them when upgrading to a compatible version. The module is experimental
-during v0.x. A deliberate breaking change requires a minor release and a
-changelog entry. Use keyed literals for exported structs so new fields can
-be added compatibly.
-
-Use the [capture analysis capability matrix](capabilities.md) to compare
-released and checkout support, locate fixture evidence, and check the
-boundary of each analysis.
-Run the [tagged external tests](../testdata/consumer/qualified/README.md) to
-check published TLS, DNS, HTTP and enterprise behavior from a separate module.
+The v0.1.0 tag is the compatibility baseline. Before v1.0, deliberate
+breaking changes require a minor release and a changelog entry. Use keyed
+literals for exported structs so added fields remain compatible.
+[External contract tests](../testdata/consumer/contract_test.go)
 
 ## Record order
 
-- `PacketSeq`, `Packets`, and their ReaderAt counterparts enumerate complete
-  packets in file order. `PacketRecord.Index` starts at zero. Timestamps may
-  repeat or move backward.
-- `Flows` and `FlowsFromReaderAt` return bidirectional flows in first-observed
-  order. The first observed direction defines the source and destination.
-  `Streams` returns TCP connections in order of their first observed packet.
-  Connections that reuse a five-tuple share a `FlowIndex`. This index refers
-  to the flow list, which can also contain UDP flows. When
-  `Capture.SeparateTCPInterfaces` tracks connections by PcapNG interface,
-  their flow indices still refer to this same capture-wide list.
-  Reassembled bytes within a direction follow TCP sequence order. A gap sets
-  `SequenceGap` and concatenates the available ranges.
-- DNS capture records follow packet-index order. DHCPv4 and neighbor records
-  follow observation order. Neighbor binding changes follow the packet-index
-  order of the current observation. For combined web analysis, each slice returned
-  by `Web` or `WebWithWebSockets` follows the corresponding standalone
-  method. WebSocket capture records group cleartext before decrypted streams
-  and client before server messages within a stream. Within a direction
-  messages appear on completion, so a ping can precede an interrupted text
-  message. Use packet indexes when correlating different record families.
-- Cleartext HTTP/1 request evidence follows packet-index and then TCP
-  payload-offset order. These two fields identify a request start within a
-  capture, including when multiple requests start in one packet.
+- Packet iterators and collectors use file order and zero-based indices.
+  Timestamps can repeat or move backward.
+- Flows start in first-observed order. That direction defines their
+  source. Multiple TCP openings can share a capture-wide flow index,
+  including with interface-scoped reassembly.
+- TCP stream data is ordered by sequence. `SequenceGap` warns that
+  available ranges can be concatenated across missing bytes.
+- DNS records use packet-index order. DHCPv4 and neighbors use observation
+  order. Pairing and transaction APIs document their own ordering.
+  Cleartext HTTP/1 request evidence sorts by packet index and then payload
+  offset. The combined web scan preserves standalone result order.
+- WebSocket capture results group cleartext before decrypted streams and
+  client before server within a stream. Messages in a direction are
+  ordered by completion, so a ping can precede an interrupted message.
 
 ## Inputs and payloads
 
-| API | Lifetime a caller can rely on |
+| Input or result | Contract |
 | --- | --- |
-| `New`, `NewWithLength`, `NewFromReaderAt`, `Open` | The capture owns its metadata snapshot, including copied decryption secrets. Supply the same underlying capture contents to later scans. Keep a ReaderAt available and its size and bytes stable throughout use. Concurrent reads of a capture require its exported fields to remain unmodified. |
-| `PacketPayload`, `SafeReader.Slice`, `UnwrapProxyStream` | The returned views borrow the input bytes. Copy before reusing or modifying the backing buffer if you need to retain the original content. |
-| `PacketPayloadFromReaderAt`, `ReassembleTCP`, `ParseWebSocketFrames` | The returned frame, stream data, and message payloads respectively survive reuse of the supplied input. |
-| `HTTP1RequestEvidence`, `HTTP1RequestEvidenceFromReaderAt` | The returned headers and body survive reuse of the supplied input. |
-| `HTTP1Transactions`, `HTTP1TransactionsFromReaderAt` | Returned headers, bodies and packet indices survive reuse of the input. Transaction IDs apply to the original capture. |
-| `SMB2Evidence`, `SMB2EvidenceFromReaderAt` | Returned command data and source packet indices belong to the caller. Opening, direction and stream offsets refer to the original capture. [SMB evidence](parsing.md#find-the-original-packets-for-an-smb-command) |
-| `KeyedHTTP1Transactions`, `KeyedHTTP1TransactionsFromReaderAt` | Caller-owned HTTP and TLS record evidence survives input reuse. IDs apply to the original capture. See [key inputs and coverage](parsing.md#select-http1-transactions-inside-tls). |
-| `ExtractKeyedHTTP1TransactionPCAPNG`, `ExtractKeyedHTTP1TransactionPCAPNGFromReaderAt` | The source ID and matching keys select original ciphertext packets. Reopening the packet-only output requires separate secrets. [Export coverage](parsing.md#export-an-http1-exchange-as-ciphertext) |
-| `ExtractKeyedHTTP2TransactionPCAPNG`, `ExtractKeyedHTTP2TransactionPCAPNGFromReaderAt` | The source ID and matching keys select original ciphertext packets and directional HPACK history. Reopening requires separate secrets. [Export coverage](parsing.md#export-a-keyed-http2-exchange-as-ciphertext) |
-| `DecompressCapture` | Non-gzip input passes through by reference. A successful gzip decode returns decompressed bytes. |
-| `LiveCapture.ReadPacket` | For portable code, copy a packet that must survive the next read. The macOS backend reuses its buffer. |
-| `CompileBPFFilter` | Numeric TCP, UDP and SCTP port filters compile for untagged IPv4 Ethernet. An empty expression accepts all datalinks. |
+| Capture snapshot | Opening copies metadata, including secrets. Supply the same capture contents to later scans. Keep ReaderAt data and exported capture fields immutable during concurrent use. |
+| Borrowed bytes | `PacketPayload`, `SafeReader.Slice`, `UnwrapProxyStream`, and plain input passed through `DecompressCapture` borrow their input. |
+| Owned bytes | `PacketPayloadFromReaderAt`, `ReassembleTCP`, and decoded WebSocket messages own their bytes. HTTP and SMB evidence APIs own retained bodies or fields and packet references. |
+| Live packet bytes | Copy bytes that must survive a later read. The macOS backend reuses its buffer. |
+| Evidence IDs | Indices and transaction IDs identify the original capture. Reopening a keyed packet-only export requires the matching keys separately. |
 
-For other low-level parsers, consult the individual API before modifying an
-input while its result is still in use. An offset in a result refers to the
-input identified by that API.
+For other low-level APIs, check the Go doc before modifying input that
+may back a result.
 
 ## Limits and errors
 
-Use the exported sentinel with `errors.Is` to classify a failure. Diagnostic
-strings may change. Check the operation’s result policy before using output
-from a failed call.
+Use `errors.Is` with the documented sentinel. Diagnostic strings can change.
+An iterator can yield complete packets followed by one terminal error.
+A collector can discard its results on the same error. Check each API's
+partial-result contract.
 
-| Operation | What the caller receives |
-| --- | --- |
-| Container open | A valid header followed by an incomplete trailing record can produce a usable snapshot. Check `InputTruncated()` and `DeclaredExtent()` to distinguish this from a complete capture. |
-| Compressed signatures | A leading Zstandard data frame or XZ stream signature returns `ErrUnsupportedZstd` or `ErrUnsupportedXZ` with a nil capture. Both errors also match `ErrNotPCAP` and `ErrInvalidMagic`. |
-| Link-type coverage | `UnsupportedLinkTypePackets` and `UnsupportedLinkTypePacketsFromReaderAt` report complete records on unsupported interfaces. The ReaderAt metadata pass is bounded by `MaxReaderAtScanBytes`. Packet iteration still exposes those records, and frame-based scans can return empty or partial results. |
-| UDP fragment grouping | `Capture.SeparateIPFragmentInterfaces` keeps pending DNS and QUIC Initial fragment groups separate by capture-wide PcapNG interface ID. The zero value combines interfaces. Flow indices and the scan-wide fragment limit apply across interfaces. |
-| Unicast DNS transactions | Both input paths return rows ordered by their first observed record. Pairing isolates interfaces and observed TCP openings. The scan retains at most `MaxDNSMessagesPerScan` decoded records. An excess returns `ErrDNSLimit` with no rows. |
-| ICMP flow errors | Summaries count observations by quoted direction, type, and code. Flow indices use the regular flow order, and first and last packet indices follow capture order. |
-| TCP zero windows | Summaries count complete, non-fragmented ACK-bearing zero-window advertisements by flow direction. Packet indices follow capture order. |
-| Packet iteration and collection | Iterators can yield complete packets followed by one terminal error. Breaking stops iteration. On a walk error the collecting methods discard the accumulated records. |
-| ReaderAt flow, DNS, TLS and QUIC scans | The per-call read budget covers selected payload and metadata. Exceeding `MaxReaderAtScanBytes` returns `ErrPacketLimit`. A larger file can fit within the budget. |
-| TLS handshake packet evidence | The two capture methods return owned packet indices for observed hellos and certificate chains, plus the original opening packet. Per-field indices follow capture order. Protected claims refer to whole authenticated TLS records. Scan and limit errors discard the result. |
-| QUIC 1-RTT packet decryption | `QUIC1RTTDecoder.Open` returns owned, authenticated frame bytes on success. Oversized input returns `ErrQUICLimit`. Invalid context, headers or authentication return `ErrInvalidQUIC`. |
-| QUIC 1-RTT stream reassembly | Each result owns the prefix before the first gap and reports whether it ends in a clean FIN. Conflicting bytes, inconsistent final sizes and malformed or unsupported frames return `ErrInvalidQUIC` with no results. [Directional limits](parsing.md#reassemble-authenticated-quic-streams) |
-| Keyed QUIC capture scan | Authenticated bytes retain their packet index and UDP offset in each direction. Flow indices match the Initial scan. ReaderAt reads share one budget across both passes. [Coverage and limits](parsing.md#associate-keyed-quic-packets-with-capture-connections) |
-| QUIC connection-ID rotation | An observed authenticated issuance adds the destination ID for the peer. Retired IDs can resolve older, reordered packet numbers. A conflicting or unknown association yields no packet. [Connection matching and limits](parsing.md#associate-keyed-quic-packets-with-capture-connections) |
-| QUIC application key updates | The stateful tracker follows at most 32 updates per direction. It can authenticate reordered packets from the immediately preceding generation. A missed intermediate generation or exhausted limit prevents further recovery. [Key generation and limits](parsing.md#associate-keyed-quic-packets-with-capture-connections) |
-| Keyed DoQ transactions | Authenticated `doq` gates pairing on client-initiated bidirectional streams. Ordinary complete messages need one length-framed DNS message with ID zero and a clean FIN. Directional observations retain packet indices even when a lookup is incomplete, reset, malformed or unsupported. [DoQ evidence](parsing.md#read-dns-over-quic) |
-| Keyed HTTP/3 transactions | An authenticated `h3` selection gates stream association. Each observed direction records QPACK field states, bounded entity bytes, stream termination and original packet indices. Context and transaction packets can be shared. [Recovery and replay](parsing.md#recover-keyed-http3-request-streams) |
-| HTTP/3 QPACK field sections | One call per sender. Complete sections can decode static and dynamic references, wait for missing inserts, or report malformed or limited input. Decoded rows preserve field order and compressed stream ranges. [QPACK limits and outcomes](parsing.md#decode-http3-qpack-field-sections) |
-| QUIC ALPN | `KeyedQUICWithALPN` may return an authenticated server selection with empty application packet lists. An application-only row can have nil ALPN. `KeyedQUIC` returns rows containing at least one 1-RTT packet. [Selection and packet references](parsing.md#observe-the-server-selected-quic-alpn) |
-| HTTP/3 stream framing | Frames identify ranges in the caller's QUIC stream bytes. Capture truncation can return the preceding complete frames. Invalid framing and exceeded limits return a zero result. [Coverage and limits](parsing.md#delimit-http3-frames) |
-| TCP reassembly | A directional byte cap produces a bounded stream with `Anomalies.Truncated`. Exceeding `MaxSegmentsPerFlow` in `ReassembleTCP` returns `ErrReassemblyLimit`. |
-| Direct protocol parsing | A short DNS header returns `ErrInvalidDNS`. Excessive advertised question counts return `ErrDNSLimit`. `ParseWebSocketFrames` returns preceding complete messages plus `ErrInvalidWebSocket` for malformed or truncated input. Frame-count exhaustion returns `ErrWebSocketLimit`. |
-| Combined web scan | `WebWithWebSockets` discards both results if an analysis fails. Capture-level dissectors may skip malformed or incomplete protocol observations as documented. |
-| HTTP/1 request evidence | The scan discards its result on a read or limit error. A parsed request with an incomplete, malformed, or unsupported body reports its state in `BodyState`. |
-| HTTP/1 transaction export | An invalid or absent request ID returns `ErrOutOfBounds` before writing. Once output starts, a read or write error can leave a partial PcapNG. ReaderAt selection and output share one `MaxReaderAtScanBytes` budget. |
-
-Use the named limits for the selected parser. A change that makes a
-previously accepted input exceed a limit warrants a compatibility review.
-The parsing guide lists the individual ceilings and their units. [Work and output limits](parsing.md#work-and-output-limits)
+- A valid prefix with an incomplete last record can still open. Inspect
+  `InputTruncated` and `DeclaredExtent`.
+- Unsupported Zstandard and XZ signatures have specific errors that also
+  match `ErrNotPCAP` and `ErrInvalidMagic`.
+- Unsupported datalinks can yield no protocol rows. Count them with
+  `UnsupportedLinkTypePackets` or its ReaderAt variant.
+- Bounded ReaderAt scans charge selected metadata and packet bytes against
+  `MaxReaderAtScanBytes`. Exceeding it returns `ErrPacketLimit`.
+- An invalid transaction ID fails before writing. A later read or write
+  error can leave partial output. Discard that output before retrying.
+- A change that makes a previously accepted input exceed a limit warrants
+  compatibility review. [Parsing limits and protocol outcomes](parsing.md#work-and-output-limits)

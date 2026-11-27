@@ -1,11 +1,12 @@
 # TLS reference captures
 
+Reference output uses TShark 4.6.10 (`eac916f07299`). All keys are test-only.
+
 ## TLS 1.2 AES-CBC
 
-`tls12-cbc.pcapng` holds eight OpenSSL 4.1.0 loopback handshakes. Each request
-is `GET /response HTTP/1.0` with host `example.test`. Each response has status
-200, a content length of 11, and body `cbc fixture`. The capture includes the
-fixture connections' `CLIENT_RANDOM` lines in a TLS Decryption Secrets Block.
+`tls12-cbc.pcapng` records eight OpenSSL 4.1.0 loopback exchanges. Embedded
+`CLIENT_RANDOM` secrets recover `GET /response` and a 200 response with
+body `cbc fixture`.
 
 The generator used temporary self-signed RSA-2048 and P-256 certificates and
 a static response file, then ran the following commands for each suite.
@@ -21,12 +22,9 @@ printf 'GET /response HTTP/1.0\r\nHost: example.test\r\n\r\n' |
     -connect 127.0.0.1:8443 -cipher "$SUITE:@SECLEVEL=0"
 ```
 
-Run the server and client in separate processes. For MAC-then-encrypt rows
-add `-no_etm` at both ends. The fixture records the TLS bytes relayed between
-the two loopback sockets and wraps them in synthetic Ethernet, IPv4, and TCP
-headers. Client ports start at 40000, the server port is 443, and the IP
-addresses are 192.0.2.1 and 198.51.100.2. The TCP bytes retain their direction
-and order. Convert the classic PCAP and embed the combined key log with
+Run the server and client separately. Add `-no_etm` at both ends for
+MAC-then-encrypt. The relay wraps ordered TLS bytes in synthetic headers.
+Embed all keys with
 `editcap --inject-secrets tls,fixture.keys fixture.pcap tls12-cbc.pcapng`.
 
 | Stream | OpenSSL cipher | TLS suite ID | Record layout |
@@ -40,9 +38,8 @@ and order. Convert the classic PCAP and embed the combined key log with
 | 6 | `ECDHE-RSA-AES128-SHA256` | `0xc027` | MAC then encrypt |
 | 7 | `ECDHE-ECDSA-AES256-SHA384` | `0xc024` | Encrypt then MAC |
 
-TShark 4.6.10 (commit `eac916f07299`) reports ServerHello extension 22 on each
-encrypt-then-MAC connection. It decrypts `/response` and its 200 response in
-all eight streams.
+TShark reports ServerHello extension 22 for encrypt-then-MAC and
+decodes the request and response in all eight streams.
 
 ```sh
 tshark -n -r tls12-cbc.pcapng \
@@ -53,11 +50,9 @@ tshark -n -r tls12-cbc.pcapng \
 
 ## TLS AES-GCM and ChaCha20-Poly1305
 
-`cipher-coverage.pcapng` holds four OpenSSL 4.1.0 loopback exchanges.
-The relay retains the original TLS byte order and wraps the records in
-synthetic Ethernet, IP and TCP headers. Test-only secrets are embedded in
-a Decryption Secrets Block. The OpenSSL client requests `/response` and
-receives status 200 with body `cipher fixture` in all four exchanges.
+`cipher-coverage.pcapng` has four OpenSSL 4.1.0 loopback exchanges
+with embedded keys. Each returns 200 and body `cipher fixture` for
+`/response`.
 
 Regenerate the fixture with OpenSSL 4.1.0 and Python 3.13.18. TLS randoms and
 TCP segmentation can change between generations.
@@ -66,8 +61,7 @@ TCP segmentation can change between generations.
 PYTHONDONTWRITEBYTECODE=1 python3 testdata/tls/generate-cipher-coverage.py
 ```
 
-TShark 4.6.10 (commit `eac916f07299`) reports the following frame numbers
-in the checked-in fixture.
+TShark reports these one-based frames in the checked-in fixture.
 
 | TLS version | Selected cipher | ServerHello frame | Request frame | Response frame |
 | --- | --- | --- | --- | --- |

@@ -1,11 +1,8 @@
 # QUIC 1-RTT key-update reference
 
-The capture contains a handshake and small transfers between two in-memory
-aioquic 1.3.0 endpoints. The client uses the endpoint API to request two key
-updates and waits for peer acknowledgements. The server independently receives
-the three stream messages. The generator reorders a previously sent packet in
-the recorded file and inserts one damaged copy of the first update. The key
-log contains synthetic connection secrets only.
+Two aioquic 1.3.0 endpoints complete three stream messages across two key
+updates. The generator reorders a packet and inserts a damaged copy of the
+first update. The key log contains synthetic secrets.
 
 Use Python with aioquic 1.3.0 installed to regenerate the capture. Run these
 commands from the repository root, pointing at a temporary certificate and key.
