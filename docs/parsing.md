@@ -310,6 +310,30 @@ Use `HTTP2` to recover decrypted headers and DATA for the stream. Apply
 Check DNS anomalies after decoding. For DoQ, use the separate
 [QUIC stream binding](#read-dns-over-quic).
 
+### Recover DNS-over-HTTPS transactions
+
+Use `DoHTransactions` or `DoHTransactionsFromReaderAt` with the original
+capture and its key material. Both APIs run the keyed HTTP/2 and HTTP/3
+scans. A row requires authenticated HTTPS request headers that identify a
+`dns` GET parameter or an identity-coded `application/dns-message` POST.
+Missing keys or undecodable request headers can prevent a row from appearing.
+
+Check the query and reply states independently. A GET query resides in the
+headers. POST queries and DNS replies require complete, supported bodies.
+The final HTTP status is reported separately, so HTTP errors, missing
+replies, and incomplete bodies remain distinguishable. Both directions
+are associated through the HTTP stream in its TCP opening or QUIC
+connection. DNS IDs can repeat across exchanges.
+
+Use the directional packet indices to locate the observations in the
+original capture. HTTP/2 also reports the contributing TLS records. HTTP/3
+reports the authenticated ALPN and supporting QPACK packets. The same
+packet can contribute to multiple streams or contain transport context.
+The ReaderAt method applies one read budget across both scans.
+
+[Runnable example](../example_test.go) ·
+[Independent fixture](../testdata/doh-exchanges.md)
+
 ### Choose TLS and QUIC key sources
 
 Pass explicit NSS key log bytes to keyed scans or supply an input with a
