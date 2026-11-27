@@ -716,3 +716,69 @@ func ExampleCapture_TLSHandshakeEvidence() {
 	// Output:
 	// flow=1 opening_frame=2 hello_frame=6 link=1
 }
+func ExampleCapture_KeyedQUICWithALPN() {
+	data, err := os.ReadFile("testdata/quic-alpn-doq.pcapng")
+	if err != nil {
+		panic(err)
+	}
+	c, err := pcap.New(data)
+	if err != nil {
+		panic(err)
+	}
+	rows, err := c.KeyedQUICWithALPN(data, nil)
+	if err != nil {
+		panic(err)
+	}
+	for _, row := range rows {
+		if row.ALPN != nil {
+			fmt.Printf("offered %v, selected %s in packet indices %v\n", row.Handshake.ClientHello.ALPNs, row.ALPN.Protocol, row.ALPN.PacketIndices)
+		}
+	}
+	// Output: offered [h3 doq fixture], selected doq in packet indices [1]
+}
+func ExampleDecodeQPACKSections() {
+	// A complete request HEADERS frame with a static QPACK GET field.
+	stream := pcap.QUICStream{ID: 4, Data: []byte{1, 3, 0, 0, 0xd1}, Complete: true}
+	framing, err := pcap.ParseHTTP3Stream(stream)
+	if err != nil {
+		log.Fatal(err)
+	}
+	frame := framing.Frames[0]
+	input := pcap.QPACKSectionInput{StreamID: stream.ID, Offset: frame.PayloadOffset,
+		Data: stream.Data[frame.PayloadOffset : frame.PayloadOffset+frame.PayloadLength]}
+	sections, err := pcap.DecodeQPACKSections(pcap.QUICStream{}, 0, []pcap.QPACKSectionInput{input})
+	if err != nil {
+		log.Fatal(err)
+	}
+	section := sections[0]
+	if section.State == pcap.QPACKDecoded {
+		for _, field := range section.Headers {
+			fmt.Printf("stream %d offset %d %s %s\n", section.StreamID, section.Offset, field.Name, field.Value)
+		}
+	}
+	// Output: stream 4 offset 2 :method GET
+}
+func ExampleCapture_KeyedHTTP3Transactions() {
+	data, err := os.ReadFile("testdata/http3-framing.pcapng")
+	if err != nil {
+		log.Fatal(err)
+	}
+	c, err := pcap.New(data)
+	if err != nil {
+		log.Fatal(err)
+	}
+	rows, err := c.KeyedHTTP3Transactions(data, nil)
+	if err != nil {
+		log.Fatal(err)
+	}
+	for _, row := range rows {
+		if row.Request != nil && row.Response != nil {
+			fmt.Printf("stream %d status %d request packets %v response packets %v\n",
+				row.StreamID, row.StatusCode, row.Request.PacketIndices, row.Response.PacketIndices)
+			fmt.Printf("bodies %q %q\n", row.Request.Body, row.Response.Body)
+		}
+	}
+	// Output:
+	// stream 0 status 200 request packets [9] response packets [11]
+	// bodies "request" "response"
+}

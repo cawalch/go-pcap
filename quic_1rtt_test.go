@@ -43,6 +43,22 @@ func readQUIC1RTTVectors() ([]quic1RTTVector, error) {
 }
 
 func (v quic1RTTVector) decoder() (*QUIC1RTTDecoder, error) {
+	secret, err := v.trafficSecret()
+	if err != nil {
+		return nil, err
+	}
+	return NewQUIC1RTTDecoder(v.Version, v.CipherSuite, secret)
+}
+
+func (v quic1RTTVector) tracker() (*QUIC1RTTKeyTracker, error) {
+	secret, err := v.trafficSecret()
+	if err != nil {
+		return nil, err
+	}
+	return NewQUIC1RTTKeyTracker(v.Version, v.CipherSuite, secret)
+}
+
+func (v quic1RTTVector) trafficSecret() ([]byte, error) {
 	log, err := ParseTLSKeyLog([]byte(v.KeyLog))
 	if err != nil {
 		return nil, err
@@ -52,7 +68,7 @@ func (v quic1RTTVector) decoder() (*QUIC1RTTDecoder, error) {
 		if len(secret) == 0 {
 			secret = entry.ServerTrafficSecret0
 		}
-		return NewQUIC1RTTDecoder(v.Version, v.CipherSuite, secret)
+		return secret, nil
 	}
 	return nil, errors.New("missing QUIC traffic secret")
 }

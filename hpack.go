@@ -1,6 +1,8 @@
 package pcap
 
 import (
+	"errors"
+	"io"
 	"math"
 	"sync"
 )
@@ -65,15 +67,28 @@ func hpackHuffman(src []byte) (string, error) {
 type hpackInput []byte
 
 func (p *hpackInput) integer(mask byte) (uint64, error) {
-	if len(*p) == 0 {
+	n, err := p.prefixedInteger(mask)
+	if err != nil {
 		return 0, ErrInvalidHTTP
+	}
+	return n, nil
+}
+
+// QPACK shares HPACK's integer and string wire formats and also needs to
+// distinguish an incomplete encoder instruction at the end of a capture.
+func (p *hpackInput) prefixedInteger(mask byte) (uint64, error) {
+	if len(*p) == 0 {
+		return 0, io.ErrUnexpectedEOF
 	}
 	n := uint64((*p)[0] & mask)
 	*p = (*p)[1:]
 	if n < uint64(mask) {
 		return n, nil
 	}
-	for shift := uint(0); shift < 64 && len(*p) > 0; shift += 7 {
+	for shift := uint(0); shift < 64; shift += 7 {
+		if len(*p) == 0 {
+			return 0, io.ErrUnexpectedEOF
+		}
 		b := (*p)[0]
 		*p = (*p)[1:]
 		v := uint64(b & 127)
@@ -88,13 +103,24 @@ func (p *hpackInput) integer(mask byte) (uint64, error) {
 	return 0, ErrInvalidHTTP
 }
 func (p *hpackInput) text() (string, error) {
-	if len(*p) == 0 {
+	s, err := p.prefixedString(127)
+	if err != nil && errors.Is(err, io.ErrUnexpectedEOF) {
 		return "", ErrInvalidHTTP
 	}
-	coded := (*p)[0]&128 != 0
-	n, err := p.integer(127)
-	if err != nil || n > uint64(len(*p)) {
-		return "", ErrInvalidHTTP
+	return s, err
+}
+
+func (p *hpackInput) prefixedString(mask byte) (string, error) {
+	if len(*p) == 0 {
+		return "", io.ErrUnexpectedEOF
+	}
+	coded := (*p)[0]&(mask+1) != 0
+	n, err := p.prefixedInteger(mask)
+	if err != nil {
+		return "", err
+	}
+	if n > uint64(len(*p)) {
+		return "", io.ErrUnexpectedEOF
 	}
 	data := (*p)[:n]
 	*p = (*p)[n:]

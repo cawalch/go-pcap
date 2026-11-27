@@ -9,6 +9,8 @@ be added compatibly.
 Use the [capture analysis capability matrix](capabilities.md) to compare
 released and checkout support, locate fixture evidence, and check the
 boundary of each analysis.
+Run the [tagged external tests](../testdata/consumer/qualified/README.md) to
+check published TLS, DNS, HTTP and enterprise behavior from a separate module.
 
 ## Record order
 
@@ -78,6 +80,12 @@ from a failed call.
 | QUIC 1-RTT packet decryption | `QUIC1RTTDecoder.Open` returns owned, authenticated frame bytes on success. Oversized input returns `ErrQUICLimit`. Invalid context, headers or authentication return `ErrInvalidQUIC`. |
 | QUIC 1-RTT stream reassembly | Each result owns the prefix before the first gap and reports whether it ends in a clean FIN. Conflicting bytes, inconsistent final sizes and malformed or unsupported frames return `ErrInvalidQUIC` with no results. [Directional limits](parsing.md#reassemble-authenticated-quic-streams) |
 | Keyed QUIC capture scan | Authenticated bytes retain their packet index and UDP offset in each direction. Flow indices match the Initial scan. ReaderAt reads share one budget across both passes. [Coverage and limits](parsing.md#associate-keyed-quic-packets-with-capture-connections) |
+| QUIC connection-ID rotation | An observed authenticated issuance adds the destination ID for the peer. Retired IDs can resolve older, reordered packet numbers. A conflicting or unknown association yields no packet. [Connection matching and limits](parsing.md#associate-keyed-quic-packets-with-capture-connections) |
+| QUIC application key updates | The stateful tracker follows at most 32 updates per direction. It can authenticate reordered packets from the immediately preceding generation. A missed intermediate generation or exhausted limit prevents further recovery. [Key generation and limits](parsing.md#associate-keyed-quic-packets-with-capture-connections) |
+| Keyed DoQ transactions | Authenticated `doq` gates pairing on client-initiated bidirectional streams. Ordinary complete messages need one length-framed DNS message with ID zero and a clean FIN. Directional observations retain packet indices even when a lookup is incomplete, reset, malformed or unsupported. [DoQ evidence](parsing.md#read-dns-over-quic) |
+| Keyed HTTP/3 transactions | An authenticated `h3` selection gates stream association. Each observed direction records QPACK field states, bounded entity bytes, stream termination and original packet indices. Context and transaction packets can be shared. [Recovery and replay](parsing.md#recover-keyed-http3-request-streams) |
+| HTTP/3 QPACK field sections | One call per sender. Complete sections can decode static and dynamic references, wait for missing inserts, or report malformed or limited input. Decoded rows preserve field order and compressed stream ranges. [QPACK limits and outcomes](parsing.md#decode-http3-qpack-field-sections) |
+| QUIC ALPN | `KeyedQUICWithALPN` may return an authenticated server selection with empty application packet lists. An application-only row can have nil ALPN. `KeyedQUIC` returns rows containing at least one 1-RTT packet. [Selection and packet references](parsing.md#observe-the-server-selected-quic-alpn) |
 | HTTP/3 stream framing | Frames identify ranges in the caller's QUIC stream bytes. Capture truncation can return the preceding complete frames. Invalid framing and exceeded limits return a zero result. [Coverage and limits](parsing.md#delimit-http3-frames) |
 | TCP reassembly | A directional byte cap produces a bounded stream with `Anomalies.Truncated`. Exceeding `MaxSegmentsPerFlow` in `ReassembleTCP` returns `ErrReassemblyLimit`. |
 | Direct protocol parsing | A short DNS header returns `ErrInvalidDNS`. Excessive advertised question counts return `ErrDNSLimit`. `ParseWebSocketFrames` returns preceding complete messages plus `ErrInvalidWebSocket` for malformed or truncated input. Frame-count exhaustion returns `ErrWebSocketLimit`. |

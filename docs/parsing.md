@@ -969,7 +969,10 @@ cipher suite from the observed Initial exchange. Look up
 `Handshake.ClientHello.Random` in `Capture.TLSKeyLog(extraKeyLog)` and pass
 the sender's `ClientTrafficSecret0` or `ServerTrafficSecret0`. Create a decoder
 for each direction you want to read. Each decoder covers the first
-application key generation.
+application key generation. Use `NewQUIC1RTTKeyTracker` for one sending
+direction when you need to follow authenticated key updates. The tracker
+returns an application key generation with each authenticated packet and
+keeps the immediately preceding key for reordered packets.
 
 Pass a complete short-header packet to `Open` with its full destination
 connection ID and the expected packet number for that sender. A short-header
@@ -1034,11 +1037,32 @@ long headers. Take the `Payload` fields from one sender when calling
 `ReassembleQUIC1RTTStreams`.
 
 Association covers complete UDP datagrams for QUIC v1/v2 with the decoder's
-initial AES-GCM traffic keys and the observed Initial IDs. Nonempty IDs can
-follow a client port change on the same IP pair and server port. An empty ID
-requires the original tuple. Packets that cannot authenticate uniquely are
-skipped. This includes packets using a rotated connection ID or a later key
-generation, and packets outside the available packet number window.
+AES-GCM traffic keys. An authenticated `NEW_CONNECTION_ID` makes
+the issued ID eligible for subsequent packets in the opposite direction.
+`RETIRE_CONNECTION_ID` removes that ID for packets with the same or higher
+sender packet number. An older packet observed afterward can still authenticate.
+`Retire Prior To` deactivates earlier sequence numbers. An explicit retirement
+supplies the sender's packet-number boundary for reordered traffic.
+
+Nonempty IDs can follow a client port change on the same IP pair and server
+port. An empty ID requires the original tuple and cannot acquire replacement
+IDs. The scan skips packets whose issuance has yet to be observed, packets
+outside the available key generation or number window, and packets that
+authenticate for multiple candidates. Conflicting assignments of a CID,
+sequence number or reset token stop future associations in that direction.
+The scan retains at most 16 active and 64 historical IDs per direction and
+16,384 learned sequence numbers across all connections. One packet can carry
+up to 64 ID operations. All original and rotated IDs share the authentication
+attempt and byte budgets.
+
+A uniquely authenticated transition advances key generation in that
+direction and retains the immediately previous keys for delayed packets.
+Missing an entire generation or delaying a packet by more than one
+generation can leave it opaque. Each authenticated packet reports
+`KeyGeneration`. A transition above 32 authenticated updates returns
+`ErrQUICLimit`.
+[RFC 9001 key updates](https://www.rfc-editor.org/rfc/rfc9001.html#section-6) ·
+[Independent endpoint test](../testdata/quic-key-updates.md)
 
 ReaderAt metadata and payload reads share the same 64 MiB budget across both
 passes. The scan limits authentication to 16,384 attempts and 64 MiB of
@@ -1049,12 +1073,32 @@ A limit or read error discards the result.
 [Coalescing](https://www.rfc-editor.org/rfc/rfc9000.html#section-12.2) ·
 [Runnable example](../keyed_quic_test.go)
 
+### Observe the server-selected QUIC ALPN
+
+Call `capture.KeyedQUICWithALPN(data, extraKeyLog)` or
+`capture.KeyedQUICWithALPNFromReaderAt(reader, extraKeyLog)`. The server
+handshake traffic secret authenticates Handshake packets using their own packet
+number space. The first complete EncryptedExtensions message at CRYPTO offset
+zero supplies `record.ALPN.Protocol`. Its sorted, zero-based `PacketIndices`
+identify the original UDP datagrams contributing those message bytes. Identical
+retransmissions use the first captured copy. A gap or conflict inside the
+message leaves ALPN unobserved.
+
+The scan returns a row for an observed selection even when it has only
+handshake keys. Application keys can recover 1-RTT packets for the same row.
+A nil `ALPN` on an application row means the selection is unknown. Authentication
+attempts, attempted packet bytes and retained bytes share the keyed scan limits.
+At most 16,384 nonempty Handshake CRYPTO fragments are retained across the scan.
+[QUIC encryption levels](https://www.rfc-editor.org/rfc/rfc9001.html#section-4.1.3) ·
+[Server EncryptedExtensions](https://www.rfc-editor.org/rfc/rfc8446.html#section-4.3.1) ·
+[Endpoint and packet-ownership tests](../quic_alpn_test.go)
+
 ### Delimit HTTP/3 frames
 
 Use `ParseHTTP3Stream` on each directional `QUICStream` from a connection
-known to have negotiated HTTP/3. Establish that protocol from an endpoint
-log or another source of negotiated ALPN. The keyed QUIC scan exposes the
-ClientHello's protocol offers.
+known to have negotiated HTTP/3. An authenticated `ALPN.Protocol == "h3"` from
+`KeyedQUICWithALPN` or an endpoint's negotiated-protocol log supplies that
+selection. The Initial ClientHello exposes the client's offers.
 
 The parser classifies request, control, push, and QPACK streams. On
 frame-bearing streams, each result locates the frame header and payload
@@ -1072,6 +1116,129 @@ returns `ErrInvalidHTTP3` and a zero result. Limits are 1,024 frames and
 returns `ErrHTTP3Limit` and a zero result.
 [HTTP/3 framing](https://www.rfc-editor.org/rfc/rfc9114.html#section-7) ·
 [Runnable example](../http3_test.go)
+
+### Decode HTTP/3 QPACK field sections
+
+Use `DecodeQPACKSections` once per sender of a known HTTP/3 connection.
+Pass the sender's QPACK encoder stream, including its type, and the maximum
+table capacity advertised by the peer's SETTINGS. The initial capacity is
+zero. A missing SETTINGS capture can leave the negotiated maximum unknown.
+Static sections with a zero Required Insert Count can be decoded independently
+using an empty encoder and zero capacity.
+
+Build one `QPACKSectionInput` for each complete compressed field section.
+For HEADERS, use the frame's payload offset and bytes. For PUSH_PROMISE,
+skip the QUIC variable-length Push ID and advance the offset accordingly.
+Supply sections in observed arrival order. Set each `EncoderOffset` to the
+length of the contiguous encoder-stream prefix at that point, counting the
+stream type. Encoder instructions can arrive after the referencing section.
+In long captures, the encoded insert count wraps. Correct reconstruction
+requires the observed encoder progress when the section arrived.
+
+Each result preserves the input stream ID, offset and compressed length.
+For a decoded dynamic section, the output `EncoderOffset` ends the encoder
+prefix in effect at decoding. It can extend beyond the section's arrival and
+include table updates used by other sections.
+`QPACKDecoded` supplies ordered, duplicate-preserving name/value pairs.
+`QPACKBlocked` identifies missing inserts, including an encoder prefix
+that ends at a gap. `QPACKMalformed` covers a malformed section, an evicted
+reference or an inconsistent Required Insert Count. `QPACKLimited` covers
+a section, field, output or blocked-queue limit. Only decoded sections
+expose header strings. A malformed encoder instruction returns
+`ErrInvalidHTTP3`. A complete instruction before a gap remains usable.
+
+One directional call accepts 8 MiB of total input, a 4 MiB encoder stream,
+16,384 sections and 16,384 encoder instructions. The dynamic table retains
+up to 64 KiB, including the 32-byte cost per entry (at most 2,048 entries).
+Up to 64 blocked sections totaling 256 KiB can wait for inserts. Each is
+retried once when its required count is reached. The compressed section,
+field count, per-string size and total decoded field limits match the HTTP/2
+limits. Decoded work is charged even if a later field invalidates a section.
+Results cover compression. HTTP field semantics and packet attribution
+belong to the consuming stream or transaction analysis.
+[RFC 9204](https://www.rfc-editor.org/rfc/rfc9204.html) ·
+[Runnable example](../example_test.go) ·
+[RFC and aioquic capture cases](../qpack_test.go)
+
+### Recover keyed HTTP/3 request streams
+
+Call `capture.KeyedHTTP3Transactions(data, extraKeyLog)` or
+`capture.KeyedHTTP3TransactionsFromReaderAt(r, extraKeyLog)`. The scan
+requires an authenticated server-selected `h3` and at least one authenticated
+1-RTT packet carrying request-stream evidence. Supply matching keys through
+an embedded or caller-supplied key log. `ConnectionIndex` addresses the
+keyed ALPN scan for the same capture and key set. `StreamID` identifies a
+client-initiated bidirectional stream within that connection. A request-only
+or response-only stream produces a row. Push streams and push promises
+are outside this transaction projection.
+
+Inspect each direction's ordered sections for initial headers, informational
+responses and trailers. A blocked, malformed or limited field section keeps
+its QPACK state and source range. An undecodable section can make the roles
+of later sections uncertain. Missing peer SETTINGS leaves a nonzero Required
+Insert Count unresolved. The decoder infers encoder progress from capture
+order and the first contiguous prefix. Network reordering between the
+observation point and endpoint can change the endpoint's arrival order.
+
+`BodyState` uses the entity decoding and content-length checks shared with
+HTTP/2. CONNECT requests and their successful responses have empty HTTP
+entities. Their DATA still contributes to the directional packet indices,
+including on extended CONNECT streams. A later server HEADERS or PUSH_PROMISE
+on an established tunnel marks the response invalid. A rejected CONNECT response can
+carry an ordinary entity. For a 2xx response with DATA and no observed
+request method, the entity is unknown because it could be tunnel traffic.
+An HTTP or HTTPS request needs a nonempty `:authority` or `host`. If both
+appear, their values must agree. Malformed fields remain available in their
+decoded QPACK section and the request is marked invalid.
+[CONNECT in HTTP/3](https://www.rfc-editor.org/rfc/rfc9114.html#section-4.4)
+
+`EndStream` requires a clean final size. A gap or reset can leave a
+partial body, including a prefix that ends within a DATA frame. A missing
+FIN can also leave a partial body with neither flag set. Malformed HTTP
+framing marks the affected direction invalid. The scan admits 65,536
+framed HTTP/3 records and 262,144 QPACK context range inspections in total.
+Message, packet-reference, decoded-header and entity-body output share
+the HTTP transaction scan limits. A scan error discards all rows.
+
+Directional `PacketIndices` include every observed STREAM or RESET_STREAM
+packet for the selected stream direction, including repeats and bytes beyond
+a gap. `SharedPackets` means a datagram also carried another QUIC frame or
+coalesced long header. `QPACKPacketIndices` identifies encoder and peer
+SETTINGS packets that intersect a decoded dynamic section's supporting
+prefixes. These packets can also support other streams. `ALPNPacketIndices`
+supplies the authenticated EncryptedExtensions context separately.
+
+In the aioquic fixture, selecting frame 2 (ALPN), frame 10 (request) and
+frame 12 (response) and reopening with external keys recovers no transaction.
+Adding the independently identified client Initial in frame 1 recovers both
+bodies and status 200. The same four ciphertext frames without keys produce
+no transaction. Replaying another connection can require different Initial,
+packet-number and QPACK history. The API exposes packet selection for these
+observations. [Reopening test](../http3_transactions_test.go) ·
+[Runnable Go example](../example_test.go)
+
+### Read DNS over QUIC
+
+Use `Capture.DoQTransactions` or `Capture.DoQTransactionsFromReaderAt`
+for DNS-over-QUIC exchanges. The scan requires the server's authenticated
+`doq` selection and pairs the directions on a client-initiated bidirectional
+stream. It returns an explicit state for absent, incomplete, reset, malformed,
+unsupported and resource-limited messages. A completed message has one
+length-prefixed DNS message with ID zero and a clean direction end. The
+first scope covers ordinary lookups. AXFR and IXFR need separate
+multi-message framing. Request and reply packet indices refer to the
+original QUIC capture.
+
+Plain UDP/TCP DNS uses addresses and DNS message fields for association.
+DoT uses authenticated TLS records and DNS length framing. The HTTP/2 DoH
+helper obtains DNS from an HTTP field section and body. DoQ identifies an
+exchange through its QUIC stream and the server's selected application
+protocol. DoH/3 would require HTTP/3 transaction and body semantics.
+
+The [resolver example](../doq_example_test.go) decodes two independent
+lookups whose responses finish in reverse order. [Endpoint and decoder
+reference](../testdata/doq-exchanges.md) ·
+[DoQ stream and message rules](https://www.rfc-editor.org/rfc/rfc9250.html#section-4.2)
 
 ## Decrypt TLS 1.2 and TLS 1.3 streams offline
 

@@ -55,6 +55,12 @@ deployment-specific thresholds, assign scores to observed behavior and decide
 which observations trigger alerts or suppression. The existing beacon APIs
 remain available to callers upgrading to v0.2.0.
 
+A supported capture question specifies the input, the facts observable at
+that capture point, the reference back to the original bytes, and the scan
+limits. Callers use those limits and the reported completeness to distinguish
+observed outcomes from evidence that is missing or opaque.
+[Capability matrix](capabilities.md) · [Tagged external workflows](../testdata/consumer/qualified/README.md)
+
 ## Where to make a change
 
 | Change | Start here | Check the boundary |

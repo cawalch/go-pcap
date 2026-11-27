@@ -39,6 +39,12 @@ type QUICStream struct {
 // malformed or unsupported frames return [ErrInvalidQUIC] with no output.
 // Exceeding a directional limit or the ACK range cap returns [ErrQUICLimit].
 func ReassembleQUIC1RTTStreams(packets [][]byte) ([]QUICStream, error) {
+	return reassembleQUICStreams(packets, nil)
+}
+
+// observe receives each validated STREAM or RESET_STREAM frame in capture
+// order, including its encoded size inside the authenticated packet.
+func reassembleQUICStreams(packets [][]byte, observe func(packet int, stream uint64, start, end, wire int)) ([]QUICStream, error) {
 	if len(packets) > MaxQUICStreamPackets {
 		return nil, ErrQUICLimit
 	}
@@ -54,9 +60,10 @@ func ReassembleQUIC1RTTStreams(packets [][]byte) ([]QUICStream, error) {
 	}
 	frames := 0
 	streams := make(map[uint64]*quicStreamInput)
-	for _, packet := range packets {
+	for packetIndex, packet := range packets {
 		r := quicFrameReader{data: packet}
 		for len(r.data) > 0 && r.err == nil {
+			before := len(r.data)
 			typ := r.data[0]
 			r.data = r.data[1:]
 			if typ != 0x04 && (typ < 0x08 || typ > 0x0f) {
@@ -81,6 +88,9 @@ func ReassembleQUIC1RTTStreams(packets [][]byte) ([]QUICStream, error) {
 			}
 			if err := s.add(offset, data, final, reset); err != nil {
 				return nil, fmt.Errorf("QUIC stream %d: %w", id, err)
+			}
+			if observe != nil {
+				observe(packetIndex, id, int(offset), int(offset)+len(data), before-len(r.data))
 			}
 		}
 		if r.err != nil {
@@ -255,13 +265,7 @@ func (r *quicFrameReader) skip(typ byte) {
 	case 0x07, 0x31: // NEW_TOKEN or DATAGRAM with a length.
 		r.take(r.varint())
 	case 0x18: // NEW_CONNECTION_ID.
-		r.skipVarints(2)
-		length := r.take(1)
-		if len(length) != 1 || length[0] == 0 || length[0] > MaxQUICConnIDBytes {
-			r.err = ErrInvalidQUIC
-			return
-		}
-		r.take(uint64(length[0]) + 16) // Connection ID and stateless reset token.
+		r.newConnectionID()
 	case 0x1a, 0x1b: // PATH_CHALLENGE, PATH_RESPONSE.
 		r.take(8)
 	case 0x1c: // CONNECTION_CLOSE with a transport error.
