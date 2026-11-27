@@ -215,6 +215,12 @@ func (s *http3LocatedStream) message(request bool, method string, dir, peer *htt
 	var tunnel, possibleTunnel, opaqueData bool
 	var section, status, encoderEnd int
 	for _, f := range s.framing.Frames {
+		// After the server accepts CONNECT, HEADERS and PUSH_PROMISE
+		// cannot occur on that tunnel (RFC 9114 section 4.4). Keep their
+		// packet membership and any observable QPACK section.
+		if !request && tunnel && (f.Type == HTTP3FrameHeaders || f.Type == HTTP3FramePushPromise) {
+			m.Invalid = true
+		}
 		switch f.Type {
 		case HTTP3FrameHeaders:
 			row := s.sections[section]

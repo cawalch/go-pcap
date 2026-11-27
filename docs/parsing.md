@@ -1183,7 +1183,8 @@ observation point and endpoint can change the endpoint's arrival order.
 `BodyState` uses the entity decoding and content-length checks shared with
 HTTP/2. CONNECT requests and their successful responses have empty HTTP
 entities. Their DATA still contributes to the directional packet indices,
-including on extended CONNECT streams. A rejected CONNECT response can
+including on extended CONNECT streams. A later server HEADERS or PUSH_PROMISE
+on an established tunnel marks the response invalid. A rejected CONNECT response can
 carry an ordinary entity. For a 2xx response with DATA and no observed
 request method, the entity is unknown because it could be tunnel traffic.
 An HTTP or HTTPS request needs a nonempty `:authority` or `host`. If both

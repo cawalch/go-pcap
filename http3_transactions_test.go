@@ -196,7 +196,25 @@ func TestKeyedHTTP3ConnectData(t *testing.T) {
 				rows[0].StatusCode != tc.status || string(sv.Body) != tc.response || sv.BodyState != HTTPBodyComplete || sv.Invalid || !slices.Equal(sv.PacketIndices, []int{3}) {
 				t.Fatalf("extended=%t status=%d: request %+v response %+v", extended, tc.status, cl, sv)
 			}
+			// A trailing HEADERS frame is valid only for the rejected request.
+			record.Server[0].Payload = h3TestStream(0, 0, false, []byte{1, 3, 0, 0, tc.field, 0, 3, 'x', 'y', 'z'})
+			record.Server = append(record.Server, QUIC1RTTPacket{PacketIndex: 4, Payload: h3TestStream(0, 10, true, []byte{1, 3, 0, 0, 0xec})})
+			rows, err = keyedHTTP3Transactions([]KeyedQUICRecord{record})
+			if err != nil || len(rows) != 1 {
+				t.Fatalf("trailing HEADERS: %+v, %v", rows, err)
+			}
+			sv = rows[0].Response
+			if sv.Invalid != (tc.status == 200) || len(sv.Sections) != 2 || sv.Sections[1].State != QPACKDecoded ||
+				(sv.Sections[1].Kind == HTTP3TrailerSection) != (tc.status == 404) || !slices.Equal(sv.PacketIndices, []int{3, 4}) {
+				t.Fatalf("extended=%t status=%d trailers %+v", extended, tc.status, sv)
+			}
 			if tc.status == 200 {
+				record.Server[1].Payload = h3TestStream(0, 10, true, []byte{5, 3, 0, 0, 0})
+				rows, err = keyedHTTP3Transactions([]KeyedQUICRecord{record})
+				if err != nil || !rows[0].Response.Invalid {
+					t.Fatalf("PUSH_PROMISE on tunnel: %+v %v", rows, err)
+				}
+				record.Server = record.Server[:1]
 				record.Client = nil
 				rows, err = keyedHTTP3Transactions([]KeyedQUICRecord{record})
 				if err != nil || rows[0].Response.Body != nil || rows[0].Response.BodyState != HTTPBodyUnknown {
