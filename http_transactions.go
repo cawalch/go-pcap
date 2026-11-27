@@ -63,6 +63,7 @@ type HTTP1Transaction struct {
 // direction. Conflicting overlaps prevent pairing. The scan counts requests,
 // final responses and informational responses against [MaxHTTPMessagesPerScan]
 // and shares the header/body and decoding budgets of [Capture.HTTP1RequestEvidence].
+// For larger captures, the scan checks opening prefixes before retaining payloads.
 func (c *Capture) HTTP1Transactions(data []byte) ([]HTTP1Transaction, error) {
 	return scanHTTP1Transactions(ipFrameSource{capture: c, data: data}, nil)
 }
@@ -83,6 +84,7 @@ type http1Direction struct {
 	syn, fin, reset          int      // One-based segment indices.
 	hasPayload, inconsistent bool
 	lastPayload              int // One-based capture packet index.
+	finEnd                   uint32
 }
 
 func (d *http1Direction) observe(f Frame, index, size int) {
@@ -95,8 +97,16 @@ func (d *http1Direction) observe(f Frame, index, size int) {
 	if f.TCPFlags&TCPFlagSYN != 0 && d.syn == 0 {
 		d.syn = slot
 	}
-	if f.TCPFlags&TCPFlagFIN != 0 && !f.Anomalies.IPTotalLengthExceedsFrame && d.fin == 0 {
-		d.fin = slot
+	if f.TCPFlags&TCPFlagFIN != 0 && !f.Anomalies.IPTotalLengthExceedsFrame {
+		end := f.TCPSeq + uint32(size)
+		if f.TCPFlags&TCPFlagSYN != 0 {
+			end++
+		}
+		if d.fin == 0 {
+			d.fin, d.finEnd = slot, end
+		} else {
+			d.inconsistent = d.inconsistent || d.finEnd != end
+		}
 	}
 	if f.TCPFlags&TCPFlagRST != 0 && d.reset == 0 {
 		d.reset = slot
@@ -105,14 +115,18 @@ func (d *http1Direction) observe(f Frame, index, size int) {
 
 // Collect both contiguous directions of each observed TCP opening, with the
 // packet ownership and control evidence used by the HTTP transaction readers.
-func collectHTTPTransactionDirections(source ipFrameSource, interfaces map[int]uint32, selected map[int]bool) ([]http1Direction, error) {
+func collectHTTPTransactionDirections(source ipFrameSource, interfaces map[int]uint32, selected map[int]bool, pending *http1Payloads) ([]http1Direction, error) {
 	collector := tcpMessageCollector{separateInterfaces: source.capture != nil && source.capture.SeparateTCPInterfaces}
 	var dirs []http1Direction
-	err := walkTCPMessagePackets(source, func(pkt PacketRecord, frame Frame, flow int, payload []byte) error {
-		if selected != nil && !selected[pkt.Index] || !keepTCPMessageSegment(&frame, len(payload), TCPFlagSYN|TCPFlagFIN|TCPFlagRST) {
+	visit := func(pkt PacketRecord, frame Frame, flow int, payload []byte) error {
+		size, retained := len(payload), payload
+		if pending != nil {
+			size, retained = int(frame.PayloadLength), nil
+		}
+		if selected != nil && !selected[pkt.Index] || !keepTCPMessageSegment(&frame, size, TCPFlagSYN|TCPFlagFIN|TCPFlagRST) {
 			return nil
 		}
-		pair, err := collector.addSegment(pkt, frame, flow, payload)
+		pair, err := collector.addSegment(pkt, frame, flow, retained)
 		if err != nil {
 			return err
 		}
@@ -131,23 +145,38 @@ func collectHTTPTransactionDirections(source ipFrameSource, interfaces map[int]u
 			open := segs[d.syn-1]
 			d.inconsistent = d.inconsistent || open.Seq != frame.TCPSeq || open.Flags&TCPFlagACK != frame.TCPFlags&TCPFlagACK
 		}
-		if d.fin != 0 && !frame.Anomalies.IPTotalLengthExceedsFrame && frame.TCPFlags&TCPFlagFIN != 0 {
-			d.inconsistent = d.inconsistent || tcpSegmentEnd(segs[d.fin-1]) != tcpSegmentEnd(segs[len(segs)-1])
+		d.observe(frame, pkt.Index, size)
+		if pending != nil {
+			pending.add(pair[0]-1, pkt, frame, payload)
 		}
-		d.observe(frame, pkt.Index, len(payload))
 		return nil
-	})
+	}
+	var err error
+	if pending == nil {
+		err = walkTCPMessagePackets(source, visit)
+	} else {
+		err = pending.walk(source, visit)
+	}
 	if err != nil {
 		return nil, err
 	}
+	var candidates []bool
+	if pending != nil {
+		candidates, err = pending.materialize(source, dirs, collector.directions)
+		if err != nil {
+			return nil, err
+		}
+	}
 	remaining := int64(MaxTotalStreamBytes)
 	for i := range dirs {
+		if candidates != nil && !candidates[i] {
+			continue
+		}
 		d := &dirs[i]
 		d.dir = &collector.directions[i]
 		if d.fin != 0 {
-			fin := tcpSegmentEnd(d.dir.segments[d.fin-1])
 			for _, seg := range d.dir.segments {
-				if len(seg.Payload) != 0 && int32(tcpSegmentEnd(seg)-fin) > 0 {
+				if len(seg.Payload) != 0 && int32(tcpSegmentEnd(seg)-d.finEnd) > 0 {
 					d.inconsistent = true
 					break
 				}
@@ -166,7 +195,13 @@ func scanHTTP1Transactions(source ipFrameSource, export *http1TransactionExportS
 	if export != nil {
 		interfaces = export.interfaces
 	}
-	dirs, err := collectHTTPTransactionDirections(source, interfaces, nil)
+	var pending *http1Payloads
+	// A compact capture already fits one file read window. Collecting it
+	// directly avoids indexing and rereading its short payloads.
+	if source.capture != nil && source.capture.fileSize > fileWindowSize {
+		pending = new(http1Payloads)
+	}
+	dirs, err := collectHTTPTransactionDirections(source, interfaces, nil, pending)
 	if err != nil {
 		return nil, err
 	}

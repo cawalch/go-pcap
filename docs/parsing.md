@@ -434,6 +434,9 @@ to reopen it. [Replay fixture](../testdata/deployments/README.md#reopen-the-stre
 ### Select and export a cleartext HTTP/1 transaction
 
 Use `HTTP1Transactions` or its ReaderAt variant and check `Pairing`.
+On larger captures, the scan checks TCP opening prefixes before retaining
+payloads. The ReaderAt path shares one read budget across opening discovery
+and selected payload reads.
 Responses to HEAD and bodyless statuses end at the headers. Pass the row's
 ID and original input to `ExtractHTTP1TransactionPCAPNG` or its ReaderAt
 variant. Shared packets can carry adjacent messages.
