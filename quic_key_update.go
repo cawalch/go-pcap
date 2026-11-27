@@ -10,14 +10,14 @@ const MaxQUICKeyUpdates = 32
 // previous payload keys. Use one tracker per sender and call it in capture
 // order. Callers synchronize concurrent access to the same tracker.
 type QUIC1RTTKeyTracker struct {
-	headerDecoder           *QUIC1RTTDecoder
-	version                 uint32
-	suite                   uint16
-	current, next, previous quicPacketKeys
-	nextSecret              []byte
-	generation              uint8
-	first, highest          uint64
-	highestPrevious         uint64
+	headerDecoder               *QUIC1RTTDecoder
+	version                     uint32
+	suite                       uint16
+	current, next, previous     quicPacketKeys
+	nextSecret                  []byte
+	generation                  uint8
+	first, highest              uint64
+	highestPrevious, priorFence uint64
 }
 
 // NewQUIC1RTTKeyTracker starts at key generation zero using the same supported
@@ -66,6 +66,9 @@ func (t *QUIC1RTTKeyTracker) selectKeys(pn uint64, phase uint8) (quicPacketKeys,
 		return t.current, t.generation
 	}
 	if t.generation > 0 && pn < t.first {
+		if t.generation > 1 && pn <= t.priorFence {
+			return quicPacketKeys{}, 0
+		}
 		return t.previous, t.generation - 1
 	}
 	if pn > t.highest {
@@ -90,8 +93,9 @@ func (t *QUIC1RTTKeyTracker) accept(pn uint64, generation uint8) error {
 			return err
 		}
 		t.previous, t.current, t.next = t.current, t.next, next
+		t.headerDecoder.keys = t.current
 		t.nextSecret = nextSecret
-		t.highestPrevious = t.highest
+		t.priorFence, t.highestPrevious = t.highestPrevious, t.highest
 		t.first, t.highest, t.generation = pn, pn, generation
 	}
 	return nil

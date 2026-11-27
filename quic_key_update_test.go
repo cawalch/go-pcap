@@ -116,3 +116,21 @@ func BenchmarkKeyedQUICKeyUpdates(b *testing.B) {
 		}
 	}
 }
+
+func TestQUIC1RTTTrackerKeepsPreviousLowerFence(t *testing.T) {
+	d, err := NewQUIC1RTTKeyTracker(QUICVersion1, TLS_AES_128_GCM_SHA256, make([]byte, 32))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for generation, pn := range []uint64{10, 20, 30} {
+		if err := d.accept(pn, uint8(generation)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if keys, _ := d.selectKeys(10, 1); keys.aead != nil {
+		t.Fatal("previous generation crossed an earlier packet-number fence")
+	}
+	if keys, gen := d.selectKeys(21, 1); keys.aead == nil || gen != 1 || d.headerDecoder.keys.aead != d.current.aead {
+		t.Fatal("reordered packet generation was unavailable")
+	}
+}
