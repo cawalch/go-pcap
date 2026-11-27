@@ -755,9 +755,8 @@ its first known TCP sequence gap. They keep complete messages before the gap.
   IDs. The parser skips the public-key bytes.
 - `ClientHello.HasECH` reports a nonempty encrypted_client_hello extension.
   This observation includes GREASE ECH offers. The extension ID also appears
-  in `Extensions` when its payload is empty. A passive observer can read the
-  outer ClientHello. The inner server name remains encrypted.
-  [Encrypted Client Hello (RFC 9849)](https://www.rfc-editor.org/rfc/rfc9849)
+  in `Extensions` when its payload is empty. See how to
+  [interpret server names with ECH](#interpret-server-names-with-ech).
 - `ServerHello.SelectedGroup` gives the group from a structurally valid
   server key share (zero when unavailable). If `IsHelloRetryRequest` is true,
   the group is the one requested for the next ClientHello. For example,
@@ -801,8 +800,7 @@ its first known TCP sequence gap. They keep complete messages before the gap.
   You can check each server or client certificate independently.
 - Use `match, known := record.Handshake.ServerNameMatch()` to compare the observed
   ClientHello DNS name with the server leaf's DNS SANs. Matching follows Go's
-  X.509 case and wildcard rules. With Encrypted Client Hello, the observed
-  name can be the outer public name. A missing or invalid DNS name, an IP
+  X.509 case and wildcard rules. A missing or invalid DNS name, an IP
   literal, missing leaf or DNS SANs, or invalid certificate DER gives an unknown
   result. A match in the retained DNS names is conclusive. A miss is unknown
   if further DNS names might have been omitted. Both helpers describe the
@@ -816,6 +814,28 @@ its first known TCP sequence gap. They keep complete messages before the gap.
 - `TLSAnomalies` reports `SNIIPLiteral`, `EmptySNI`, `DuplicateExtension`,
   `ALPNTransportMismatch`, `SelfSignedCertificate`, `InvalidCertificateDER`, and
   `TruncatedRecord`.
+
+### Interpret server names with ECH
+
+When you observe an Encrypted Client Hello (ECH) extension, retain
+`ClientHello.HasECH` and the observed server name in `ClientHello.SNI`.
+An actual ECH offer can carry the public name in `ClientHelloOuter` and
+the private server name in encrypted `ClientHelloInner`. A GREASE offer
+can have the same extension shape while carrying the server name directly
+in the visible ClientHello. Extension presence alone leaves ECH acceptance
+unknown. [ECH and GREASE in RFC 9849](https://www.rfc-editor.org/rfc/rfc9849.html#section-6.2)
+
+Record both results of `ServerNameMatch()`. The same comparison applies with
+or without an ECH extension. A known agreement or disagreement concerns the
+observed name and the available leaf certificate. The private service name
+remains unknown from those observations. See [the runnable Go example](../example_test.go).
+
+TLS handshake and application traffic keys protect TLS records. ECH uses
+separate encryption for the inner ClientHello. When ECH is accepted,
+RFC 9850 indexes TLS 1.3 traffic secrets by the inner ClientHello random.
+go-pcap looks up traffic keys by the observed ClientHello random and leaves
+the inner hello opaque. A key log can contain traffic keys without making
+them usable by that lookup. [TLS and ECH key-log labels in RFC 9850](https://www.rfc-editor.org/rfc/rfc9850.html#section-2.1)
 
 ## Decrypt QUIC Initial packets
 

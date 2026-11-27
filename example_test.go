@@ -606,6 +606,23 @@ func ExampleTLSHandshake_ServerNameMatch() {
 	// Output: true true
 }
 
+func ExampleTLSHandshake_ServerNameMatch_ech() {
+	hs := pcap.TLSHandshake{
+		HasClientHello: true,
+		ClientHello:    pcap.TLSClientHello{SNI: "public.example", HasECH: true},
+		Certificates:   []pcap.TLSCertificate{{DNSNames: []string{"public.example"}}},
+	}
+	match, known := hs.ServerNameMatch()
+	fmt.Printf("observed SNI=%q ECH extension=%t leaf match=%t known=%t\n",
+		hs.ClientHello.SNI, hs.ClientHello.HasECH, match, known)
+	if hs.ClientHello.HasECH {
+		fmt.Println("inner name unavailable")
+	}
+	// Output:
+	// observed SNI="public.example" ECH extension=true leaf match=true known=true
+	// inner name unavailable
+}
+
 func ExampleCapture_HTTP2Transactions() {
 	data, err := os.ReadFile("testdata/deployments/http2-transactions.pcapng")
 	if err != nil {
