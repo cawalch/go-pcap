@@ -580,6 +580,39 @@ Set the same field on a capture from `NewFromReaderAt` before calling
 `HTTPRequestsFromReaderAt` to get packet-attributed requests. Look up each
 observation's `PacketIndex` in the packet records to identify its interface.
 
+### Select an observation scope on one interface
+
+A single mirror may carry several VLANs or VXLAN overlay networks with
+overlapping addresses. Interface-scoped TCP and UDP fragment options group
+by PcapNG interface, so they still share reassembly state on that mirror.
+When its encapsulation supplies a boundary in both directions, select
+packets for one network before reassembling its TCP or UDP traffic.
+
+Use `DecodeFrame` on each packet with that packet's link type. Match the
+ordered VLAN IDs for a known tag stack. For VXLAN, find the `LayerVXLAN`
+span, check that it covers eight captured bytes, and read the three-byte
+VXLAN Network Identifier at offsets four through six in that span. The
+mirror configuration determines which fields and tunnel endpoints define
+a unique scope. A VNI can repeat in independent overlay domains. Select
+both directions and each fragment by the same scope. If the expected
+headers are unavailable or truncated, leave the observation unresolved.
+[VXLAN header layout](https://www.rfc-editor.org/rfc/rfc7348.html#section-5)
+
+The [runnable Go example](../example_tenant_scope_test.go) filters a
+bounded, single-interface Ethernet fixture by full VLAN stack or VNI and
+copies its original packet bytes into one PcapNG subset per scope. It
+keeps a map from the subset's packet indices to the source packet indices.
+It recovers the HTTP request and response plus the fragmented DNS question
+for each scope. For larger inputs, bound both the source scan and the
+staged output. [Fixture and independent decode](../testdata/framing/tenant-scope.md)
+
+Flow indices in each subset follow that subset's packet order. Keep those
+indices with the subset and translate packet locators before referencing the
+original capture. Community ID still describes the bidirectional tuple and
+can be identical across scopes. For connection-level evidence, retain the
+observed scope and capture-local packet references along with that tuple
+join. [Flow summaries](#aggregate-5-tuple-flows)
+
 ### Identify an application protocol from a prefix
 
 Pass the start of one directional TCP stream or one UDP payload to
