@@ -80,7 +80,11 @@ func doqTransactions(connections []KeyedQUICRecord) ([]DoQTransaction, error) {
 		if conn.ALPN == nil || conn.ALPN.Protocol != "doq" || len(conn.ALPN.PacketIndices) == 0 {
 			continue
 		}
-		byID := make(map[uint64]DoQTransaction)
+		type exchange struct {
+			DoQTransaction
+			transfer bool
+		}
+		byID := make(map[uint64]exchange)
 		for direction, packets := range [2][]QUIC1RTTPacket{conn.Client, conn.Server} {
 			streams, err := locateQUICStreams(packets)
 			if err != nil {
@@ -97,62 +101,122 @@ func doqTransactions(connections []KeyedQUICRecord) ([]DoQTransaction, error) {
 				remaining--
 				row, present := byID[id]
 				if !present {
-					row = DoQTransaction{FlowIndex: conn.FlowIndex, ALPNPacketIndex: conn.ALPN.PacketIndices[0],
+					row.DoQTransaction = DoQTransaction{FlowIndex: conn.FlowIndex, ALPNPacketIndex: conn.ALPN.PacketIndices[0],
 						StreamID: id, Client: netip.AddrPortFrom(conn.SrcAddr, conn.SrcPort),
 						Resolver: netip.AddrPortFrom(conn.DstAddr, conn.DstPort)}
 				}
-				msg := parseDoQMessage(stream, direction == 1)
-				if direction == 0 {
-					row.Query = msg
-				} else {
-					row.Reply = msg
+				switch {
+				case direction == 0:
+					row.Query, row.transfer = parseDoQMessage(stream, false)
+				case row.transfer:
+					row.Reply = doqTransferReply(stream, &remaining)
+				default:
+					row.Reply, _ = parseDoQMessage(stream, true)
 				}
 				byID[id] = row
 			}
 		}
 		for _, id := range slices.Sorted(maps.Keys(byID)) {
-			row := byID[id]
-			// A response on a zone-transfer stream cannot be an ordinary
-			// lookup result even when its first framing is available.
-			if row.Query.State == DoQUnsupported && row.Reply.State == DoQComplete {
-				row.Reply.State, row.Reply.DNS = DoQUnsupported, nil
-			}
-			rows = append(rows, row)
+			rows = append(rows, byID[id].DoQTransaction)
 		}
 	}
 	return rows, nil
 }
 
-func parseDoQMessage(observed quicLocatedStream, reply bool) DoQMessage {
-	stream := observed.stream
+func doqStreamCoverage(observed quicLocatedStream) DoQMessage {
 	out := DoQMessage{PacketIndices: observed.packets}
-	switch {
+	switch stream := observed.stream; {
 	case stream.Reset:
 		out.State = DoQReset
-		return out
 	case stream.Gap || !stream.Complete:
 		out.State = DoQIncomplete
-		return out
-	case len(stream.Data) < 2:
-		out.State = DoQMalformed
-		return out
+	default:
+		out.State = DoQComplete
 	}
-	size := int(binary.BigEndian.Uint16(stream.Data))
-	if size < 12 || size != len(stream.Data)-2 {
-		out.State = DoQMalformed
-		return out
+	return out
+}
+
+func parseDoQMessage(observed quicLocatedStream, reply bool) (DoQMessage, bool) {
+	out := doqStreamCoverage(observed)
+	if out.State != DoQComplete {
+		return out, false
 	}
-	message, err := ParseDNS(stream.Data[2:])
+	data := observed.stream.Data
+	if len(data) < 14 || int(binary.BigEndian.Uint16(data)) != len(data)-2 {
+		out.State = DoQMalformed
+		return out, false
+	}
+	wire := data[2:]
+	message, err := ParseDNS(wire)
 	switch {
 	case errors.Is(err, ErrDNSLimit):
 		out.State = DoQLimited
-	case err != nil || message.Anomalies.Any() || message.TransactionID != 0 || message.IsResponse != reply:
+	case err != nil || message.Anomalies.Any() || message.TransactionID != 0 || message.IsResponse != reply || !validDoQOptions(wire, message.Additionals):
 		out.State = DoQMalformed
-	case message.Opcode != 0 || !reply && len(message.Questions) != 1 ||
-		len(message.Questions) == 1 && (message.Questions[0].Type == 251 || message.Questions[0].Type == 252):
+	case message.Opcode != 0 || !reply && len(message.Questions) != 1:
 		out.State = DoQUnsupported
+	case len(message.Questions) == 1 && (message.Questions[0].Type == 251 || message.Questions[0].Type == 252):
+		out.State = DoQUnsupported
+		return out, !reply
 	default:
-		out.State, out.DNS = DoQComplete, &message
+		out.DNS = &message
 	}
+	return out, false
+}
+
+func validDoQOptions(wire []byte, additionals []DNSResourceRecord) bool {
+	for _, record := range additionals {
+		if record.Type != DNSTypeOPT {
+			continue
+		}
+		start, end := int(record.DataOffset), int(record.DataOffset)+int(record.DataLength)
+		if start > len(wire) || end > len(wire) {
+			return false
+		}
+		for options := wire[start:end]; len(options) != 0; {
+			if len(options) < 4 {
+				return false
+			}
+			code, size := binary.BigEndian.Uint16(options), int(binary.BigEndian.Uint16(options[2:]))
+			// RFC 9250 forbids the EDNS TCP keepalive option on a DoQ stream.
+			if code == 11 || size > len(options)-4 {
+				return false
+			}
+			options = options[4+size:]
+		}
+	}
+	return true
+}
+
+func doqTransferReply(observed quicLocatedStream, remaining *int) DoQMessage {
+	out := doqStreamCoverage(observed)
+	if out.State != DoQComplete {
+		return out
+	}
+	// Only delimit the messages of an identified transfer. Its DNS contents
+	// are outside this scan's scope.
+	wire := observed.stream.Data
+	out.State = DoQMalformed
+	if len(wire) == 0 {
+		return out
+	}
+	for first := true; len(wire) > 0; first = false {
+		if !first {
+			if *remaining == 0 {
+				out.State = DoQLimited
+				return out
+			}
+			(*remaining)--
+		}
+		if len(wire) < 14 {
+			return out
+		}
+		n := int(binary.BigEndian.Uint16(wire))
+		if n < 12 || n > len(wire)-2 || binary.BigEndian.Uint16(wire[2:]) != 0 || wire[4]&0x80 == 0 {
+			return out
+		}
+		wire = wire[2+n:]
+	}
+	out.State = DoQUnsupported
 	return out
 }

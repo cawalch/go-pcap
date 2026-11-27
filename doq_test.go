@@ -71,7 +71,7 @@ func TestDoQMessageCoverage(t *testing.T) {
 	check := func(message []byte, closed, gap, reset bool, want DoQMessageState) {
 		t.Helper()
 		stream := quicLocatedStream{packets: []int{3}, stream: QUICStream{Data: message, Complete: closed, Gap: gap, Reset: reset}}
-		got := parseDoQMessage(stream, false)
+		got, _ := parseDoQMessage(stream, false)
 		if got.State != want || !slices.Equal(got.PacketIndices, []int{3}) || (got.DNS != nil) != (want == DoQComplete) {
 			t.Fatalf("want %d, got %+v", want, got)
 		}
@@ -85,7 +85,26 @@ func TestDoQMessageCoverage(t *testing.T) {
 	wrongID := bytes.Clone(query)
 	binary.BigEndian.PutUint16(wrongID[2:], 7)
 	check(wrongID, true, false, false, DoQMalformed)
+	keepalive := append(bytes.Clone(query), 0, 0, 41, 0x10, 0, 0, 0, 0, 0, 0, 4, 0, 11, 0, 0)
+	binary.BigEndian.PutUint16(keepalive, uint16(len(keepalive)-2))
+	binary.BigEndian.PutUint16(keepalive[12:], 1)
+	check(keepalive, true, false, false, DoQMalformed)
 	axfr := bytes.Clone(query)
 	binary.BigEndian.PutUint16(axfr[15:], 252)
 	check(axfr, true, false, false, DoQUnsupported)
+}
+
+func TestDoQTransferScope(t *testing.T) {
+	response := []byte{0, 12, 0, 0, 0x80, 0, 0, 0, 0, 0, 0, 0, 0, 0}
+	captured := quicLocatedStream{stream: QUICStream{Complete: true, Data: append(bytes.Clone(response), response...)}}
+	remaining := 5
+	got := doqTransferReply(captured, &remaining)
+	ordinary, _ := parseDoQMessage(captured, true)
+	if remaining != 4 || got.State != DoQUnsupported || got.DNS != nil || ordinary.State != DoQMalformed {
+		t.Fatalf("transfer=%+v ordinary=%+v charged=%d", got, ordinary, 5-remaining)
+	}
+	captured.stream.Data = captured.stream.Data[:len(captured.stream.Data)-1]
+	if got := doqTransferReply(captured, &remaining); got.State != DoQMalformed {
+		t.Fatalf("invalid transfer framing: %+v", got)
+	}
 }
