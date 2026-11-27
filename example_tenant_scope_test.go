@@ -39,14 +39,14 @@ func ExampleCapture_SelectTenant() {
 	c.SeparateTCPInterfaces = true
 	c.SeparateIPFragmentInterfaces = true
 	streams, err := c.Streams(data)
-	if err != nil || len(streams) != 1 {
-		panic("expected one shared TCP tuple")
+	if err != nil || len(streams) != 2 {
+		panic("expected HTTP and TLS TCP tuples")
 	}
 	mixedDNS, err := c.DNSFromReaderAt(source)
 	if err != nil {
 		panic(err)
 	}
-	fmt.Printf("mirror: one TCP stream, conflict=%t, DNS records=%d\n",
+	fmt.Printf("mirror: HTTP stream conflict=%t, DNS records=%d\n",
 		streams[0].Client.Anomalies.OverlapConflict, len(mixedDNS))
 
 	allFlows, err := c.FlowsFromReaderAt(source)
@@ -82,13 +82,23 @@ func ExampleCapture_SelectTenant() {
 			panic("HTTP evidence differs by input path")
 		}
 		dns, err := view.DNSFromReaderAt(source)
-		if err != nil || len(dns) != 1 || len(dns[0].Message.Questions) != 1 {
+		if err != nil || len(dns) == 0 || dns[0].Message.IsResponse || len(dns[0].Message.Questions) != 1 {
 			panic("expected one reassembled DNS question")
 		}
 		sliceDNS, err := view.DNS(data)
 		if err != nil || !reflect.DeepEqual(dns, sliceDNS) {
 			panic("DNS evidence differs by input path")
 		}
+		dnsTransactions, err := view.DNSTransactionsFromReaderAt(source)
+		if err != nil || len(dnsTransactions) != 1 {
+			panic("expected one DNS transaction row")
+		}
+		hellos, err := view.TLSHandshakeEvidenceFromReaderAt(source, nil)
+		if err != nil || len(hellos) != 1 {
+			panic("expected one TLS opening")
+		}
+		fmt.Printf("%s DNS paired=%t; TLS hello packets %v/%v\n", tenant.name,
+			dnsTransactions[0].Pairing == pcap.DNSPaired, hellos[0].ClientHello.PacketIndices, hellos[0].ServerHello.PacketIndices)
 		flows, err := view.FlowsFromReaderAt(source)
 		if err != nil {
 			panic(err)
@@ -106,11 +116,16 @@ func ExampleCapture_SelectTenant() {
 			dns[0].Message.Questions[0].Name, dns[0].PacketIndex, flows[req.FlowIndex].CommunityID(0))
 	}
 	// Output:
-	// mirror: one TCP stream, conflict=true, DNS records=1
+	// mirror: HTTP stream conflict=true, DNS records=2
 	// mirror flow 0: 1:sOt0+JmdXpF66uyTH/7eX/9XeD4=
+	// plain DNS paired=true; TLS hello packets [58 63]/[73]
 	// plain HTTP /plain 200 "plain" packets 15,20; DNS plain.mirror.example packet 30; 1:sOt0+JmdXpF66uyTH/7eX/9XeD4=
+	// vlan11 DNS paired=true; TLS hello packets [59 64]/[74]
 	// vlan11 HTTP /vlan11 200 "vlan11" packets 16,21; DNS vlan11.mirror.example packet 31; 1:sOt0+JmdXpF66uyTH/7eX/9XeD4=
+	// vlan12 DNS paired=true; TLS hello packets [60 65]/[75]
 	// vlan12 HTTP /vlan12 200 "vlan12" packets 17,22; DNS vlan12.mirror.example packet 32; 1:sOt0+JmdXpF66uyTH/7eX/9XeD4=
+	// vni201 DNS paired=true; TLS hello packets [61 66]/[76]
 	// vni201 HTTP /vni201 200 "vni201" packets 18,23; DNS vni201.mirror.example packet 33; 1:sOt0+JmdXpF66uyTH/7eX/9XeD4=
+	// vni202 DNS paired=false; TLS hello packets [62 67]/[]
 	// vni202 HTTP /vni202 200 "vni202" packets 19,24; DNS vni202.mirror.example packet 34; 1:sOt0+JmdXpF66uyTH/7eX/9XeD4=
 }

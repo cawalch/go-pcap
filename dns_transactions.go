@@ -55,13 +55,17 @@ func (c *Capture) DNSTransactions(data []byte) ([]DNSTransaction, error) {
 // DNSTransactionsFromReaderAt is the bounded ReaderAt equivalent of
 // [Capture.DNSTransactions]. All metadata and payload reads share [MaxReaderAtScanBytes].
 func (c *Capture) DNSTransactionsFromReaderAt(r io.ReaderAt) ([]DNSTransaction, error) {
-	return scanDNSTransactions(ipFrameSource{
+	return scanDNSTransactions(c.dnsTransactionReaderAt(r))
+}
+
+func (c *Capture) dnsTransactionReaderAt(r io.ReaderAt) ipFrameSource {
+	return ipFrameSource{
 		capture: c, reader: r, borrowUDPPayload: true,
 		needsPayload: func(f Frame, _ []byte) bool {
 			return dnsUnicast(f.SrcAddr) && dnsUnicast(f.DstAddr) && (f.mayContainUDPFragment() ||
 				(f.IPProtocol == IPProtoUDP || f.IPProtocol == IPProtoTCP) && (f.SrcPort == 53 || f.DstPort == 53))
 		},
-	})
+	}
 }
 
 type dnsTransactionKey struct {
