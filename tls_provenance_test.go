@@ -319,7 +319,7 @@ func TestTLSRecordProvenanceWithApplicationKeysOnly(t *testing.T) {
 	f := makeTLSProofFixture(t, TLSVersion13)
 	_, keys, _ := bytes.Cut(f.keys, []byte("\n"))
 	rows := tlsProofScan(t, buildPCAPNGFixture(binary.LittleEndian, keys, f.packets(100, "", false, false)), nil)
-	if len(rows) != 1 || rows[0].client.before != (tlsProvenanceBoundary{f.clientProtected, tlsStopMissingKey}) ||
+	if len(rows) != 1 || rows[0].client.before != (tlsProvenanceBoundary{f.clientProtected, tlsStopIndeterminate}) ||
 		rows[0].client.stop.reason != tlsStopEnd || string(rows[0].Client.Data) != tlsProofFirst+tlsProofSecond ||
 		len(rows[0].client.records) != 2 || rows[0].client.records[0].plainStart != 0 {
 		t.Fatalf("got %+v", rows)
@@ -350,7 +350,7 @@ func TestTLSRecordProvenanceBudget(t *testing.T) {
 				{end: uint32(secondStart + 3), packet: tcpPacketEvidence{index: 5}},
 				{end: uint32(len(wire)), packet: tcpPacketEvidence{index: 6}},
 			}}
-			_, app, err := decryptTLS13Records(wire, TLS_AES_128_GCM_SHA256, entry.ClientHandshakeSecret, entry.ClientTrafficSecret0, nil, &mapper)
+			_, app, err := decryptTLS13Records(wire, TLS_AES_128_GCM_SHA256, entry.ClientHandshakeSecret, entry.ClientTrafficSecret0, nil, &mapper, nil, nil)
 			if err != nil || string(app) != tlsProofFirst || mapper.stop != (tlsProvenanceBoundary{tc.wantBoundary, tlsStopLimit}) ||
 				len(mapper.records) != 1 || !slices.Equal(mapper.records[0].packets, []int{4, 5}) {
 				t.Fatalf("plaintext %q, err %v, provenance %+v", app, err, mapper.tlsDirectionProvenance)

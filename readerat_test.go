@@ -532,7 +532,18 @@ func TestReaderAtScanReadBudget(t *testing.T) {
 				buildEthernetIPv4UDPFrame(src, dst, 1234, 53, make([]byte, recordBytes-16-42)),
 			}
 			if proto == "TLS" {
-				frames[1] = buildEthernetIPv4TCPFrame(src, dst, 1234, 443, 1, 0, TCPFlagACK, make([]byte, recordBytes-16-54))
+				payload := make([]byte, recordBytes-16-54)
+				// Fill the capture with separate candidate handshake flights.
+				for off := 0; off+5 <= len(payload); {
+					n := min(16384, len(payload)-off-5)
+					payload[off], payload[off+1], payload[off+2] = TLSRecordHandshake, 3, 3
+					binary.BigEndian.PutUint16(payload[off+3:], uint16(n))
+					if n > 0 {
+						payload[off+5] = TLSHandshakeCertificate
+					}
+					off += 5 + n
+				}
+				frames[1] = buildEthernetIPv4TCPFrame(src, dst, 1234, 443, 1, 0, TCPFlagACK, payload)
 			}
 			if proto == "flows" {
 				// ICMP flow accounting reads the entire declared datagram.
@@ -566,6 +577,9 @@ func TestReaderAtScanReadBudget(t *testing.T) {
 						pos = pcapGlobalHeaderSize + (pos-pcapGlobalHeaderSize)%recordBytes
 					}
 					n := copy(p, raw[pos:])
+					if proto == "TLS" && i == 1 && pos == pcapGlobalHeaderSize+16 && len(p) >= 38 {
+						binary.BigEndian.PutUint16(p[34:], uint16(1234+(off-pcapGlobalHeaderSize)/recordBytes))
+					}
 					if i == 0 && off == size-recordBytes+16 {
 						copy(p, last)
 					}
@@ -602,6 +616,10 @@ func TestReaderAtScanReadBudget(t *testing.T) {
 				if i == 0 {
 					if err != nil || count != 1 || calls != 2*records || read != records*(16+256) {
 						t.Fatalf("selective scan: %d records, %v, %d reads, %d bytes", count, err, calls, read)
+					}
+				} else if proto == "TLS" {
+					if !errors.Is(err, ErrPacketLimit) || count != 0 || read > MaxReaderAtScanBytes || read <= MaxReaderAtScanBytes-recordBytes {
+						t.Fatalf("TLS budget: %d records, %v, %d reads, %d bytes", count, err, calls, read)
 					}
 				} else if !errors.Is(err, ErrPacketLimit) || count != 0 || read != MaxReaderAtScanBytes || calls != 3*(records-1) {
 					t.Fatalf("exhausted scan: %d records, %v, %d reads, %d bytes", count, err, calls, read)

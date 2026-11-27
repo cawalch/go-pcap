@@ -220,10 +220,10 @@ func DecryptTLS13Records(
 	handshakeSecret []byte,
 	appSecret []byte,
 ) (handshakePlain []byte, appPlain []byte, err error) {
-	return decryptTLS13Records(stream, cipherSuite, handshakeSecret, appSecret, nil, nil)
+	return decryptTLS13Records(stream, cipherSuite, handshakeSecret, appSecret, nil, nil, nil, nil)
 }
 
-func decryptTLS13Records(stream []byte, cipherSuite uint16, handshakeSecret, appSecret, earlySecret []byte, provenance *tlsRecordMapper) (handshakePlain, appPlain []byte, err error) {
+func decryptTLS13Records(stream []byte, cipherSuite uint16, handshakeSecret, appSecret, earlySecret []byte, provenance *tlsRecordMapper, trace *tlsHandshakeTrace, source *tlsRecordSource) (handshakePlain, appPlain []byte, err error) {
 	offset := 0
 	if provenance != nil {
 		defer func() {
@@ -271,9 +271,21 @@ func decryptTLS13Records(stream []byte, cipherSuite uint16, handshakeSecret, app
 	seenAppEpoch := false
 	var hsBuf, appBuf bytes.Buffer
 	var hsFull, appFull bool
+	var handshakeEnd, finishedSize int
+	if source != nil {
+		finishedSize = tls13FinishedSize(cipherSuite)
+	}
 
 	for len(stream)-offset >= 5 {
 		start := offset
+		if source != nil {
+			if err := source.fillProtected(start, start+5); err != nil {
+				return nil, nil, err
+			}
+		}
+		if trace != nil && !trace.inspect() {
+			return nil, nil, ErrTLSLimit
+		}
 		if provenance != nil && !provenance.inspect(start) {
 			break
 		}
@@ -300,6 +312,12 @@ func decryptTLS13Records(stream []byte, cipherSuite uint16, handshakeSecret, app
 				break
 			}
 			continue
+		}
+
+		if source != nil {
+			if err := source.fillProtected(start+5, offset); err != nil {
+				return nil, nil, err
+			}
 		}
 
 		// Each epoch starts at sequence zero. Advance a counter only after authentication.
@@ -333,8 +351,13 @@ func decryptTLS13Records(stream []byte, cipherSuite uint16, handshakeSecret, app
 		if plain == nil {
 			if provenance != nil {
 				reason := tlsStopAuthentication
-				if !seenAppEpoch && (hsAEAD == nil || appAEAD == nil || provenance.earlyOffered && len(earlySecret) == 0) {
-					reason = tlsStopMissingKey
+				if !seenAppEpoch {
+					switch {
+					case hsAEAD == nil && appAEAD == nil && len(earlySecret) == 0:
+						reason = tlsStopMissingKey
+					case hsAEAD == nil || appAEAD == nil || provenance.earlyOffered && len(earlySecret) == 0:
+						reason = tlsStopIndeterminate
+					}
 				}
 				// The regular application epoch starts at its own sequence zero.
 				// Before producing any application records, allow recovery there.
@@ -384,11 +407,31 @@ func decryptTLS13Records(stream []byte, cipherSuite uint16, handshakeSecret, app
 		case TLSRecordHandshake:
 			if !hsFull {
 				rem := MaxTLSHandshakeBytes - hsBuf.Len()
+				if trace != nil {
+					trace.fragment(hsBuf.Len(), min(rem, len(innerContent)), start, offset)
+				}
 				if len(innerContent) <= rem {
 					hsBuf.Write(innerContent)
 				} else {
 					hsBuf.Write(innerContent[:rem])
 					hsFull = true
+				}
+			}
+			if source != nil {
+				// A complete Finished authenticated with the handshake key
+				// ends this direction's handshake epoch. Later application
+				// records need a different key and cannot add certificates.
+				data := hsBuf.Bytes()
+				for len(data)-handshakeEnd >= 4 {
+					h := data[handshakeEnd:]
+					n := int(h[1])<<16 | int(h[2])<<8 | int(h[3])
+					if n > len(h)-4 {
+						break
+					}
+					handshakeEnd += 4 + n
+					if h[0] == 20 && n == finishedSize {
+						return data[:handshakeEnd], nil, nil
+					}
 				}
 			}
 			if inAppPhase && postHandshake.endsWithKeyUpdate(innerContent) {
@@ -436,7 +479,7 @@ func decryptTLS13Records(stream []byte, cipherSuite uint16, handshakeSecret, app
 					return hsBuf.Bytes(), appBuf.Bytes(), nil
 				}
 				if terminalTLSAlert(innerContent, true) {
-					provenance.stopAt(start, tlsStopInvalidRecord)
+					provenance.stopAt(start, tlsAlertStopReason(innerContent))
 					return hsBuf.Bytes(), appBuf.Bytes(), nil
 				}
 			}
@@ -449,6 +492,14 @@ func decryptTLS13Records(stream []byte, cipherSuite uint16, handshakeSecret, app
 	}
 
 	return hsBuf.Bytes(), appBuf.Bytes(), nil
+}
+
+func tls13FinishedSize(suite uint16) int {
+	hashFn, _ := tls13SuiteParams(suite)
+	if hashFn == nil {
+		return -1
+	}
+	return hashFn().Size()
 }
 
 // xorTLS13Nonce XORs the IV with the padded TLS record sequence number or
@@ -691,7 +742,7 @@ func decryptTLS12Records(stream []byte, cipherSuite uint16, masterSecret []byte,
 				break
 			}
 			if terminalTLSAlert(plain, false) {
-				provenance.stopAt(start, tlsStopInvalidRecord)
+				provenance.stopAt(start, tlsAlertStopReason(plain))
 				break
 			}
 		}
@@ -778,8 +829,8 @@ func decryptTLSStream(st TCPStream, keyLog *TLSKeyLog, mappers *[2]tlsRecordMapp
 	suite := hsServer.ServerHello.CipherSuite
 	var clientApp, serverApp []byte
 	if hsServer.ServerHello.NegotiatedVersion == TLSVersion13 || len(entry.ClientTrafficSecret0) > 0 || len(entry.ServerTrafficSecret0) > 0 {
-		_, clientApp, _ = decryptTLS13Records(cData, suite, entry.ClientHandshakeSecret, entry.ClientTrafficSecret0, entry.ClientEarlyTrafficSecret, client)
-		_, serverApp, _ = decryptTLS13Records(sData, suite, entry.ServerHandshakeSecret, entry.ServerTrafficSecret0, nil, server)
+		_, clientApp, _ = decryptTLS13Records(cData, suite, entry.ClientHandshakeSecret, entry.ClientTrafficSecret0, entry.ClientEarlyTrafficSecret, client, nil, nil)
+		_, serverApp, _ = decryptTLS13Records(sData, suite, entry.ServerHandshakeSecret, entry.ServerTrafficSecret0, nil, server, nil, nil)
 	} else if len(entry.MasterSecret) > 0 || mappers != nil {
 		mode := tls12CBCMACThenEncrypt
 		if slices.Contains(hsServer.ServerHello.Extensions, tlsExtEncryptThenMAC) {

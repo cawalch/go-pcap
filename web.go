@@ -39,7 +39,7 @@ func (c *Capture) scanWeb(data []byte, ws *webSocketScan) (WebRecords, error) {
 		return WebRecords{}, err
 	}
 	var out WebRecords
-	out.TLS, err = tlsRecordsFromStreams(streams, meta, keys)
+	out.TLS, err = tlsRecordsFromStreams(streams, meta, keys, nil, nil)
 	if err != nil {
 		return WebRecords{}, err
 	}

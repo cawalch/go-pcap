@@ -21,6 +21,8 @@ const (
 	tlsStopInvalidRecord
 	tlsStopUnsupported
 	tlsStopLimit
+	tlsStopIndeterminate
+	tlsStopAlert
 )
 
 type tlsProvenanceBoundary struct {
@@ -160,6 +162,13 @@ func terminalTLSAlert(alert []byte, tls13 bool) bool {
 	return len(alert) != 2 || alert[0] != 1 || tls13 && alert[1] != 90 && alert[1] != 0
 }
 
+func tlsAlertStopReason(alert []byte) tlsStopReason {
+	if len(alert) == 2 && (alert[0] == 1 || alert[0] == 2) {
+		return tlsStopAlert
+	}
+	return tlsStopInvalidRecord
+}
+
 func (p *tlsRecordMapper) captureClose(start, end, plainEnd int) {
 	if record, ok := p.mapRecord(start, end, plainEnd, 0, false); ok {
 		p.closeNotify = &record
@@ -219,33 +228,11 @@ func scanTLSProvenance(source ipFrameSource, extraKeyLog []byte) ([]tlsProvenanc
 }
 
 func scanTLSProvenanceOnPort(source ipFrameSource, extraKeyLog []byte, port uint16) ([]tlsProvenanceStream, error) {
-	if err := source.capture.validateContainer(); err != nil {
-		return nil, err
-	}
-	if len(extraKeyLog) > MaxDecryptionSecretBytes || len(source.capture.Secrets) > MaxDecryptionSecrets {
-		return nil, ErrSecretLimit
-	}
-	remainingKeys := MaxDecryptionSecretBytes - len(extraKeyLog)
-	for _, block := range source.capture.Secrets {
-		if block.SecretsType == SecretsTypeTLSKeyLog {
-			if len(block.Data) > remainingKeys {
-				return nil, ErrSecretLimit
-			}
-			remainingKeys -= len(block.Data)
-		}
-	}
-	keys, err := source.capture.TLSKeyLog(extraKeyLog)
+	keys, err := source.capture.boundedTLSKeyLog(extraKeyLog)
 	if err != nil {
 		return nil, err
 	}
-	if source.needsPayload != nil && source.reader != nil {
-		// Count the stream walk and the opt-in length reads against the same
-		// physical read budget. The wrapper hides the underlying file
-		// descriptor so the stream walk won't prefetch extra bytes.
-		source.reader = &scanReadBudget{r: source.reader, remaining: MaxReaderAtScanBytes}
-	}
-	var meta []streamMetadata
-	streams, err := collectStreams(source, port, &meta, tcpWireAll)
+	streams, meta, err := tlsWireStreams(source, port)
 	if err != nil {
 		return nil, err
 	}
@@ -286,4 +273,35 @@ func scanTLSProvenanceOnPort(source ipFrameSource, extraKeyLog []byte, port uint
 		}
 	}
 	return out, nil
+}
+
+func (c *Capture) boundedTLSKeyLog(extraKeyLog []byte) (*TLSKeyLog, error) {
+	if err := c.validateContainer(); err != nil {
+		return nil, err
+	}
+	if len(extraKeyLog) > MaxDecryptionSecretBytes || len(c.Secrets) > MaxDecryptionSecrets {
+		return nil, ErrSecretLimit
+	}
+	remainingKeys := MaxDecryptionSecretBytes - len(extraKeyLog)
+	for _, block := range c.Secrets {
+		if block.SecretsType == SecretsTypeTLSKeyLog {
+			if len(block.Data) > remainingKeys {
+				return nil, ErrSecretLimit
+			}
+			remainingKeys -= len(block.Data)
+		}
+	}
+	return c.TLSKeyLog(extraKeyLog)
+}
+
+func tlsWireStreams(source ipFrameSource, port uint16) ([]TCPStream, []streamMetadata, error) {
+	if source.needsPayload != nil && source.reader != nil {
+		// Count the stream walk and the opt-in length reads against the same
+		// physical read budget. The wrapper hides the underlying file
+		// descriptor so the stream walk won't prefetch extra bytes.
+		source.reader = &scanReadBudget{r: source.reader, remaining: MaxReaderAtScanBytes}
+	}
+	var meta []streamMetadata
+	streams, err := collectStreams(source, port, &meta, tcpWireAll)
+	return streams, meta, err
 }

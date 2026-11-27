@@ -580,6 +580,39 @@ Set the same field on a capture from `NewFromReaderAt` before calling
 `HTTPRequestsFromReaderAt` to get packet-attributed requests. Look up each
 observation's `PacketIndex` in the packet records to identify its interface.
 
+### Select an observation scope on one interface
+
+A single mirror may carry several VLANs or VXLAN overlay networks with
+overlapping addresses. Interface-scoped TCP and UDP fragment options group
+by PcapNG interface, so they still share reassembly state on that mirror.
+When its encapsulation supplies a boundary in both directions, select
+packets for one network before reassembling its TCP or UDP traffic.
+
+Use `DecodeFrame` on each packet with that packet's link type. Match the
+ordered VLAN IDs for a known tag stack. For VXLAN, find the `LayerVXLAN`
+span, check that it covers eight captured bytes, and read the three-byte
+VXLAN Network Identifier at offsets four through six in that span. The
+mirror configuration determines which fields and tunnel endpoints define
+a unique scope. A VNI can repeat in independent overlay domains. Select
+both directions and each fragment by the same scope. If the expected
+headers are unavailable or truncated, leave the observation unresolved.
+[VXLAN header layout](https://www.rfc-editor.org/rfc/rfc7348.html#section-5)
+
+The [runnable Go example](../example_tenant_scope_test.go) filters a
+bounded, single-interface Ethernet fixture by full VLAN stack or VNI and
+copies its original packet bytes into one PcapNG subset per scope. It
+keeps a map from the subset's packet indices to the source packet indices.
+It recovers the HTTP request and response plus the fragmented DNS question
+for each scope. For larger inputs, bound both the source scan and the
+staged output. [Fixture and independent decode](../testdata/framing/tenant-scope.md)
+
+Flow indices in each subset follow that subset's packet order. Keep those
+indices with the subset and translate packet locators before referencing the
+original capture. Community ID still describes the bidirectional tuple and
+can be identical across scopes. For connection-level evidence, retain the
+observed scope and capture-local packet references along with that tuple
+join. [Flow summaries](#aggregate-5-tuple-flows)
+
 ### Identify an application protocol from a prefix
 
 Pass the start of one directional TCP stream or one UDP payload to
@@ -866,6 +899,33 @@ go-pcap looks up traffic keys by the observed ClientHello random and leaves
 the inner hello opaque. A key log can contain traffic keys without making
 them usable by that lookup. [TLS and ECH key-log labels in RFC 9850](https://www.rfc-editor.org/rfc/rfc9850.html#section-2.1)
 
+### Locate a hello or certificate chain in the original packets
+
+Call `capture.TLSHandshakeEvidence(data, extraKeyLog)` or
+`capture.TLSHandshakeEvidenceFromReaderAt(r, extraKeyLog)` to locate the
+ClientHello, ServerHello, or Certificate message whose fields the TLS parser
+selected. Both methods accept embedded and caller-supplied key logs. Each row
+contains the ordinary TLS observation and its zero-based opening packet. Two
+openings can share a flow index and Community ID. The opening packet can be a
+SYN, a midstream packet, or the start of a proxy negotiation.
+
+Each field's `PacketIndices` is the sorted set of packets supplying its
+message bytes. For a plaintext message this includes its contributing TLS
+record headers. For a protected certificate chain the set covers every
+authenticated ciphertext record containing part of the Certificate message,
+including headers and tags. A selected packet or record can also carry other
+messages. A missing field has an empty set. Packet order reflects capture
+order, so a reordered segment can precede the packet containing the first
+byte of a hello. After a HelloRetryRequest, the ServerHello evidence locates
+the first hello retained in the TLS observation. A later hello can supply
+the resumption decision.
+
+Attribution charges up to 65,536 record inspections and 262,144 packet-span
+intersections across the capture. Plaintext scanning and keyed recovery both
+charge their record inspections. A read or limit error discards all rows.
+The ReaderAt method shares the regular read budget across TCP payload and
+length reads. [Runnable example](../example_test.go)
+
 ## Decrypt QUIC Initial packets
 
 Call `DecryptQUICInitial(datagrams)` on a slice of UDP payloads or call
@@ -1101,6 +1161,30 @@ body, and message limits as cleartext transaction selection. Returned record
 and packet references share a further 262,144-entry budget. A record used by
 two transactions charges its references twice. Exceeding an aggregate HTTP
 limit returns `ErrHTTPLimit` and no rows.
+
+### Explain keyed HTTP/1 coverage
+
+Use `Capture.AnalyzeKeyedHTTP1` or `Capture.AnalyzeKeyedHTTP1FromReaderAt`
+when you need both transaction rows and the coverage of identified TLS
+openings. Each direction reports plaintext byte count, an earlier opaque
+range if observed, and the reason recovery stopped. An opening with visible
+client and server hellos can have zero rows when its traffic keys are
+unavailable. A scan that cannot identify both hellos leaves that opening's
+coverage unknown.
+
+Use the original opening packet and capture-wide flow index to locate the
+connection. Directional wire offsets include any proxy prefix. The end of
+captured input and an authenticated close notify are separate observations.
+An unsuccessful authentication establishes a record boundary without
+establishing which key or input bytes were wrong. Transaction pairing and
+body completeness still govern observations about an individual exchange.
+Capture-wide truncation and unsupported link counts are available separately.
+A terminal scan error discards the result and preserves the error for
+`errors.Is`.
+
+The [external Go example](../keyed_http1_coverage_example_test.go) locates the
+packets behind a complete response, shows a defined match and non-match,
+and reports unknown when an observed TLS opening lacks its keys.
 
 ### Export an HTTP/1 exchange as ciphertext
 
@@ -1665,6 +1749,34 @@ compound packet. Capture scans emit each readable compound command and skip
 malformed commands. When `Message.IsEncrypted` is true, `SessionID` and
 `OriginalMessageSize` are observations from the 52-byte SMB3 transform
 header. The ciphertext stays opaque.
+
+### Find the original packets for an SMB command
+
+Call `capture.SMB2Evidence(data)` or
+`capture.SMB2EvidenceFromReaderAt(source)` to locate decoded SMB commands
+and visible transform headers. The result embeds the same SMB fields as
+`SMB` in the same opening and direction order. The first observed packet
+identifies the TCP opening. A new opening can reuse the same flow index
+and message ID. Set `SeparateTCPInterfaces` when interfaces observe
+independent networks.
+
+`PacketIndex` locates the packet supplying the first magic byte of the
+command. `StreamOffset` locates that byte in the recovered TCP direction
+before removing any proxy handshake. Use the source and destination
+endpoints with that offset to distinguish compound commands in one packet.
+The sorted `PacketIndices` list includes every packet supplying command
+bytes up to the next compound command or enclosing frame boundary. An
+unframed last command covers the remaining contiguous input. A repeated
+packet contributes only if it supplies new bytes. For a transform the
+range covers the 52-byte visible header. The ciphertext stays opaque.
+
+The evidence scan charges at most 262,144 packet span references and
+retains the usual SMB record and TCP reassembly limits. A scan or limit
+error discards results. The ReaderAt path reads TCP payloads on any port
+up to the 64 MiB read budget. [Runnable original-packet example](../example_smb_evidence_test.go) ·
+[Fixture and independent decode](../testdata/framing/smb-evidence.md)
+
+### Read Kerberos and RDP negotiation fields
 
 Call `ParseKRB5(buf)` or `capture.Kerberos(data)` to decode ASN.1 DER Kerberos
 v5 `AS-REQ`, `AS-REP`, `TGS-REQ`, `TGS-REP`, and `KRB-ERROR` messages over UDP

@@ -36,6 +36,18 @@ the observation point, capture length, keys and scan limits.
 | Which handshake or enterprise metadata was visible? | Direct parsers and byte-slice scans cover SSH banners/KEXINIT, SMB2/3 and NTLMSSP metadata, Kerberos v5 on port 88, and RDP negotiation. | SSH, SMB and RDP records identify a flow. A Kerberos record identifies its starting packet. SMB transform headers expose only their visible metadata. LDAP Bind/Search and connection-oriented DCE/RPC have direct, byte-slice and seekable paths. LDAP includes keyed LDAPS on port 636. RPC includes attributed cleartext SMB2 pipe buffers. | [SSH and enterprise protocols](parsing.md#parse-ssh-handshakes-and-hassh) · [LDAP tests](../ldap_capture_test.go) · [Keyed LDAP tests](../keyed_ldap_test.go) · [RPC tests](../dcerpc_capture_test.go) |
 | Can I compare a captured fingerprint with another tool? | JA4 and supported JA4+ methods, HASSH/HASSHServer and the HTTP/2 settings fingerprint are available from their protocol inputs. | The fingerprint describes captured inputs and can be absent when required bytes were missed. The reference checks specify the algorithm, source packet or packet window and expected result. Applicable terms vary by method. | [FoxIO baseline and frame references](../testdata/foxio/README.md) · [Third-party notices](../NOTICE) |
 
+### Enterprise packet locators
+
+This table describes packet attribution in the current checkout.
+
+| Protocol | Original capture locator |
+| --- | --- |
+| SMB | An evidence scan retains opening packet, directional stream range and contributing packets. A transform exposes its visible header. [SMB evidence](parsing.md#find-the-original-packets-for-an-smb-command) |
+| SSH and RDP | The capture records identify the observed flow and endpoints. [SSH record](../ssh.go) · [RDP record](../rdp.go) |
+| Kerberos | The UDP message packet or the TCP packet supplying the first record-mark byte. [Kerberos record](../krb5.go) |
+| LDAP and LDAPS | The first cleartext message byte for TCP or the UDP packet. Keyed LDAPS retains the TCP opening and packet sets for whole authenticated TLS records. [Cleartext record](../ldap_capture.go) · [Keyed record](../keyed_ldap.go) |
+| DCE/RPC | The packet supplying the first fragment byte in TCP or an observed SMB2 pipe buffer. [DCE/RPC record](../dcerpc_capture.go) |
+
 ## Platform observations
 
 | Environment | v0.1.1 evidence | Main evidence |

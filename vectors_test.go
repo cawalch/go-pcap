@@ -172,9 +172,9 @@ func TestTLS13EncryptedServerCertificateDecryptionViaDSB(t *testing.T) {
 		t.Fatalf("New(PCAPNG) error = %v", err)
 	}
 
-	tlsRecords, err := cap.TLS(rawPCAPNG)
-	if err != nil || len(tlsRecords) != 1 {
-		t.Fatalf("cap.TLS() = (%d, %v), want 1", len(tlsRecords), err)
+	tlsRecords := checkReaderParity(t, rawPCAPNG, cap.TLS, cap.TLSFromReaderAt)
+	if len(tlsRecords) != 1 {
+		t.Fatalf("got %d TLS records, want 1", len(tlsRecords))
 	}
 	certs := tlsRecords[0].Handshake.Certificates
 	if len(certs) != 1 {

@@ -214,6 +214,10 @@ func IsGREASE(v uint16) bool {
 // It coalesces fragments across plaintext warning alerts and returns [ErrTLSLimit]
 // (wrapped) if the plaintext handshake needs more than [MaxTLSHandshakeRecords].
 func ParseTLSRecords(stream []byte) (TLSHandshake, error) {
+	return parseTLSRecords(stream, nil, nil)
+}
+
+func parseTLSRecords(stream []byte, source *tlsRecordSource, trace *tlsHandshakeTrace) (TLSHandshake, error) {
 	if len(stream) < 5 {
 		return TLSHandshake{}, fmt.Errorf("%w: buffer shorter than 5-byte TLS record header", ErrInvalidTLS)
 	}
@@ -228,6 +232,12 @@ func ParseTLSRecords(stream []byte) (TLSHandshake, error) {
 	offset := 0
 
 	for records := 0; len(stream)-offset >= 5; records++ {
+		if trace != nil && !trace.inspect() {
+			return TLSHandshake{}, ErrTLSLimit
+		}
+		if err := source.fill(offset, offset+5); err != nil {
+			return TLSHandshake{}, err
+		}
 		contentType := stream[offset]
 		if records == MaxTLSHandshakeRecords {
 			if encryptedHandshakes || contentType == TLSRecordApplicationData || (sawApplicationData && contentType != TLSRecordHandshake) {
@@ -262,19 +272,36 @@ func ParseTLSRecords(stream []byte) (TLSHandshake, error) {
 		}
 		if !encryptedHandshakes && contentType == TLSRecordAlert {
 			// Only a complete, non-closing warning can interrupt a plaintext handshake.
-			if bodyEnd-bodyStart != 2 || recLen != 2 || stream[bodyStart] != 1 || stream[bodyStart+1] == 0 {
+			if bodyEnd-bodyStart != 2 || recLen != 2 {
+				break
+			}
+			if err := source.fill(bodyStart, bodyEnd); err != nil {
+				return TLSHandshake{}, err
+			}
+			if stream[bodyStart] != 1 || stream[bodyStart+1] == 0 {
 				break
 			}
 		}
 		if contentType == TLSRecordChangeCipherSpec && !sawCCS {
 			// TLS 1.2 subsequent handshake records are ciphertext. TLS 1.3
 			// allows a compatibility CCS between a retry and the final hello.
+			if bodyEnd-bodyStart == 1 {
+				if err := source.fill(bodyStart, bodyEnd); err != nil {
+					return TLSHandshake{}, err
+				}
+			}
 			sawCCS = true
 			encryptedHandshakes = bodyEnd-bodyStart != 1 || stream[bodyStart] != 1 || !containsHelloRetry(hsBuf.Bytes())
 		}
 		if contentType == TLSRecordHandshake && !encryptedHandshakes {
 			if hsBuf.Len()+(bodyEnd-bodyStart) > MaxTLSHandshakeBytes {
 				return TLSHandshake{}, fmt.Errorf("%w: coalesced TLS handshake exceeds %d bytes", ErrTLSLimit, MaxTLSHandshakeBytes)
+			}
+			if trace != nil {
+				trace.fragment(hsBuf.Len(), bodyEnd-bodyStart, offset, bodyEnd)
+			}
+			if err := source.fill(bodyStart, bodyEnd); err != nil {
+				return TLSHandshake{}, err
 			}
 			hsBuf.Write(stream[bodyStart:bodyEnd])
 		}
@@ -316,6 +343,9 @@ func ParseTLSRecords(stream []byte) (TLSHandshake, error) {
 					}
 					break
 				}
+				if trace != nil {
+					trace.clientHello = trace.locate(hsOffset, msgEnd, false)
+				}
 				out.ClientHello = ch
 				out.HasClientHello = true
 				out.Anomalies = mergeTLSAnomalies(out.Anomalies, ch.Anomalies)
@@ -332,6 +362,9 @@ func ParseTLSRecords(stream []byte) (TLSHandshake, error) {
 					break
 				}
 				if !out.HasServerHello {
+					if trace != nil {
+						trace.serverHello = trace.locate(hsOffset, msgEnd, false)
+					}
 					out.ServerHello = sh // Preserve the first hello and its JA4S.
 					out.HasServerHello = true
 				}
@@ -352,6 +385,9 @@ func ParseTLSRecords(stream []byte) (TLSHandshake, error) {
 				if err == nil {
 					out.Anomalies = mergeTLSAnomalies(out.Anomalies, certAnom)
 					if len(certs) > 0 {
+						if trace != nil {
+							trace.certificates = trace.locate(hsOffset, msgEnd, false)
+						}
 						out.Certificates = certs
 						parsedAny = true
 					}
@@ -1123,10 +1159,10 @@ func (c *Capture) TLSWithKeyLog(data []byte, extraKeyLog []byte) ([]TLSRecord, e
 	if err != nil {
 		return nil, err
 	}
-	return c.tlsFromStreams(streams, meta, extraKeyLog)
+	return c.tlsFromStreams(streams, meta, extraKeyLog, nil)
 }
 
-func (c *Capture) tlsFromStreams(streams []TCPStream, meta []streamMetadata, extraKeyLog []byte) ([]TLSRecord, error) {
+func (c *Capture) tlsFromStreams(streams []TCPStream, meta []streamMetadata, extraKeyLog []byte, reader *tlsStreamReader) ([]TLSRecord, error) {
 	if len(streams) == 0 {
 		return nil, nil
 	}
@@ -1136,16 +1172,17 @@ func (c *Capture) tlsFromStreams(streams []TCPStream, meta []streamMetadata, ext
 		return nil, err
 	}
 
-	return tlsRecordsFromStreams(streams, meta, keyLog)
+	return tlsRecordsFromStreams(streams, meta, keyLog, reader, nil)
 }
 
-func tlsRecordsFromStreams(streams []TCPStream, meta []streamMetadata, keyLog *TLSKeyLog) ([]TLSRecord, error) {
+func tlsRecordsFromStreams(streams []TCPStream, meta []streamMetadata, keyLog *TLSKeyLog, reader *tlsStreamReader, evidence *tlsHandshakeEvidenceScan) ([]TLSRecord, error) {
 	var records []TLSRecord
 	for i := range streams {
-		st := streams[i]
-		st.Client.Data = st.Client.Data[:meta[i].clientPrefix]
-		st.Server.Data = st.Server.Data[:meta[i].serverPrefix]
-		st, _, _ = proxyStream(st)
+		st, co, so := proxyStream(meta[i].contiguousStream(streams[i]))
+		var clientTrace, serverTrace *tlsHandshakeTrace
+		if evidence != nil {
+			clientTrace, serverTrace = evidence.directions(&meta[i], st.SrcAddr != streams[i].SrcAddr || st.SrcPort != streams[i].SrcPort, co, so)
+		}
 		cData, sData := st.Client.Data, st.Server.Data
 		srcAddr, dstAddr, srcPort, dstPort := st.SrcAddr, st.DstAddr, st.SrcPort, st.DstPort
 		var merged TLSHandshake
@@ -1154,16 +1191,23 @@ func tlsRecordsFromStreams(streams []TCPStream, meta []streamMetadata, keyLog *T
 		var clientHS, serverHS TLSHandshake
 		var hasC, hasS bool
 		if hasTLSHandshakeStart(cData) {
-			if hs, err := ParseTLSRecords(cData); err == nil {
+			source := reader.source(cData)
+			if hs, err := parseTLSRecords(cData, source, clientTrace); err == nil {
 				clientHS, hasC = hs, true
+			} else if source != nil && source.err != nil {
+				return nil, source.err
 			}
 		}
 		if hasTLSHandshakeStart(sData) {
-			if hs, err := ParseTLSRecords(sData); err == nil {
+			source := reader.source(sData)
+			if hs, err := parseTLSRecords(sData, source, serverTrace); err == nil {
 				serverHS, hasS = hs, true
+			} else if source != nil && source.err != nil {
+				return nil, source.err
 			}
 		}
 		if !clientHS.HasClientHello && (serverHS.HasClientHello || clientHS.HasServerHello || clientHS.HasCertificateRequest) {
+			clientTrace, serverTrace = serverTrace, clientTrace
 			clientHS, serverHS = serverHS, clientHS
 			hasC, hasS = hasS, hasC
 			cData, sData = sData, cData
@@ -1201,47 +1245,69 @@ func tlsRecordsFromStreams(streams []TCPStream, meta []streamMetadata, keyLog *T
 
 		if merged.HasClientHello && merged.HasServerHello && merged.ServerHello.NegotiatedVersion == TLSVersion13 && keyLog != nil {
 			if entry, ok := keyLog.Entries[merged.ClientHello.Random]; ok {
-				merged.readTLS13CertificateFlight(sData, entry.ServerHandshakeSecret, false)
-				merged.readTLS13CertificateFlight(cData, entry.ClientHandshakeSecret, true)
+				if err := merged.readTLS13CertificateFlight(sData, entry.ServerHandshakeSecret, false, serverTrace, reader.source(sData)); err != nil {
+					return nil, err
+				}
+				if err := merged.readTLS13CertificateFlight(cData, entry.ClientHandshakeSecret, true, clientTrace, reader.source(cData)); err != nil {
+					return nil, err
+				}
 			}
 		}
 
+		if evidence != nil && (clientTrace.limited || serverTrace.limited) {
+			return nil, ErrTLSLimit
+		}
 		if found {
 			merged.IsResumed = merged.IsResumed || merged.hasResumedSessionID()
-			if len(records) >= MaxTLSHandshakesPerScan {
+			if len(records) >= MaxTLSHandshakesPerScan || evidence != nil && len(evidence.rows) >= MaxTLSHandshakesPerScan {
 				return nil, fmt.Errorf("%w: exceeds %d TLS handshakes", ErrTLSLimit, MaxTLSHandshakesPerScan)
 			}
-			records = append(records, TLSRecord{
+			r := TLSRecord{
 				FlowIndex: st.FlowIndex,
 				SrcAddr:   srcAddr,
 				DstAddr:   dstAddr,
 				SrcPort:   srcPort,
 				DstPort:   dstPort,
 				Handshake: merged,
-			})
+			}
+			if evidence != nil {
+				evidence.add(r, meta[i].firstPacket, clientTrace, serverTrace)
+			} else {
+				records = append(records, r)
+			}
 		}
 	}
 
 	return records, nil
 }
 
-func (out *TLSHandshake) readTLS13CertificateFlight(stream, secret []byte, client bool) {
+func (out *TLSHandshake) readTLS13CertificateFlight(stream, secret []byte, client bool, trace *tlsHandshakeTrace, source *tlsRecordSource) error {
 	if len(secret) == 0 {
-		return
+		return nil
 	}
 	chain := &out.Certificates
 	if client {
 		chain = &out.ClientCertificates
 	}
-	hsData, _, err := DecryptTLS13Records(stream, out.ServerHello.CipherSuite, secret, nil)
+	if trace != nil {
+		trace.fragments = trace.fragments[:0]
+	}
+	hsData, _, err := decryptTLS13Records(stream, out.ServerHello.CipherSuite, secret, nil, nil, nil, trace, source)
 	if err != nil {
-		return
+		if source != nil {
+			return source.err
+		}
+		return nil
 	}
 	offset := 0
+	finishedSize := tls13FinishedSize(out.ServerHello.CipherSuite)
 	for offset+4 <= len(hsData) {
 		msgType := hsData[offset]
 		msgLen := int(hsData[offset+1])<<16 | int(hsData[offset+2])<<8 | int(hsData[offset+3])
 		if msgLen > MaxTLSHandshakeBytes || offset+4+msgLen > len(hsData) {
+			break
+		}
+		if msgType == 20 && msgLen == finishedSize {
 			break
 		}
 		body := hsData[offset+4 : offset+4+msgLen]
@@ -1254,12 +1320,16 @@ func (out *TLSHandshake) readTLS13CertificateFlight(stream, secret []byte, clien
 			if certs, certAnom, err := parseTLSCertificateWithTLS13Context(body); err == nil {
 				out.Anomalies = mergeTLSAnomalies(out.Anomalies, certAnom)
 				if len(certs) > 0 {
+					if trace != nil {
+						trace.certificates = trace.locate(offset-4-msgLen, offset, true)
+					}
 					*chain = certs
-					return
+					return nil
 				}
 			}
 		}
 	}
+	return nil
 }
 
 // parseTLSCertificateWithTLS13Context parses a TLS 1.3 Certificate handshake
