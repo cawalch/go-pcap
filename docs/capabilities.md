@@ -3,7 +3,10 @@
 This baseline compares the [v0.1.1 release](https://github.com/cawalch/go-pcap/tree/v0.1.1)
 with [main at 1420853](https://github.com/cawalch/go-pcap/tree/14208534efbb0ba81b6bd98731a4bc6337689e3d).
 The main column includes release capabilities and calls out differences that
-matter to an external Go caller. A parser reads an already located byte range.
+matter to an external Go caller. The external checks below use the published
+[v0.2.0 release](https://github.com/cawalch/go-pcap/tree/v0.2.0), which
+includes the baseline and adds unicast DNS transaction pairing. A parser
+reads an already located byte range.
 A capture scan finds records and associates them with the input. A transaction
 export writes selected original packets that can be opened again. Unless a row
 names a narrower exporter, the five-tuple export is the available selection.
@@ -88,16 +91,19 @@ order, unsupported links, and hard DNS, reassembly and WebSocket limits.
 These checks use checked-in inputs. Reference decoders are used independently
 of the test suite. [Deployment corpus](../testdata/deployments/README.md) · [External Go tests](../testdata/consumer/contract_test.go)
 
-The standalone [resolver program](../examples/dns-transactions/main.go) reads
-the seekable DNS fixture and reports paired, ambiguous and unanswered
-observations. The [go-yara integration](https://github.com/cawalch/go-yara/blob/3f53206e468b68a5d74b1ac211072f75157eaae0/docs/pcap-module.md)
-exercises available and unavailable TLS name comparison on byte-slice and
-seekable inputs. Both workflows still need a recorded run against the matrix
-revision with input size, logical bytes read, allocations and expected
-results. The resolver fixture already records packet references.
+The [tagged acceptance workflows](../testdata/consumer/qualified/README.md)
+exercise TLS configuration, resolver diagnosis and HTTP content with positive,
+negative and unavailable controls. The separate Go modules bind v0.2.0
+without a workspace override. The go-yara integration confirms defined
+agreement, defined disagreement and undefined certificate evidence on a
+byte slice and a seekable input. The checks record input size, read counts
+and allocations.
 
-Independent capture checks for Kerberos, RDP, LDAP/LDAPS and DCE/RPC beyond
-the linked Go fixtures remain open. The corpus also needs pinned endpoint
-generation steps for the existing QUIC fixtures. Capture costs and privilege
-requirements belong with the evidence for each workflow that claims them.
+The [independent reference captures](../testdata/deployments/qualified.md)
+cover a Kerberos UDP error, RDP connection request, cleartext and keyed
+LDAP Bind, and a DCE/RPC Bind. Each covers the observed messages in the
+fixture. SSH algorithm variants, encrypted SMB commands, RDP session data,
+Kerberos TCP exchanges and DCE/RPC over authenticated SMB stay outside that
+reference set. The original aioquic fixtures have reproducible decoding
+commands. Their original endpoint generator is unavailable.
 [Coverage qualification issue](https://github.com/cawalch/go-pcap/issues/267)

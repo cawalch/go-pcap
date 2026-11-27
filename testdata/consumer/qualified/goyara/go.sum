@@ -1,0 +1,10 @@
+github.com/cawalch/go-pcap v0.2.0 h1:AoToCtVsyCjmWBGNa4DbFUVpxyK+vLZ0Ee2WdG+q0dw=
+github.com/cawalch/go-pcap v0.2.0/go.mod h1:oHKdU5VdhATGAsmALv2KO6BXJKrzFjMcKq6sDwCmxCo=
+github.com/cawalch/go-pe v0.2.0 h1:6zsv3db7z2A03SXC+H6xCuyHYvx/AIcF9rRDNq3O6Lo=
+github.com/cawalch/go-pe v0.2.0/go.mod h1:EoVGEYn1l0W480qiRMsr++ZaaqHabaHBEeMwu1BH3MU=
+github.com/cawalch/go-yara v0.11.2-0.20261125214929-3f53206e468b h1:Q9oSpZKUsRSbdWIEbOrKWUSxSYfUrnizwI4GJGRCA78=
+github.com/cawalch/go-yara v0.11.2-0.20261125214929-3f53206e468b/go.mod h1:kzOXwiQoU6c+aFM2Hb9EJ136+ONJb8IFhpcOoGCwPXM=
+github.com/stretchr/testify v1.12.1 h1:EuwCh5fleGS7H32xRwO3wRGT7DxrDhLAT6FF8MpWDWE=
+github.com/stretchr/testify v1.12.1/go.mod h1:MDEgiDPPsNp5cuIrHPPCyornHKgEVbtFUmoNlxoYthg=
+go.yaml.in/yaml/v3 v3.0.5 h1:N6y/pJk8buWs9NY5ERU2HSMfm+IuD/OtfdAnq6kESPw=
+go.yaml.in/yaml/v3 v3.0.5/go.mod h1:HVTZu1O7/Vkt2N+BFy8Zza+lnLsABggaTM2ZpNIGuKg=

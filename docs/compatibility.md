@@ -9,6 +9,8 @@ be added compatibly.
 Use the [capture analysis capability matrix](capabilities.md) to compare
 released and checkout support, locate fixture evidence, and check the
 boundary of each analysis.
+Run the [tagged external tests](../testdata/consumer/qualified/README.md) to
+check published TLS, DNS, HTTP and enterprise behavior from a separate module.
 
 ## Record order
 
