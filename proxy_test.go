@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/binary"
 	"fmt"
+	"reflect"
 	"strings"
 	"testing"
 )
@@ -139,4 +140,126 @@ func TestProxyCaptureProtocols(t *testing.T) {
 			t.Fatal(rows, err)
 		}
 	})
+}
+
+// enterpriseTestCapture sends the client suffix before the prefix, then
+// retransmits the prefix. A nonzero gap moves just the selected suffix.
+func enterpriseTestCapture(t *testing.T, clientData, serverData []byte, split int, gap uint32, proxied, serverGap bool) (*Capture, []byte) {
+	t.Helper()
+	client, server := [4]byte{192, 0, 2, 1}, [4]byte{192, 0, 2, 2}
+	const clientPort = 51000
+	serverPort := uint16(55000)
+	if proxied {
+		clientData = append([]byte(proxyRequest), clientData...)
+		serverData = append([]byte(proxyResponse), serverData...)
+		split += len(proxyRequest)
+		serverPort = 3128
+	}
+	const clientSeq, serverSeq = 1001, 2001
+	frame := func(fromClient bool, seq uint32, flags uint8, payload []byte) []byte {
+		if fromClient {
+			return buildEthernetIPv4TCPFrame(client, server, clientPort, serverPort, seq, serverSeq, flags, payload)
+		}
+		return buildEthernetIPv4TCPFrame(server, client, serverPort, clientPort, seq, clientSeq, flags, payload)
+	}
+	frames := [][]byte{
+		frame(true, clientSeq-1, TCPFlagSYN, nil),
+		frame(false, serverSeq-1, TCPFlagSYN|TCPFlagACK, nil),
+	}
+	clientGap := gap
+	if serverGap {
+		clientGap = 0
+	}
+	frames = append(frames,
+		frame(true, clientSeq+uint32(split)+clientGap, TCPFlagPSH|TCPFlagACK, clientData[split:]),
+		frame(true, clientSeq, TCPFlagPSH|TCPFlagACK, clientData[:split]),
+		frame(true, clientSeq, TCPFlagPSH|TCPFlagACK, clientData[:split]),
+	)
+	if serverGap {
+		// A gap in the CONNECT response prevents establishing the tunnel.
+		split = len(proxyResponse) - 2
+		frames = append(frames,
+			frame(false, serverSeq, TCPFlagPSH|TCPFlagACK, serverData[:split]),
+			frame(false, serverSeq+uint32(split)+gap, TCPFlagPSH|TCPFlagACK, serverData[split:]),
+		)
+	} else {
+		frames = append(frames, frame(false, serverSeq, TCPFlagPSH|TCPFlagACK, serverData))
+	}
+	raw := buildClassicPCAP(binary.LittleEndian, false, LinkTypeEthernet, 65535, frames)
+	c, err := New(raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return c, raw
+}
+
+func TestSMBRDPSSHDirectionalTCPGaps(t *testing.T) {
+	for _, proxied := range []bool{false, true} {
+		name := "direct"
+		if proxied {
+			name = "CONNECT"
+		}
+		t.Run(name+"/SMB", func(t *testing.T) {
+			first := smbSessionFrame(smbNameRequest(SMB2CommandCreate, "first.txt"))
+			second := smbSessionFrame(smbNameRequest(SMB2CommandCreate, "second.txt"))
+			session := buildSMB2SessionSetupNTLMChallenge()
+			c, raw := enterpriseTestCapture(t, append(bytes.Clone(first), second...), session, len(first)+len(second)-4, 0, proxied, false)
+			full, err := c.SMB(raw)
+			if err != nil || len(full) != 3 || full[0].Message.FileName != "first.txt" || full[1].Message.FileName != "second.txt" || !full[2].Message.HasNTLM {
+				t.Fatalf("contiguous SMB = %+v, %v", full, err)
+			}
+			c, raw = enterpriseTestCapture(t, append(bytes.Clone(first), second...), session, len(first)+len(second)-4, 32, proxied, false)
+			rows, err := c.SMB(raw)
+			want := []SMB2Record{full[0], full[2]}
+			if err != nil || !reflect.DeepEqual(rows, want) {
+				t.Fatalf("gapped SMB = %+v, %v; want %+v", rows, err, want)
+			}
+		})
+		t.Run(name+"/RDP", func(t *testing.T) {
+			req := buildRDPConnReqPDU("fixture", RDPProtoTLS)
+			resp := buildRDPConnConfirmPDU(RDPProtoTLS)
+			c, raw := enterpriseTestCapture(t, req, resp, len(req)-4, 0, proxied, false)
+			full, err := c.RDP(raw)
+			if err != nil || len(full) != 2 || full[0].Negotiation.Cookie != "fixture" || !full[1].Negotiation.HasNegRsp {
+				t.Fatalf("contiguous RDP = %+v, %v", full, err)
+			}
+			c, raw = enterpriseTestCapture(t, req, resp, len(req)-4, 32, proxied, false)
+			rows, err := c.RDP(raw)
+			if err != nil || !reflect.DeepEqual(rows, full[1:]) {
+				t.Fatalf("gapped RDP = %+v, %v; want %+v", rows, err, full[1:])
+			}
+		})
+		t.Run(name+"/SSH", func(t *testing.T) {
+			client, server := sshHandshakeFixture()
+			c, raw := enterpriseTestCapture(t, client, server, len(client)-8, 0, proxied, false)
+			full, err := c.SSH(raw)
+			if err != nil || len(full) != 1 || full[0].Handshake.HASSH == "" || full[0].Handshake.HASSHServer == "" || full[0].JA4SSH == "" {
+				t.Fatalf("contiguous SSH = %+v, %v", full, err)
+			}
+			c, raw = enterpriseTestCapture(t, client, server, len(client)-8, 32, proxied, false)
+			rows, err := c.SSH(raw)
+			full[0].Handshake.HasClientKex = false
+			full[0].Handshake.ClientKex = SSHKexInit{}
+			full[0].Handshake.HASSH = ""
+			if err != nil || !reflect.DeepEqual(rows, full) {
+				t.Fatalf("gapped SSH = %+v, %v; want %+v", rows, err, full)
+			}
+		})
+	}
+}
+
+func TestSMBRDPSSHTunnelRequiresContiguousProxyResponse(t *testing.T) {
+	client, server := sshHandshakeFixture()
+	c, raw := enterpriseTestCapture(t, client, server, 5, 32, true, true)
+	if rows, err := c.SSH(raw); err != nil || len(rows) != 0 {
+		t.Fatalf("SSH inside an unconfirmed tunnel = %+v, %v", rows, err)
+	}
+	c, raw = enterpriseTestCapture(t, nil, buildSMB2SessionSetupNTLMChallenge(), 0, 32, true, true)
+	if rows, err := c.SMB(raw); err != nil || len(rows) != 0 {
+		t.Fatalf("SMB inside an unconfirmed tunnel = %+v, %v", rows, err)
+	}
+	c, raw = enterpriseTestCapture(t, buildRDPConnReqPDU("fixture", RDPProtoTLS), buildRDPConnConfirmPDU(RDPProtoTLS), 5, 32, true, true)
+	if rows, err := c.RDP(raw); err != nil || len(rows) != 0 {
+		t.Fatalf("RDP inside an unconfirmed tunnel = %+v, %v", rows, err)
+	}
 }

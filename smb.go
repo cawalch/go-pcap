@@ -362,14 +362,16 @@ func parseNTLMAvPairs(av []byte, info *NTLMInfo) {
 
 // SMB extracts SMB2 commands, embedded NTLMSSP metadata and SMB3 encrypted
 // transform headers across the reassembled TCP streams in a capture.
+// Message parsing in each direction stops at its first known TCP sequence gap.
 func (c *Capture) SMB(data []byte) ([]SMB2Record, error) {
-	streams, err := c.Streams(data)
+	var meta []streamMetadata
+	streams, err := collectStreams(ipFrameSource{capture: c, data: data}, 0, &meta, tcpWireNone)
 	if err != nil {
 		return nil, err
 	}
 	var records []SMB2Record
 	for i := range streams {
-		st, _, _ := proxyStream(streams[i])
+		st, _, _ := proxyStream(meta[i].contiguousStream(streams[i]))
 		if err := extractSMB2FromStream(st.Client.Data, st.FlowIndex, st.SrcAddr, st.DstAddr, st.SrcPort, st.DstPort, &records); err != nil {
 			return nil, err
 		}

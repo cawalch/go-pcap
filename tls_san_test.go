@@ -255,6 +255,85 @@ func TestTLSServerNameMatch(t *testing.T) {
 	}
 }
 
+func TestTLSECHObservedName(t *testing.T) {
+	const publicName = "public.example"
+	const applicationData = "synthetic response"
+	random := [32]byte{1}
+	name := binary.BigEndian.AppendUint16(nil, 3+uint16(len(publicName)))
+	name = append(name, 0) // host_name
+	name = binary.BigEndian.AppendUint16(name, uint16(len(publicName)))
+	name = append(name, publicName...)
+	extensions := testTLSExtension(TLSExtServerName, name)
+	extensions = append(extensions, testTLSExtension(TLSExtSupportedVersions, []byte{2, 3, 4})...)
+	// GREASE-shaped outer extension from RFC 9849, with deterministic dummy enc and payload bytes.
+	ech := append([]byte{0, 0, 1, 0, 1, 7, 0, 32}, bytes.Repeat([]byte{0xa1}, 32)...)
+	ech = append(ech, 0, 96)
+	ech = append(ech, bytes.Repeat([]byte{0xb2}, 96)...)
+	extensions = append(extensions, testTLSExtension(TLSExtECH, ech)...)
+	client := testKeyShareHello(false, random, extensions)
+
+	for _, tc := range []struct {
+		name, leaf               string
+		handshakeKey, innerIndex bool
+		match, known             bool
+	}{
+		{"public leaf matches", publicName, true, false, true, true},
+		{"different leaf", "backend.example", true, false, false, true},
+		{"application key only", publicName, false, false, false, false},
+		{"inner-indexed keys", publicName, true, true, false, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			handshakeSecret, appSecret := [32]byte{3}, [32]byte{4}
+			chain := sanTestChain(t, []string{tc.leaf}, nil, false)
+			cert := certificateTestRecord(chain, true)
+			server := buildTLSServerHelloRecord()
+			server = append(server, encryptTLS13AppDataRecord(t, handshakeSecret[:], TLS_AES_128_GCM_SHA256, 0, TLSRecordHandshake, cert[5:])...)
+			server = append(server, encryptTLS13AppDataRecord(t, appSecret[:], TLS_AES_128_GCM_SHA256, 0, TLSRecordApplicationData, []byte(applicationData))...)
+
+			keyRandom := random
+			if tc.innerIndex {
+				// Model RFC 9850's inner-indexed key-log entries with a distinct random.
+				keyRandom = [32]byte{5}
+			}
+			keyLog := fmt.Appendf(nil, "SERVER_TRAFFIC_SECRET_0 %x %x\n", keyRandom, appSecret)
+			if tc.handshakeKey {
+				keyLog = fmt.Appendf(keyLog, "SERVER_HANDSHAKE_TRAFFIC_SECRET %x %x\n", keyRandom, handshakeSecret)
+			}
+			src, dst := [4]byte{192, 0, 2, 1}, [4]byte{192, 0, 2, 2}
+			data := buildPCAPNGFixture(binary.LittleEndian, keyLog, [][]byte{
+				buildEthernetIPv4TCPFrame(src, dst, 51234, 443, 1, 0, TCPFlagACK, client),
+				buildEthernetIPv4TCPFrame(dst, src, 443, 51234, 1, 0, TCPFlagACK, server),
+			})
+			capture, err := New(data)
+			if err != nil {
+				t.Fatal(err)
+			}
+			rows, err := capture.TLS(data)
+			if err != nil || len(rows) != 1 {
+				t.Fatalf("TLS: rows=%d, err=%v", len(rows), err)
+			}
+			hs := rows[0].Handshake
+			if !hs.HasClientHello || !hs.ClientHello.HasECH || hs.ClientHello.SNI != publicName {
+				t.Fatalf("visible ClientHello name=%q, HasECH=%t", hs.ClientHello.SNI, hs.ClientHello.HasECH)
+			}
+			if match, known := hs.ServerNameMatch(); match != tc.match || known != tc.known {
+				t.Errorf("ServerNameMatch() = %t, %t, want %t, %t", match, known, tc.match, tc.known)
+			}
+			streams, err := capture.DecryptedTLSStreams(data, nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if tc.innerIndex {
+				if len(streams) != 0 {
+					t.Fatal("an inner-indexed key unexpectedly matched the visible random")
+				}
+			} else if len(streams) != 1 || string(streams[0].Server.Data) != applicationData {
+				t.Fatal("expected authenticated application data")
+			}
+		})
+	}
+}
+
 func TestTLSCaptureCertificateObservations(t *testing.T) {
 	chain := sanTestChain(t, []string{"leaf.example"}, nil, false)
 	for _, encrypted := range []bool{false, true} {

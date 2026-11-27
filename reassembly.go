@@ -437,6 +437,14 @@ type streamMetadata struct {
 	confirmedOpening           bool
 }
 
+// contiguousStream restricts a copy of the stream to bytes before the first
+// known sequence gap in each direction.
+func (m *streamMetadata) contiguousStream(st TCPStream) TCPStream {
+	st.Client.Data = st.Client.Data[:m.clientPrefix]
+	st.Server.Data = st.Server.Data[:m.serverPrefix]
+	return st
+}
+
 // A packet index and its TCP acknowledgement describe a captured payload.
 type tcpPacketEvidence struct {
 	index uint32

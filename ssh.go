@@ -175,6 +175,8 @@ func computeHASSH(kex, enc, mac, comp string) string {
 
 // SSH extracts SSH handshakes, HASSH / HASSHServer fingerprints, and FoxIO
 // JA4SSH session fingerprints across all TCP flows in the capture.
+// Message parsing in each direction stops at its first known TCP sequence gap.
+// JA4SSH statistics use the observed packets for the session.
 func (c *Capture) SSH(data []byte) ([]SSHRecord, error) {
 	var meta []streamMetadata
 	streams, err := collectStreams(ipFrameSource{capture: c, data: data}, 0, &meta, tcpWireNone)
@@ -188,7 +190,7 @@ func (c *Capture) SSH(data []byte) ([]SSHRecord, error) {
 	var records []SSHRecord
 	recordByStream := make([]int, len(streams))
 	for i := range streams {
-		st, _, _ := proxyStream(streams[i])
+		st, _, _ := proxyStream(meta[i].contiguousStream(streams[i]))
 		if !bytes.HasPrefix(st.Client.Data, []byte("SSH-")) && !bytes.HasPrefix(st.Server.Data, []byte("SSH-")) {
 			continue
 		}

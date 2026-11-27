@@ -49,7 +49,7 @@ type TLSClientHello struct {
 	CipherSuites       []uint16
 	CompressionMethods []uint8
 	Extensions         []uint16
-	SNI                string
+	SNI                string // Server name from the observed ClientHello.
 	ALPNs              []string
 	SupportedVersions  []uint16
 	SignatureSchemes   []uint16
@@ -57,7 +57,7 @@ type TLSClientHello struct {
 	KeyShareGroups     []uint16 // Offered non-GREASE groups in wire order, capped at MaxTLSExtensions.
 	HasSessionTicket   bool     // The session_ticket extension was offered.
 	HasPSK             bool     // The pre_shared_key extension was offered.
-	HasECH             bool     // A nonempty encrypted_client_hello extension was observed.
+	HasECH             bool     // A nonempty encrypted_client_hello extension was observed, including GREASE ECH.
 	JA4                string
 	Anomalies          TLSAnomalies
 }
@@ -154,6 +154,9 @@ type TLSHandshake struct {
 // ServerNameMatch compares the observed ClientHello DNS name with the server
 // leaf's DNS SANs using [x509.Certificate.VerifyHostname]. The second result
 // is false when the name, server leaf, or DNS SAN evidence is insufficient.
+// With ECH, the observed name can be the public name from ClientHelloOuter.
+// The result applies only to the observed name. ECH acceptance and the inner
+// server name are unavailable from this comparison.
 func (hs *TLSHandshake) ServerNameMatch() (match, known bool) {
 	if !hs.HasClientHello || len(hs.Certificates) == 0 || hs.Anomalies.InvalidCertificateDER {
 		// An invalid leaf may have been skipped while parsing the chain.
