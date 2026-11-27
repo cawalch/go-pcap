@@ -52,13 +52,7 @@ jobs:
           done
       - name: Bounded fuzz smoke tests
         if: matrix.go == 'stable'
-        shell: bash
-        run: |
-          targets=$(go test -list '^Fuzz' . | sed -n '/^Fuzz[[:alnum:]_]*$/p')
-          test -n "$targets"
-          for target in $targets; do
-            go test -run '^$' -fuzz "^${target}$" -fuzztime=10s -parallel=2 .
-          done
+        run: bash scripts/test-fuzz.sh
 
   platform-test:
     strategy:
