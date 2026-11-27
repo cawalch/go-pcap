@@ -183,6 +183,28 @@ Use `DNSOverTLS` or `DNSOverTLSFromReaderAt` for TCP/853 when traffic keys
 authenticate TLS records carrying complete length-framed messages. Rows
 identify the flow and sending direction.
 
+Use `AnalyzeDNSOverTLS` or `AnalyzeDNSOverTLSFromReaderAt` for paired
+lookups and packet evidence. The result reports each recognized TLS opening
+and both directions' TLS coverage, including missing keys and TCP gaps.
+A separate flag marks an incomplete or undersized DNS frame at the end of
+the authenticated prefix. Complete frames with invalid DNS syntax are skipped.
+
+Pairing uses the DNS ID and one echoed question within the same observed TCP
+opening and interface. Overlapping identical queries, unmatched observations,
+and unsupported layouts each have a distinct pairing result. Zone transfers
+and replies without an echoed question are unsupported. If an opening offers
+TLS early data, the scan reports TLS coverage and skips DNS framing because
+acceptance is unknown.
+
+Each query and reply carries the original packet indices for the whole
+authenticated TLS records that supplied its DNS length prefix and body.
+The result owns these slices. The message packet index marks when the
+contiguous prefix became available in capture order. Message timestamps are
+unset. The scan bounds retained DNS messages, entries, and packet references.
+
+[Runnable example](../dot_transactions_example_test.go) ·
+[Independent fixture](../testdata/dot-exchanges.md)
+
 ## Parse TLS handshakes and JA4+ fingerprints
 
 Use `ParseTLSRecords` for a directional stream or `TLS` for a capture.
