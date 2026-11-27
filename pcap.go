@@ -170,6 +170,11 @@ type Capture struct {
 	// so packets of one connection can be captured on different interfaces.
 	// Flow indices, packet totals and per-tuple reassembly limits are shared.
 	SeparateTCPInterfaces bool
+	// SeparateIPFragmentInterfaces groups UDP fragments separately on each
+	// PcapNG interface. Set it before scanning DNS or QUIC when interfaces
+	// observe independent networks. The default combines fragment observations
+	// across interfaces. Flow indices and the scan-wide fragment budget are shared.
+	SeparateIPFragmentInterfaces bool
 
 	fileSize       int64
 	declaredExtent uint64

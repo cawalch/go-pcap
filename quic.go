@@ -644,7 +644,7 @@ func (fb *quicFlowBuf) canProbe() bool {
 // Append server IDs in record order when a keyed application scan needs them.
 func scanQUIC(source ipFrameSource, serverIDs *[]quicCID) ([]QUICRecord, error) {
 	var table flowIndexTable
-	var defrag ipFragAccumulator
+	defrag := ipFragAccumulator{separateInterfaces: source.capture != nil && source.capture.SeparateIPFragmentInterfaces}
 	var flows []quicFlowBuf
 	var addresses []netip.Addr
 	addressIDs := make(map[netip.Addr]uint32)
@@ -690,7 +690,7 @@ func scanQUIC(source ipFrameSource, serverIDs *[]quicCID) ([]QUICRecord, error) 
 		registerQUICSlot(byEndpointCID, quicEndpointCID{tuple.client.addr, tuple.server, id, false}, slot)
 	}
 
-	err := source.walk(func(_ PacketRecord, frame Frame, udpPayload []byte) error {
+	err := source.walk(func(pkt PacketRecord, frame Frame, udpPayload []byte) error {
 		key, _ := makeCanonicalFlowKey(frame.IPProtocol, frame.SrcAddr, frame.SrcPort, frame.DstAddr, frame.DstPort)
 		flowIdx, _, err := table.lookupOrInsert(key)
 		if err != nil {
@@ -698,7 +698,7 @@ func scanQUIC(source ipFrameSource, serverIDs *[]quicCID) ([]QUICRecord, error) 
 		}
 		if frame.mayContainUDPFragment() {
 			var ok bool
-			udpPayload, frame.SrcPort, frame.DstPort, ok = defrag.addUDPFragment(&frame, udpPayload)
+			udpPayload, frame.SrcPort, frame.DstPort, ok = defrag.addUDPFragment(&frame, udpPayload, pkt.InterfaceID)
 			if !ok {
 				return nil
 			}
