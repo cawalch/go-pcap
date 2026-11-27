@@ -8,6 +8,8 @@ import (
 
 const quicPacketNumberLimit = uint64(1) << 62
 
+var errQUICAuthentication = fmt.Errorf("%w: QUIC packet authentication failed", ErrInvalidQUIC)
+
 // QUIC1RTTDecoder authenticates short-header packets for one sending direction
 // of a QUIC connection with its initial 1-RTT keys. Initialize it with
 // [NewQUIC1RTTDecoder]. The caller tracks packet numbers and connection IDs.
@@ -116,7 +118,7 @@ func (d *QUIC1RTTDecoder) openProtected(packet []byte, pnOffset int, expectedPac
 	nonce := xorTLS13Nonce(keys.iv, packetNumber)
 	plaintext, err := keys.aead.Open(work[headerLen:][:0], nonce[:], packet[headerLen:], aad)
 	if err != nil {
-		return 0, 0, nil, fmt.Errorf("%w: QUIC packet authentication failed", ErrInvalidQUIC)
+		return 0, 0, nil, errQUICAuthentication
 	}
 	if firstByte&forbiddenBits != 0 {
 		return 0, 0, nil, fmt.Errorf("%w: invalid protected QUIC header bits", ErrInvalidQUIC)

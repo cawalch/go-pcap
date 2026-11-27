@@ -42,14 +42,16 @@ reports `TLSCoverageMissingKey`. Failed record authentication has a separate
 `TLSCoverageAuthenticationFailed` boundary. A missing hello can leave no
 opening to diagnose.
 
-For QUIC, `Capture.QUIC` shows the selected suite and ClientHello random when
-the Initial exchange is available. `Capture.TLSKeyLog` lets callers check for
-a matching secret. `Capture.KeyedQUICWithALPN` and `Capture.DoQTransactions`
-return no rows in the ChaCha20 case, even with the matching keys. An empty
-result also occurs with missing keys, missing Initial context, or failed
-authentication. `NewQUIC1RTTDecoder` describes unsupported protection in its
-error, which wraps the same `ErrInvalidQUIC` sentinel used for invalid context
-and failed authentication.
+For QUIC, `Capture.AnalyzeKeyedQUIC` reports `QUICProtectionUnsupported`
+for the selected ChaCha20 suite. Removing keys from the AES control reports
+`QUICProtectionMissingKey` for each missing directional secret. The wrong-key
+control reports `QUICProtectionAuthenticationFailed` for a uniquely attempted
+AEAD failure. The cause of a failed attempt can remain unknown. If the scan
+recovers the ClientHello and has no final ServerHello, it reports
+`QUICProtectionHandshakeUnavailable`. An ambiguous association or an opaque
+packet without an authentication attempt can leave the state unknown.
+Authenticated protection confirms some packets and can still yield zero
+recognizable transactions.
 
 TShark 4.6.10 found seven ServerHellos across the 11 checked-in
 [deployment fixtures](../testdata/deployments/README.md). All seven selected
@@ -65,5 +67,5 @@ support would require revisiting the runtime dependency decision for those
 primitives.
 
 ```sh
-go test -count=1 -run 'CipherCoverage|QUIC1RTT|TestKeyedHTTP1Analysis$' .
+go test -count=1 -run 'CipherCoverage|QUIC1RTT|KeyedQUICProtectionCoverage|TestKeyedHTTP1Analysis$' .
 ```

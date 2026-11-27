@@ -70,6 +70,7 @@ type KeyedHTTP3Transaction struct {
 // KeyedHTTP3Transactions recovers request stream evidence on connections with
 // an authenticated "h3" selection. Rows follow connection and stream ID order.
 // Key selection and packet association follow [Capture.KeyedQUICWithALPN].
+// Use [Capture.AnalyzeKeyedQUIC] when protection coverage is also needed.
 // A scan or aggregate resource error returns no rows.
 func (c *Capture) KeyedHTTP3Transactions(data, extraKeyLog []byte) ([]KeyedHTTP3Transaction, error) {
 	records, err := c.KeyedQUICWithALPN(data, extraKeyLog)

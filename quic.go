@@ -627,6 +627,7 @@ func registerQUICSlot[K comparable](m map[K]int, key K, slot int) {
 type quicFlowBuf struct {
 	key             quicExchangeKey
 	flowIndex       int
+	firstPacket     int
 	hasRetry, hasVN bool
 	retryID         quicCID
 	serverID        quicCID
@@ -647,8 +648,13 @@ func (fb *quicFlowBuf) canProbe() bool {
 	return fb.count+fb.failedProbes < MaxQUICPacketsPerFlow
 }
 
-// Append server IDs in record order when a keyed application scan needs them.
-func scanQUIC(source ipFrameSource, serverIDs *[]quicCID) ([]QUICRecord, error) {
+type quicInitialContext struct {
+	serverID    quicCID
+	packetIndex int
+}
+
+// Append association context in record order for keyed scans.
+func scanQUIC(source ipFrameSource, contexts *[]quicInitialContext) ([]QUICRecord, error) {
 	var table flowIndexTable
 	defrag := ipFragAccumulator{separateInterfaces: source.capture != nil && source.capture.SeparateIPFragmentInterfaces}
 	var flows []quicFlowBuf
@@ -833,7 +839,7 @@ func scanQUIC(source ipFrameSource, serverIDs *[]quicCID) ([]QUICRecord, error) 
 				return fmt.Errorf("%w: exceeds %d QUIC exchanges", ErrQUICLimit, MaxQUICFlowsPerScan)
 			}
 			slot = len(flows)
-			flows = append(flows, quicFlowBuf{key: initial, flowIndex: flowIdx})
+			flows = append(flows, quicFlowBuf{key: initial, flowIndex: flowIdx, firstPacket: pkt.Index})
 			client = true
 		}
 
@@ -892,7 +898,7 @@ func scanQUIC(source ipFrameSource, serverIDs *[]quicCID) ([]QUICRecord, error) 
 		hs.HasVersionNegotiation = fb.hasVN
 		var serverID quicCID
 		var idOut *quicCID
-		if serverIDs != nil {
+		if contexts != nil {
 			idOut = &serverID
 		}
 		// Optionally decrypt server Initial packets using the active client DCID.
@@ -903,8 +909,8 @@ func scanQUIC(source ipFrameSource, serverIDs *[]quicCID) ([]QUICRecord, error) 
 				hs.Anomalies = mergeTLSAnomalies(hs.Anomalies, sh.Anomalies)
 			}
 		}
-		if serverIDs != nil {
-			*serverIDs = append(*serverIDs, serverID)
+		if contexts != nil {
+			*contexts = append(*contexts, quicInitialContext{serverID: serverID, packetIndex: fb.firstPacket})
 		}
 		records = append(records, QUICRecord{
 			FlowIndex: fb.flowIndex,

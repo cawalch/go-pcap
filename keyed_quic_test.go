@@ -261,26 +261,34 @@ func TestKeyedQUICRequiresUniqueAuthentication(t *testing.T) {
 	}
 	f := Frame{SrcAddr: netip.MustParseAddr("192.0.2.1"), DstAddr: netip.MustParseAddr("192.0.2.2"), SrcPort: 45678, DstPort: 4433}
 	path := keyedQUICPaths(f)[0]
-	a := quicKeyedDirection{decoder: decoder}
-	b := quicKeyedDirection{decoder: decoder}
+	aCoverage := QUICProtectionObservation{PacketIndex: -1}
+	bCoverage := aCoverage
+	a := quicKeyedDirection{decoder: decoder, coverage: &aCoverage}
+	b := quicKeyedDirection{decoder: decoder, coverage: &bCoverage}
 	key := quicKeyedCID{path: path, cid: makeQUICCID(v.DestinationCID)}
 	s := quicKeyedScan{
 		lengths:    map[quicKeyedPath]uint32{path: 1 << len(v.DestinationCID)},
 		candidates: map[quicKeyedCID][]*quicKeyedDirection{key: {&a, &b}},
 	}
-	if match, _, _, payload, err := s.authenticate(f, v.Packet, false); match != nil || payload != nil || err != nil {
+	if match, _, _, payload, err := s.authenticate(0, f, v.Packet, false); match != nil || payload != nil || err != nil {
 		t.Fatalf("ambiguous packet: %v, %x, %v", match, payload, err)
 	}
 	b.decoder, err = NewQUIC1RTTKeyTracker(v.Version, v.CipherSuite, make([]byte, 32))
 	if err != nil {
 		t.Fatal(err)
 	}
-	if match, number, _, payload, err := s.authenticate(f, v.Packet, false); match != &a || number != v.PacketNumber ||
+	if match, number, _, payload, err := s.authenticate(0, f, v.Packet, false); match != &a || number != v.PacketNumber ||
 		!bytes.Equal(payload, v.Plaintext) || err != nil {
 		t.Fatalf("unique authentication: %v, %d, %x, %v", match, number, payload, err)
 	}
+	// Two candidates that both fail cannot supply a connection-specific outcome.
+	a.decoder = b.decoder
+	if match, _, _, _, err := s.authenticate(0, f, v.Packet, false); match != nil || err != nil ||
+		aCoverage.State != QUICProtectionUnknown || bCoverage.State != QUICProtectionUnknown {
+		t.Fatalf("ambiguous failure was attributed: %+v, %+v, %v", aCoverage, bCoverage, err)
+	}
 	s.probes = MaxKeyedQUICProbes
-	if _, _, _, _, err := s.authenticate(f, v.Packet, false); !errors.Is(err, ErrQUICLimit) {
+	if _, _, _, _, err := s.authenticate(0, f, v.Packet, false); !errors.Is(err, ErrQUICLimit) {
 		t.Fatalf("probe limit: %v", err)
 	}
 }
@@ -306,12 +314,12 @@ func TestKeyedQUICZeroCIDRequiresTuple(t *testing.T) {
 		lengths:    map[quicKeyedPath]uint32{path: 1},
 		candidates: map[quicKeyedCID][]*quicKeyedDirection{{path: path, clientPort: f.SrcPort}: {&dir}},
 	}
-	match, number, _, _, err := s.authenticate(f, v.Packet, false)
+	match, number, _, _, err := s.authenticate(0, f, v.Packet, false)
 	if err != nil || match != &dir || number != v.PacketNumber {
 		t.Fatalf("exact tuple: %v, %d, %v", match, number, err)
 	}
 	f.SrcPort++
-	if match, _, _, _, err := s.authenticate(f, v.Packet, false); match != nil || err != nil || s.probes != 1 {
+	if match, _, _, _, err := s.authenticate(0, f, v.Packet, false); match != nil || err != nil || s.probes != 1 {
 		t.Fatalf("changed tuple: %v, %v, %d probes", match, err, s.probes)
 	}
 }
@@ -328,7 +336,7 @@ func TestKeyedQUICReaderAtSharedBudget(t *testing.T) {
 	}
 	budget := scanReadBudget{r: bytes.NewReader(raw), remaining: m.bytesRead}
 	source := ipFrameSource{capture: c, reader: &budget, needsPayload: quicInitialPayload}
-	rows, err := scanKeyedQUIC(source, keys, false)
+	rows, err := scanKeyedQUIC(source, keys, false, nil)
 	if rows != nil || !errors.Is(err, ErrPacketLimit) || budget.remaining != 0 {
 		t.Fatalf("shared budget = %+v, %v, %d bytes left", rows, err, budget.remaining)
 	}

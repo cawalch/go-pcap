@@ -3,7 +3,8 @@
 ## Unreleased
 
 - Add authenticated QUIC ALPN, connection-ID rotation, key updates, HTTP/3
-  transaction evidence, and ordinary DNS-over-QUIC exchanges.
+  transaction evidence, ordinary DNS-over-QUIC exchanges, and QUIC protection
+  coverage for observed Initial exchanges.
 - Attribute TLS hellos, certificate chains, and SMB commands to original
   packets. Report incomplete keyed TLS observations and reduce unrelated
   reads in seekable TLS scans.
