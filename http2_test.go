@@ -252,6 +252,8 @@ func TestHTTP2HPACKRequests(t *testing.T) {
 }
 
 func TestHTTP2HPACKBounds(t *testing.T) {
+	// Literal with an indexed name and a value length of 8,193.
+	longValue := append([]byte{0x01, 0x7f, 0x82, 0x3f}, bytes.Repeat([]byte{'a'}, MaxHTTPHeaderLineBytes+1)...)
 	for _, tc := range []struct {
 		name  string
 		data  []byte
@@ -260,6 +262,8 @@ func TestHTTP2HPACKBounds(t *testing.T) {
 		{"oversize-table", []byte{0x3f, 0xe2, 0x1f}, true},
 		{"over-field-count", bytes.Repeat([]byte{0x82}, MaxHTTPHeaders+1), true},
 		{"over-block-size", make([]byte, MaxHTTP2HeaderBlockBytes+1), true},
+		{"over-value-size", longValue, true},
+		{"truncated-overlong-value", longValue[:len(longValue)-1], false},
 		{"zero-index", []byte{0x80}, false},
 		{"bad-index", []byte{0xbe}, false},
 		{"integer-overflow", append([]byte{0xff}, bytes.Repeat([]byte{0xff}, 16)...), false},

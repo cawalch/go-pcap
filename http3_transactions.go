@@ -8,6 +8,8 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+
+	"github.com/cawalch/go-pcap/internal/hpackwire"
 )
 
 // Aggregate limits for a keyed HTTP/3 transaction scan.
@@ -134,10 +136,10 @@ func (d *http3Direction) decodeSections(peer *http3Direction, budget *http2Trans
 		// Without the advertised maximum, a wrapped nonzero insert count
 		// cannot be reconstructed, even if some encoder bytes were captured.
 		if !peer.settingsKnown && row.State == QPACKMalformed {
-			p := hpackInput(input[i].Data)
-			count, err := p.prefixedInteger(255)
+			p := hpackwire.Input(input[i].Data)
+			count, err := p.ReadInteger(255)
 			if err == nil && count != 0 && len(p) > 0 {
-				if _, err = p.prefixedInteger(127); err == nil {
+				if _, err = p.ReadInteger(127); err == nil {
 					row.State = QPACKBlocked
 				}
 			}

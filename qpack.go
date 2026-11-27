@@ -4,6 +4,8 @@ import (
 	"errors"
 	"fmt"
 	"io"
+
+	"github.com/cawalch/go-pcap/internal/hpackwire"
 )
 
 // Directional QPACK resource limits for one connection. A table entry costs
@@ -104,13 +106,13 @@ func decodeQPACKSections(encoder QUICStream, maxTableCapacity uint64, sections [
 		if n == MaxQUICStreamFrames {
 			return nil, ErrHTTP3Limit
 		}
-		p := hpackInput(encoder.Data[off:])
+		p := hpackwire.Input(encoder.Data[off:])
 		inst, err := scan.instruction(&p)
 		if err != nil && errors.Is(err, io.ErrUnexpectedEOF) && (!encoder.Complete || encoder.Gap || encoder.Reset) {
 			break
 		}
 		if err != nil {
-			if errors.Is(err, ErrHTTPLimit) {
+			if errors.Is(err, hpackwire.ErrStringLimit) {
 				return nil, ErrHTTP3Limit
 			}
 			return nil, fmt.Errorf("%w: QPACK encoder instruction at offset %d", ErrInvalidHTTP3, off)
@@ -140,7 +142,7 @@ type qpackScan struct {
 type qpackPending struct {
 	row  int
 	base uint64
-	body hpackInput
+	body hpackwire.Input
 }
 
 type qpackInstruction struct {
@@ -149,14 +151,14 @@ type qpackInstruction struct {
 	field    HTTPHeader
 }
 
-func (s *qpackScan) instruction(p *hpackInput) (in qpackInstruction, err error) {
+func (s *qpackScan) instruction(p *hpackwire.Input) (in qpackInstruction, err error) {
 	tag := (*p)[0]
 	if s.max == 0 {
 		return in, ErrInvalidHTTP3
 	}
 	switch {
 	case tag&0x80 != 0:
-		idx, err := p.prefixedInteger(63)
+		idx, err := p.ReadInteger(63)
 		if err != nil {
 			return in, err
 		}
@@ -164,20 +166,20 @@ func (s *qpackScan) instruction(p *hpackInput) (in qpackInstruction, err error) 
 		if err != nil {
 			return in, err
 		}
-		in.field.Value, err = p.prefixedString(127)
+		in.field.Value, err = p.ReadString(127, MaxHTTPHeaderLineBytes)
 		return in, err
 	case tag&0x40 != 0:
-		in.field.Name, err = p.prefixedString(31)
+		in.field.Name, err = p.ReadString(31, MaxHTTPHeaderLineBytes)
 		if err != nil {
 			return in, err
 		}
-		in.field.Value, err = p.prefixedString(127)
+		in.field.Value, err = p.ReadString(127, MaxHTTPHeaderLineBytes)
 	case tag&0x20 != 0:
 		in.resize = true
-		in.capacity, err = p.prefixedInteger(31)
+		in.capacity, err = p.ReadInteger(31)
 	default:
 		var idx uint64
-		idx, err = p.prefixedInteger(31)
+		idx, err = p.ReadInteger(31)
 		if err == nil {
 			in.field, err = s.relative(idx, s.inserts, false)
 		}
@@ -267,8 +269,8 @@ func (s *qpackScan) receiveBefore(encoderEnd int) {
 			row.State = QPACKLimited
 			continue
 		}
-		p := hpackInput(in.Data)
-		enc, err := p.prefixedInteger(255)
+		p := hpackwire.Input(in.Data)
+		enc, err := p.ReadInteger(255)
 		if err != nil || len(p) == 0 {
 			continue
 		}
@@ -278,7 +280,7 @@ func (s *qpackScan) receiveBefore(encoderEnd int) {
 		}
 		row.RequiredInsertCount = count
 		negative := p[0]&128 != 0
-		delta, err := p.prefixedInteger(127)
+		delta, err := p.ReadInteger(127)
 		if err != nil || delta >= 1<<62 || negative && delta >= count {
 			continue
 		}
@@ -314,7 +316,7 @@ func (s *qpackScan) decode(section qpackPending) {
 	for len(p) > 0 {
 		field, referenced, err := s.field(&p, section.base, row.RequiredInsertCount)
 		if err != nil {
-			if errors.Is(err, ErrHTTPLimit) {
+			if errors.Is(err, hpackwire.ErrStringLimit) {
 				row.State = QPACKLimited
 			}
 			return
@@ -336,7 +338,7 @@ func (s *qpackScan) decode(section qpackPending) {
 	}
 }
 
-func (s *qpackScan) field(p *hpackInput, base, required uint64) (field HTTPHeader, referenced uint64, err error) {
+func (s *qpackScan) field(p *hpackwire.Input, base, required uint64) (field HTTPHeader, referenced uint64, err error) {
 	tag := (*p)[0]
 	var mask byte
 	var static, post, literal bool
@@ -346,9 +348,9 @@ func (s *qpackScan) field(p *hpackInput, base, required uint64) (field HTTPHeade
 	case tag&64 != 0:
 		mask, static, literal = 15, tag&16 != 0, true
 	case tag&32 != 0:
-		field.Name, err = p.prefixedString(7)
+		field.Name, err = p.ReadString(7, MaxHTTPHeaderLineBytes)
 		if err == nil {
-			field.Value, err = p.prefixedString(127)
+			field.Value, err = p.ReadString(127, MaxHTTPHeaderLineBytes)
 		}
 		return field, 0, err
 	case tag&16 != 0:
@@ -356,7 +358,7 @@ func (s *qpackScan) field(p *hpackInput, base, required uint64) (field HTTPHeade
 	default:
 		mask, post, literal = 7, true, true
 	}
-	idx, err := p.prefixedInteger(mask)
+	idx, err := p.ReadInteger(mask)
 	if err != nil {
 		return field, 0, err
 	}
@@ -377,7 +379,7 @@ func (s *qpackScan) field(p *hpackInput, base, required uint64) (field HTTPHeade
 		field, err = s.absolute(referenced - 1)
 	}
 	if err == nil && literal {
-		field.Value, err = p.prefixedString(127)
+		field.Value, err = p.ReadString(127, MaxHTTPHeaderLineBytes)
 	}
 	return field, referenced, err
 }

@@ -161,6 +161,22 @@ func TestQPACKEncoderErrors(t *testing.T) {
 	}
 }
 
+func TestQPACKStringLimit(t *testing.T) {
+	// A value length of 8,193 fits the field section and connection limits.
+	value := append([]byte{0x7f, 0x82, 0x3f}, bytes.Repeat([]byte{'a'}, MaxHTTPHeaderLineBytes+1)...)
+	field := QPACKSectionInput{Data: append([]byte{0, 0, 0x50}, value...)}
+	rows, err := DecodeQPACKSections(QUICStream{}, 0, []QPACKSectionInput{field})
+	if err != nil || len(rows) != 1 || rows[0].State != QPACKLimited || len(rows[0].Headers) != 0 {
+		t.Fatalf("oversized field value: %+v, %v", rows, err)
+	}
+
+	encoder := QUICStream{ID: 2, Data: append([]byte{2, 0xc0}, value...), Complete: true}
+	rows, err = DecodeQPACKSections(encoder, MaxQPACKTableBytes, nil)
+	if rows != nil || !errors.Is(err, ErrHTTP3Limit) {
+		t.Fatalf("oversized encoder value: %+v, %v", rows, err)
+	}
+}
+
 func TestQPACKAioquicCapture(t *testing.T) {
 	// Synthetic aioquic 1.3.0 capture and TShark 4.6.10's decoded fields.
 	raw, err := os.ReadFile("testdata/http3-framing.pcapng")
