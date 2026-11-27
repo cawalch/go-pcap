@@ -108,14 +108,16 @@ func isRDPNegotiationRecord(srcPort, dstPort uint16, neg RDPNegotiation) bool {
 
 // RDP extracts RDP TPKT / X.224 negotiation PDUs across all reassembled TCP
 // streams in the capture.
+// Message parsing in each direction stops at its first known TCP sequence gap.
 func (c *Capture) RDP(data []byte) ([]RDPRecord, error) {
-	streams, err := c.Streams(data)
+	var meta []streamMetadata
+	streams, err := collectStreams(ipFrameSource{capture: c, data: data}, 0, &meta, tcpWireNone)
 	if err != nil {
 		return nil, err
 	}
 	var records []RDPRecord
 	for i := range streams {
-		st, _, _ := proxyStream(streams[i])
+		st, _, _ := proxyStream(meta[i].contiguousStream(streams[i]))
 		for dir, data := range [2][]byte{st.Client.Data, st.Server.Data} {
 			if len(data) < 11 || data[0] != 0x03 || data[1] != 0x00 {
 				continue

@@ -1550,6 +1550,8 @@ HTTP/2 extended CONNECT and WebSocket extension decoding are outside this API.
 Call `ParseSSHHandshake(clientStream, serverStream)` or `capture.SSH(data)` to
 extract SSH version banners, `SSH_MSG_KEXINIT` algorithm lists, `HASSH` /
 `HASSHServer` MD5 fingerprints, and FoxIO `JA4SSH` session fingerprints.
+The capture scan stops parsing each direction at its first known TCP
+sequence gap. JA4SSH uses the observed packets for the session.
 
 ## Parse SMB2, NTLMSSP, Kerberos v5, and RDP messages
 
@@ -1560,7 +1562,8 @@ Type 3 tokens (server challenge, target/domain/user/workstation strings, and
 NetBIOS/DNS computer and domain names from target info attribute-value pairs).
 NTLM extraction examines the declared security buffer. Capture walks can skip
 NetBIOS keep-alives, SMB1 negotiation, and complete oversized data frames to
-reach later SMB2 commands on the same connection.
+reach later SMB2 commands on the same connection. The scan stops each
+direction at its first known TCP sequence gap.
 
 For a `TREE_CONNECT` request, `Message.ShareName` gives the full UNC path.
 For a `CREATE` request, `Message.FileName` gives the wire name, including a
@@ -1594,7 +1597,8 @@ message to the packet containing the first byte of its four-byte record mark.
 Call `ParseRDPNegotiation(buf)` or `capture.RDP(data)` to decode TPKT / X.224
 Connection Request and Connection Confirm PDUs, `Cookie: mstshash=...` tokens,
 and `RDP_NEG_REQ` / `RDP_NEG_RSP` security protocol flags (`RDPProtoTLS`,
-`RDPProtoCredSSP`, `RDPProtoHybridEx`).
+`RDPProtoCredSSP`, `RDPProtoHybridEx`). The capture scan stops parsing each
+direction at its first known TCP sequence gap.
 
 ## Parse LDAP requests
 
