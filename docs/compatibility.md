@@ -6,6 +6,10 @@ during v0.x. A deliberate breaking change requires a minor release and a
 changelog entry. Use keyed literals for exported structs so new fields can
 be added compatibly.
 
+Use the [capture analysis capability matrix](capabilities.md) to compare
+released and checkout support, locate fixture evidence, and check the
+boundary of each analysis.
+
 ## Record order
 
 - `PacketSeq`, `Packets`, and their ReaderAt counterparts enumerate complete
