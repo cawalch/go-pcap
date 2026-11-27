@@ -736,3 +736,25 @@ func ExampleCapture_KeyedQUICWithALPN() {
 	}
 	// Output: offered [h3 doq fixture], selected doq in packet indices [1]
 }
+func ExampleDecodeQPACKSections() {
+	// A complete request HEADERS frame with a static QPACK GET field.
+	stream := pcap.QUICStream{ID: 4, Data: []byte{1, 3, 0, 0, 0xd1}, Complete: true}
+	framing, err := pcap.ParseHTTP3Stream(stream)
+	if err != nil {
+		log.Fatal(err)
+	}
+	frame := framing.Frames[0]
+	input := pcap.QPACKSectionInput{StreamID: stream.ID, Offset: frame.PayloadOffset,
+		Data: stream.Data[frame.PayloadOffset : frame.PayloadOffset+frame.PayloadLength]}
+	sections, err := pcap.DecodeQPACKSections(pcap.QUICStream{}, 0, []pcap.QPACKSectionInput{input})
+	if err != nil {
+		log.Fatal(err)
+	}
+	section := sections[0]
+	if section.State == pcap.QPACKDecoded {
+		for _, field := range section.Headers {
+			fmt.Printf("stream %d offset %d %s %s\n", section.StreamID, section.Offset, field.Name, field.Value)
+		}
+	}
+	// Output: stream 4 offset 2 :method GET
+}

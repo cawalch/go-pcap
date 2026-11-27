@@ -1105,6 +1105,49 @@ returns `ErrHTTP3Limit` and a zero result.
 [HTTP/3 framing](https://www.rfc-editor.org/rfc/rfc9114.html#section-7) ·
 [Runnable example](../http3_test.go)
 
+### Decode HTTP/3 QPACK field sections
+
+Use `DecodeQPACKSections` once per sender of a known HTTP/3 connection.
+Pass the sender's QPACK encoder stream, including its type, and the maximum
+table capacity advertised by the peer's SETTINGS. The initial capacity is
+zero. A missing SETTINGS capture can leave the negotiated maximum unknown.
+Static sections with a zero Required Insert Count can be decoded independently
+using an empty encoder and zero capacity.
+
+Build one `QPACKSectionInput` for each complete compressed field section.
+For HEADERS, use the frame's payload offset and bytes. For PUSH_PROMISE,
+skip the QUIC variable-length Push ID and advance the offset accordingly.
+Supply sections in observed arrival order. Set each `EncoderOffset` to the
+length of the contiguous encoder-stream prefix at that point, counting the
+stream type. Encoder instructions can arrive after the referencing section.
+In long captures, the encoded insert count wraps. Correct reconstruction
+requires the observed encoder progress when the section arrived.
+
+Each result preserves the input stream ID, offset and compressed length.
+For a decoded dynamic section, the output `EncoderOffset` ends the encoder
+prefix in effect at decoding. It can extend beyond the section's arrival and
+include table updates used by other sections.
+`QPACKDecoded` supplies ordered, duplicate-preserving name/value pairs.
+`QPACKBlocked` identifies missing inserts, including an encoder prefix
+that ends at a gap. `QPACKMalformed` covers a malformed section, an evicted
+reference or an inconsistent Required Insert Count. `QPACKLimited` covers
+a section, field, output or blocked-queue limit. Only decoded sections
+expose header strings. A malformed encoder instruction returns
+`ErrInvalidHTTP3`. A complete instruction before a gap remains usable.
+
+One directional call accepts 8 MiB of total input, a 4 MiB encoder stream,
+16,384 sections and 16,384 encoder instructions. The dynamic table retains
+up to 64 KiB, including the 32-byte cost per entry (at most 2,048 entries).
+Up to 64 blocked sections totaling 256 KiB can wait for inserts. Each is
+retried once when its required count is reached. The compressed section,
+field count, per-string size and total decoded field limits match the HTTP/2
+limits. Decoded work is charged even if a later field invalidates a section.
+Results cover compression. HTTP field semantics and packet attribution
+belong to the consuming stream or transaction analysis.
+[RFC 9204](https://www.rfc-editor.org/rfc/rfc9204.html) ·
+[Runnable example](../example_test.go) ·
+[RFC and aioquic capture cases](../qpack_test.go)
+
 ## Decrypt TLS 1.2 and TLS 1.3 streams offline
 
 Call `capture.DecryptedTLSStreams(data, extraKeyLog)` to decrypt TLS 1.2
