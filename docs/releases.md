@@ -15,7 +15,9 @@ requires otherwise.
 
 ## Prepare and validate a release
 
-1. For v0.1.0, verify the [release criteria](architecture.md#v010--capture-correctness-and-compatibility) and close the [milestone issues](https://github.com/cawalch/go-pcap/milestone/1) as their acceptance criteria are met.
+1. Confirm that the release issue's blockers have landed. For v0.2.0,
+   the release blockers are #260 and #262. Review the release changes
+   against v0.1.1.
 2. Review the API, [README](../README.md) example,
    [architecture guide](architecture.md), [parsing guide](parsing.md),
    [security policy](../SECURITY.md), and [MIT license](../LICENSE).
@@ -27,12 +29,16 @@ requires otherwise.
    go vet ./...
    go test -race -cover ./...
    ```
-4. From a clean checkout of the reviewed commit, create and push an annotated
-   tag once ready to publish:
+4. Run the external consumer tests in separate workspaces with v0.1.1 and
+   the candidate. Run go-yara's `go test ./compiler -run '^TestPCAP' -count=1`
+   with the candidate in its workspace. Confirm the six required hosted checks
+   and platform claims against the reviewed merge candidate.
+5. From a clean checkout of the reviewed commit, create and push an annotated
+   tag. For v0.2.0, run these commands.
    ```sh
-   git tag -a v0.1.0 -m 'Experimental MVP v0.1.0'
-   git push origin v0.1.0
+   git tag -a v0.2.0 -m 'Experimental go-pcap v0.2.0'
+   git push origin refs/tags/v0.2.0
    ```
-5. Publish a GitHub release using the existing tag and the matching changelog
-   entry. Verify the tag resolves to the reviewed commit, then close the
-   release milestone.
+6. Verify the annotated tag resolves to the reviewed commit. Publish the
+   GitHub release using the existing tag and the matching changelog entry.
+   Close the release issue once the published tag and release agree.

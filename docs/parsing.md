@@ -596,6 +596,28 @@ signatures before using these port hints. A result is a candidate for further
 parsing. `L7Unknown` can also mean the identifying bytes are incomplete or the
 capture starts after the protocol opening.
 
+### Identify fragmented TCP coverage
+
+Capture-level TCP analyzers skip segments carried in IPv4 or IPv6 fragments.
+Complete protocol records from unfragmented TCP can still appear. To identify
+this coverage limit, iterate packet references and inspect `Frame.Anomalies.IPFragment`,
+`IPProtocol`, and the fragment offset and ID. Treat a fragmented packet with
+an IPv6 extension after the Fragment header as unresolved transport until
+you have enough bytes to decode the extension chain. Bound the packet work
+in your caller when inspecting a large capture.
+
+The [fragmented TCP example](../example_framing_test.go) reports the packet
+indices where this capture contains TCP fragments, then returns TLS hellos
+from the competing unfragmented flows on either input path. A nonempty
+fragment list is a reason to leave questions about the affected traffic
+unresolved. The frame decoder exposes no TCP ports on these fragments.
+
+`DefragmentIP` can reconstruct datagram bytes after the caller groups
+fragments. The capture-level fragment collectors currently dispatch DNS and
+QUIC over UDP. Applying them to TCP would also require preserving the
+observed opening and attributing any recovered segment to all contributing
+original packets. [Independent reference](../testdata/framing/README.md#fragmented-tcp)
+
 ## Parse DNS messages and tunneling metrics
 
 Call `ParseDNS(payload)` on a single DNS message or `capture.DNS(data)` to
@@ -1000,6 +1022,9 @@ and TLS 1.3 (`CLIENT_TRAFFIC_SECRET_0` / `SERVER_TRAFFIC_SECRET_0` with
 secrets embedded in PcapNG Decryption Secrets Blocks (`DSB`) or supplied in
 `extraKeyLog` (`SSLKEYLOGFILE` format).
 
+See the [offline cipher coverage matrix](offline-crypto.md) for the exact
+TLS and QUIC suites and ways to distinguish unavailable plaintext.
+
 TLS 1.2 AES-CBC decryption supports MAC-then-encrypt and encrypt-then-MAC.
 Capture analysis uses the ServerHello extension to select the record layout.
 The directional `DecryptTLS12Records` function selects the layout from the
@@ -1140,6 +1165,40 @@ and limits GET request targets to `MaxHTTPHeaderLineBytes`.
 Check the match flag and error before using the DNS message. Inspect
 `DNSMessage.Anomalies` for partial DNS sections. Use the flow index and
 HTTP/2 stream ID to pair requests with responses. [RFC 8484](https://www.rfc-editor.org/rfc/rfc8484#section-4)
+
+### Choose TLS and QUIC key sources
+
+Pass a capture snapshot and optional key-log bytes to a keyed scan. Use a
+private value copy of the snapshot to select which sources that call can use.
+
+| Mode | Capture used for the call | Extra key-log bytes |
+| --- | --- | --- |
+| Passive without traffic secrets | Value copy with `Secrets = nil` | `nil` |
+| Embedded secrets | Original capture | `nil` |
+| External secrets | Value copy with `Secrets = nil` | External key log |
+| Combined | Original capture | External key log |
+
+```go
+externalOnly := *capture
+externalOnly.Secrets = nil
+rows, err := externalOnly.KeyedHTTP1TransactionsFromReaderAt(source, externalKeyLog)
+```
+
+Use the same immutable source bytes or seekable source for each view. Set the
+field on the copy before starting its scan. Leave the original snapshot, its
+shared slices, and the key bytes read-only during concurrent calls. Passive
+QUIC Initial analysis is still available through public Initial keys.
+
+`TLSKeyLog` reads supported embedded blocks in capture order, then the
+external key log. The last accepted line for the same client random and label
+wins. A missing label leaves that secret unavailable. Record the selected mode
+with any finding. When an isolated scan authenticates the selected evidence,
+report that source as sufficient. Both sources can independently suffice.
+In combined mode, authentication can also require keys from both sources. Keep key bytes,
+key-log entries and capture-wide secret blocks out of diagnostic output.
+
+Packet-only flow and transaction exports omit embedded secrets. To decrypt on
+reopen, provide authorized key-log bytes separately. [Capture exports](#write-captures)
 
 ## Inspect explicit proxy tunnels
 

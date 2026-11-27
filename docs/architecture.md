@@ -50,6 +50,11 @@ uses directional QUIC 1-RTT streams from a connection the caller has identified
 as HTTP/3. Scanner schemas and rule evaluation belong in the consuming
 repository. [HTTP/3 framing](parsing.md#delimit-http3-frames) · [go-yara integration](https://github.com/cawalch/go-yara/issues/646)
 
+Packet evidence and reusable measurements belong in go-pcap. Consumers set
+deployment-specific thresholds, assign scores to observed behavior and decide
+which observations trigger alerts or suppression. The existing beacon APIs
+remain available to callers upgrading to v0.2.0.
+
 ## Where to make a change
 
 | Change | Start here | Check the boundary |
