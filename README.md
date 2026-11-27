@@ -136,3 +136,5 @@ Original go-pcap code uses the [MIT license](LICENSE). JA4 TLS client
 fingerprinting uses BSD-3-Clause terms. Other JA4+ methods have separate
 terms restricting monetization. See the [third-party notices](NOTICE),
 [HPACK license](LICENSE-hpack), and [fingerprint fixture sources](testdata/foxio/README.md).
+Use the [fingerprint API inventory](docs/fingerprints.md) to see which parse
+and capture calls compute each method.
