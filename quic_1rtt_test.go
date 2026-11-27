@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"testing"
 )
@@ -102,6 +103,56 @@ func TestQUIC1RTTDecoder(t *testing.T) {
 			payload[0] ^= 0xff
 			if !bytes.Equal(v.Packet, wire) || !bytes.Equal(again, v.Plaintext) {
 				t.Fatal("wire input or another result changed")
+			}
+		})
+	}
+}
+
+func TestQUIC1RTTCipherCoverage(t *testing.T) {
+	for _, tc := range []struct {
+		fixture     string
+		suite       uint16
+		connections int
+		rows        int
+	}{
+		{"doq-exchanges", TLS_AES_128_GCM_SHA256, 1, 2},
+		{"doq-chacha20", tls.TLS_CHACHA20_POLY1305_SHA256, 0, 0},
+	} {
+		t.Run(tc.fixture, func(t *testing.T) {
+			raw, err := os.ReadFile("testdata/" + tc.fixture + ".pcap")
+			if err != nil {
+				t.Fatal(err)
+			}
+			keys, err := os.ReadFile("testdata/" + tc.fixture + ".keys")
+			if err != nil {
+				t.Fatal(err)
+			}
+			capture, err := New(raw)
+			if err != nil {
+				t.Fatal(err)
+			}
+			hello := checkReaderParity(t, raw, capture.QUIC, capture.QUICFromReaderAt)
+			if len(hello) != 1 || !hello[0].Handshake.HasServerHello || hello[0].Handshake.ServerHello.CipherSuite != tc.suite {
+				t.Fatalf("Initial scan for suite %#04x returned %+v", tc.suite, hello)
+			}
+			keyLog, err := capture.TLSKeyLog(keys)
+			if err != nil {
+				t.Fatal(err)
+			}
+			entry := keyLog.Entries[hello[0].Handshake.ClientHello.Random]
+			if len(entry.ClientTrafficSecret0) != 32 || len(entry.ServerTrafficSecret0) != 32 || len(entry.ServerHandshakeSecret) != 32 {
+				t.Fatal("fixture lacks matching QUIC secrets")
+			}
+			connections, err := capture.KeyedQUICWithALPN(raw, keys)
+			if err != nil || len(connections) != tc.connections {
+				t.Fatalf("got %d keyed QUIC connections, want %d, err=%v", len(connections), tc.connections, err)
+			}
+			rows := checkReaderParity(t, raw,
+				func(data []byte) ([]DoQTransaction, error) { return capture.DoQTransactions(data, keys) },
+				func(r io.ReaderAt) ([]DoQTransaction, error) { return capture.DoQTransactionsFromReaderAt(r, keys) },
+			)
+			if len(rows) != tc.rows {
+				t.Fatalf("got %d DoQ transactions, want %d", len(rows), tc.rows)
 			}
 		})
 	}

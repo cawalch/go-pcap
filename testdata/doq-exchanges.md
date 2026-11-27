@@ -31,3 +31,21 @@ temporary certificate and key.
 ```sh
 python3 testdata/check_doq_resolver.py "$fixture_dir/cert.pem" "$fixture_dir/key.pem"
 ```
+
+## ChaCha20-Poly1305 comparison
+
+Regenerate `doq-chacha20.pcap` and `doq-chacha20.keys` with the same generator
+and certificate. The endpoints verify the selected suite and both DNS
+exchanges.
+
+```sh
+python3 testdata/generate_doq.py testdata "$fixture_dir/cert.pem" "$fixture_dir/key.pem" --chacha20
+tshark -n -o "tls.keylog_file:$PWD/testdata/doq-chacha20.keys" \
+  -r testdata/doq-chacha20.pcap -Y 'tls.handshake.type == 2 || dns' -T fields \
+  -e frame.number -e tls.handshake.ciphersuite -e quic.stream.stream_id \
+  -e dns.qry.name -e dns.a
+```
+
+TShark 4.6.10 reports suite `0x1303` on frame 2. It reports the same queries,
+stream IDs, and replies as the AES-GCM capture. The query frames are 7 and 8,
+and the reply frames are 9 and 10.
