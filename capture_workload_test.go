@@ -43,7 +43,7 @@ func (r *workloadReader) ReadAt(p []byte, off int64) (int, error) {
 // Mirror a file-backed consumer that preserves the Fd capability across its
 // cancellation wrapper. The library uses that capability to enable prefetch.
 type workloadFile struct {
-	*workloadReader
+	io.ReaderAt
 	file *os.File
 }
 
@@ -128,8 +128,13 @@ func workloadCapture(b testing.TB, mixed bool) []byte {
 }
 
 func BenchmarkEmbeddedCaptureWorkload(b *testing.B) {
-	for _, input := range []string{"tiny", "mixed"} {
-		raw := workloadCapture(b, input == "mixed")
+	for _, input := range []string{"tiny", "mixed", "dense"} {
+		var raw []byte
+		if input == "dense" {
+			raw = denseWorkloadCapture(b)
+		} else {
+			raw = workloadCapture(b, input == "mixed")
+		}
 		path := filepath.Join(b.TempDir(), input+".pcapng")
 		if err := os.WriteFile(path, raw, 0600); err != nil {
 			b.Fatal(err)
@@ -149,7 +154,7 @@ func BenchmarkEmbeddedCaptureWorkload(b *testing.B) {
 				if source == "file" {
 					base = disk
 				}
-				for _, mode := range []string{"dns", "tls", "all", "parallel"} {
+				for _, mode := range []string{"dns", "tls", "all", "parallel", "shared"} {
 					b.Run(mode, func(b *testing.B) {
 						benchmarkWorkload(b, base, int64(len(raw)), mode)
 					})
@@ -186,26 +191,28 @@ func benchmarkWorkload(b *testing.B, base io.ReaderAt, size int64, mode string) 
 	b.ReportAllocs()
 	for b.Loop() {
 		opened := &workloadReader{ReaderAt: base, ctx: context.Background()}
-		inputFor := func(r *workloadReader) io.ReaderAt {
-			if f, ok := base.(*os.File); ok {
-				return workloadFile{workloadReader: r, file: f}
-			}
-			return r
+		input := workloadWithFD(base, opened)
+		if mode == "shared" {
+			cache := newWorkloadReadCache(opened, pcap.MaxReaderAtScanBytes)
+			input = workloadWithFD(base, cache)
 		}
-		c, err := pcap.NewFromReaderAt(inputFor(opened), size)
+		c, err := pcap.NewFromReaderAt(input, size)
 		if err != nil {
 			b.Fatal(err)
 		}
-		calls += opened.calls
-		bytesRead += opened.readBytes
 		var results [len(workloadScans)]struct {
 			n, calls, readBytes int64
 			err                 error
 		}
 		run := func(i int, scan workloadScan) {
-			reader := &workloadReader{ReaderAt: base, ctx: context.Background()}
-			n, err := scan(c, inputFor(reader))
 			result := &results[i]
+			if mode == "shared" {
+				n, err := scan(c, input)
+				result.n, result.err = int64(n), err
+				return
+			}
+			reader := &workloadReader{ReaderAt: base, ctx: context.Background()}
+			n, err := scan(c, workloadWithFD(base, reader))
 			result.n, result.calls, result.readBytes, result.err = int64(n), reader.calls, reader.readBytes, err
 		}
 		if mode == "parallel" {
@@ -219,6 +226,8 @@ func benchmarkWorkload(b *testing.B, base io.ReaderAt, size int64, mode string) 
 				run(i, scan)
 			}
 		}
+		calls += opened.calls
+		bytesRead += opened.readBytes
 		for _, result := range results[:len(operations)] {
 			if result.err != nil {
 				b.Fatal(result.err)
@@ -231,6 +240,13 @@ func benchmarkWorkload(b *testing.B, base io.ReaderAt, size int64, mode string) 
 	b.ReportMetric(float64(calls)/float64(b.N), "reads/op")
 	b.ReportMetric(float64(bytesRead)/float64(b.N), "read-B/op")
 	b.ReportMetric(float64(rows)/float64(b.N), "rows/op")
+}
+
+func workloadWithFD(base, reader io.ReaderAt) io.ReaderAt {
+	if f, ok := base.(*os.File); ok {
+		return workloadFile{ReaderAt: reader, file: f}
+	}
+	return reader
 }
 
 func TestEmbeddedCaptureWorkloadCancellation(t *testing.T) {
