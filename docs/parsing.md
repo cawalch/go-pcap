@@ -969,7 +969,10 @@ cipher suite from the observed Initial exchange. Look up
 `Handshake.ClientHello.Random` in `Capture.TLSKeyLog(extraKeyLog)` and pass
 the sender's `ClientTrafficSecret0` or `ServerTrafficSecret0`. Create a decoder
 for each direction you want to read. Each decoder covers the first
-application key generation.
+application key generation. Use `NewQUIC1RTTKeyTracker` for one sending
+direction when you need to follow authenticated key updates. The tracker
+returns an application key generation with each authenticated packet and
+keeps the immediately preceding key for reordered packets.
 
 Pass a complete short-header packet to `Open` with its full destination
 connection ID and the expected packet number for that sender. A short-header
@@ -1034,7 +1037,7 @@ long headers. Take the `Payload` fields from one sender when calling
 `ReassembleQUIC1RTTStreams`.
 
 Association covers complete UDP datagrams for QUIC v1/v2 with the decoder's
-initial AES-GCM traffic keys. An authenticated `NEW_CONNECTION_ID` makes
+AES-GCM traffic keys. An authenticated `NEW_CONNECTION_ID` makes
 the issued ID eligible for subsequent packets in the opposite direction.
 `RETIRE_CONNECTION_ID` removes that ID for packets with the same or higher
 sender packet number. An older packet observed afterward can still authenticate.
@@ -1051,6 +1054,15 @@ The scan retains at most 16 active and 64 historical IDs per direction and
 16,384 learned sequence numbers across all connections. One packet can carry
 up to 64 ID operations. All original and rotated IDs share the authentication
 attempt and byte budgets.
+
+A uniquely authenticated transition advances key generation in that
+direction and retains the immediately previous keys for delayed packets.
+Missing an entire generation or delaying a packet by more than one
+generation can leave it opaque. Each authenticated packet reports
+`KeyGeneration`. A transition above 32 authenticated updates returns
+`ErrQUICLimit`.
+[RFC 9001 key updates](https://www.rfc-editor.org/rfc/rfc9001.html#section-6) ·
+[Independent endpoint test](../testdata/quic-key-updates.md)
 
 ReaderAt metadata and payload reads share the same 64 MiB budget across both
 passes. The scan limits authentication to 16,384 attempts and 64 MiB of

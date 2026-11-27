@@ -255,7 +255,7 @@ func TestKeyedQUICRequiresUniqueAuthentication(t *testing.T) {
 		t.Fatal(err)
 	}
 	v := vectors[0]
-	decoder, err := v.decoder()
+	decoder, err := v.tracker()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -268,19 +268,19 @@ func TestKeyedQUICRequiresUniqueAuthentication(t *testing.T) {
 		lengths:    map[quicKeyedPath]uint32{path: 1 << len(v.DestinationCID)},
 		candidates: map[quicKeyedCID][]*quicKeyedDirection{key: {&a, &b}},
 	}
-	if match, _, payload, err := s.authenticate(f, v.Packet); match != nil || payload != nil || err != nil {
+	if match, _, _, payload, err := s.authenticate(f, v.Packet); match != nil || payload != nil || err != nil {
 		t.Fatalf("ambiguous packet: %v, %x, %v", match, payload, err)
 	}
-	b.decoder, err = NewQUIC1RTTDecoder(v.Version, v.CipherSuite, make([]byte, 32))
+	b.decoder, err = NewQUIC1RTTKeyTracker(v.Version, v.CipherSuite, make([]byte, 32))
 	if err != nil {
 		t.Fatal(err)
 	}
-	if match, number, payload, err := s.authenticate(f, v.Packet); match != &a || number != v.PacketNumber ||
+	if match, number, _, payload, err := s.authenticate(f, v.Packet); match != &a || number != v.PacketNumber ||
 		!bytes.Equal(payload, v.Plaintext) || err != nil {
 		t.Fatalf("unique authentication: %v, %d, %x, %v", match, number, payload, err)
 	}
 	s.probes = MaxKeyedQUICProbes
-	if _, _, _, err := s.authenticate(f, v.Packet); !errors.Is(err, ErrQUICLimit) {
+	if _, _, _, _, err := s.authenticate(f, v.Packet); !errors.Is(err, ErrQUICLimit) {
 		t.Fatalf("probe limit: %v", err)
 	}
 }
@@ -295,7 +295,7 @@ func TestKeyedQUICZeroCIDRequiresTuple(t *testing.T) {
 		t.Fatal("missing zero-CID vector")
 	}
 	v := vectors[i]
-	decoder, err := v.decoder()
+	decoder, err := v.tracker()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -306,12 +306,12 @@ func TestKeyedQUICZeroCIDRequiresTuple(t *testing.T) {
 		lengths:    map[quicKeyedPath]uint32{path: 1},
 		candidates: map[quicKeyedCID][]*quicKeyedDirection{{path: path, clientPort: f.SrcPort}: {&dir}},
 	}
-	match, number, _, err := s.authenticate(f, v.Packet)
+	match, number, _, _, err := s.authenticate(f, v.Packet)
 	if err != nil || match != &dir || number != v.PacketNumber {
 		t.Fatalf("exact tuple: %v, %d, %v", match, number, err)
 	}
 	f.SrcPort++
-	if match, _, _, err := s.authenticate(f, v.Packet); match != nil || err != nil || s.probes != 1 {
+	if match, _, _, _, err := s.authenticate(f, v.Packet); match != nil || err != nil || s.probes != 1 {
 		t.Fatalf("changed tuple: %v, %v, %d probes", match, err, s.probes)
 	}
 }

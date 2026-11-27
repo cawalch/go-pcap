@@ -84,7 +84,7 @@ func TestKeyedQUICCIDLifecycle(t *testing.T) {
 	newScan := func() (*quicKeyedScan, *quicKeyedDirection) {
 		s := &quicKeyedScan{lengths: make(map[quicKeyedPath]uint32), candidates: make(map[quicKeyedCID][]*quicKeyedDirection)}
 		initial := makeQUICCID([]byte{0xa0})
-		dir := &quicKeyedDirection{initial: quicKeyedCID{cid: initial}, decoder: &QUIC1RTTDecoder{}, packetCID: initial}
+		dir := &quicKeyedDirection{initial: quicKeyedCID{cid: initial}, decoder: &QUIC1RTTKeyTracker{}, packetCID: initial}
 		return s, dir
 	}
 	add := func(seq, prior uint64, id byte) quicCIDChange {
@@ -146,7 +146,7 @@ func TestKeyedQUICCIDLifecycle(t *testing.T) {
 		})
 	}
 	s, d = newScan()
-	d.peer = &quicKeyedDirection{decoder: &QUIC1RTTDecoder{}}
+	d.peer = &quicKeyedDirection{decoder: &QUIC1RTTKeyTracker{}}
 	// A peer that originally issued an empty CID cannot issue a replacement.
 	newFrame := append([]byte{0x18, 1, 0, 1, 0xab}, bytes.Repeat([]byte{5}, 16)...)
 	if err := s.observeCIDs(d, 1, newFrame); err != nil || d.peer.ids != nil {
@@ -160,7 +160,7 @@ func TestKeyedQUICLearnedCIDRequiresUniqueAuthentication(t *testing.T) {
 		t.Fatal(err)
 	}
 	v := vectors[0]
-	decoder, err := v.decoder()
+	decoder, err := v.tracker()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -174,11 +174,11 @@ func TestKeyedQUICLearnedCIDRequiresUniqueAuthentication(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	if dir, _, _, err := s.authenticate(f, v.Packet); err != nil || dir != nil || s.probes != 2 {
+	if dir, _, _, _, err := s.authenticate(f, v.Packet); err != nil || dir != nil || s.probes != 2 {
 		t.Fatalf("authenticated twice: dir=%v probes=%d err=%v", dir, s.probes, err)
 	}
 	s.probes = MaxKeyedQUICProbes - 1
-	if _, _, _, err := s.authenticate(f, v.Packet); !errors.Is(err, ErrQUICLimit) {
+	if _, _, _, _, err := s.authenticate(f, v.Packet); !errors.Is(err, ErrQUICLimit) {
 		t.Fatalf("shared probe limit: %v", err)
 	}
 }

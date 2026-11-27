@@ -18,10 +18,11 @@ const (
 // QUIC1RTTPacket holds owned, authenticated frame bytes and their capture
 // provenance. UDPOffset is the short header's offset within the UDP payload.
 type QUIC1RTTPacket struct {
-	PacketIndex  int
-	UDPOffset    int
-	PacketNumber uint64
-	Payload      []byte
+	PacketIndex   int
+	UDPOffset     int
+	PacketNumber  uint64
+	KeyGeneration uint8 // Authenticated application key generation, starting at zero.
+	Payload       []byte
 }
 
 // KeyedQUICRecord associates 1-RTT packets in capture order with the
@@ -87,7 +88,7 @@ type quicKeyedDirection struct {
 	initial   quicKeyedCID
 	packetCID quicCID
 	ids       *quicCIDHistory
-	decoder   *QUIC1RTTDecoder
+	decoder   *QUIC1RTTKeyTracker
 	expected  uint64
 	packets   []QUIC1RTTPacket
 	bytes     int
@@ -179,7 +180,7 @@ func (s *quicKeyedScan) register(path quicKeyedPath, clientPort uint16, cid quic
 	if len(secret) == 0 {
 		return
 	}
-	decoder, err := NewQUIC1RTTDecoder(hs.Version, hs.ServerHello.CipherSuite, secret)
+	decoder, err := NewQUIC1RTTKeyTracker(hs.Version, hs.ServerHello.CipherSuite, secret)
 	if err != nil {
 		return
 	}
@@ -229,7 +230,7 @@ func (s *quicKeyedScan) visit(record PacketRecord, frame Frame, datagram []byte)
 	if len(packet) < 21 {
 		return nil
 	}
-	dir, number, payload, err := s.authenticate(frame, packet)
+	dir, number, generation, payload, err := s.authenticate(frame, packet)
 	if err != nil || dir == nil {
 		return err
 	}
@@ -237,20 +238,24 @@ func (s *quicKeyedScan) visit(record PacketRecord, frame Frame, datagram []byte)
 		len(payload) > MaxKeyedQUICBytes-s.kept {
 		return ErrQUICLimit
 	}
+	if err := dir.decoder.accept(number, generation); err != nil {
+		return err
+	}
 	dir.expected = max(dir.expected, number+1)
 	dir.packets = append(dir.packets, QUIC1RTTPacket{
 		PacketIndex: record.Index, UDPOffset: len(datagram) - len(packet),
-		PacketNumber: number, Payload: payload,
+		PacketNumber: number, KeyGeneration: generation, Payload: payload,
 	})
 	dir.bytes += len(payload)
 	s.kept += len(payload)
 	return s.observeCIDs(dir, number, payload)
 }
 
-func (s *quicKeyedScan) authenticate(frame Frame, packet []byte) (*quicKeyedDirection, uint64, []byte, error) {
+func (s *quicKeyedScan) authenticate(frame Frame, packet []byte) (*quicKeyedDirection, uint64, uint8, []byte, error) {
 	var match *quicKeyedDirection
 	var idUsed quicCID
 	var number uint64
+	var generation uint8
 	var payload []byte
 	ports := [2]uint16{frame.SrcPort, frame.DstPort}
 	for i, path := range keyedQUICPaths(frame) {
@@ -266,26 +271,26 @@ func (s *quicKeyedScan) authenticate(frame Frame, packet []byte) (*quicKeyedDire
 			}
 			for _, candidate := range s.candidates[key] {
 				if !s.probe(len(packet)) {
-					return nil, 0, nil, ErrQUICLimit
+					return nil, 0, 0, nil, ErrQUICLimit
 				}
-				pn, plain, err := candidate.decoder.Open(packet, id, candidate.expected)
+				pn, proposed, plain, err := candidate.decoder.headerDecoder.open(packet, id, candidate.expected, candidate.decoder)
 				if err != nil {
 					continue
 				}
 				if match != nil {
-					return nil, 0, nil, nil // More than one candidate authenticated.
+					return nil, 0, 0, nil, nil // More than one candidate authenticated.
 				}
-				match, number, payload, idUsed = candidate, pn, plain, key.cid
+				match, number, generation, payload, idUsed = candidate, pn, proposed, plain, key.cid
 			}
 		}
 	}
 	if match != nil {
 		if !match.ids.accepts(idUsed, number) {
-			return nil, 0, nil, nil
+			return nil, 0, 0, nil, nil
 		}
 		match.packetCID = idUsed
 	}
-	return match, number, payload, nil
+	return match, number, generation, payload, nil
 }
 
 func (s *quicKeyedScan) probe(size int) bool {

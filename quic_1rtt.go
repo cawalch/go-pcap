@@ -50,26 +50,41 @@ func NewQUIC1RTTDecoder(version uint32, cipherSuite uint16, trafficSecret []byte
 // authentication failures return [ErrInvalidQUIC]. The decoder uses the
 // original traffic secret and key phase zero.
 func (d *QUIC1RTTDecoder) Open(packet, dcid []byte, expectedPacketNumber uint64) (uint64, []byte, error) {
+	pn, _, payload, err := d.open(packet, dcid, expectedPacketNumber, nil)
+	return pn, payload, err
+}
+
+// open proposes a generation without advancing a tracker.
+func (d *QUIC1RTTDecoder) open(packet, dcid []byte, expectedPacketNumber uint64, tracker *QUIC1RTTKeyTracker) (uint64, uint8, []byte, error) {
 	if len(packet) > maxQUICUDPPayloadBytes {
-		return 0, nil, fmt.Errorf("%w: QUIC 1-RTT packet exceeds %d bytes", ErrQUICLimit, maxQUICUDPPayloadBytes)
+		return 0, 0, nil, fmt.Errorf("%w: QUIC 1-RTT packet exceeds %d bytes", ErrQUICLimit, maxQUICUDPPayloadBytes)
 	}
 	if d == nil || d.keys.aead == nil || len(dcid) > MaxQUICConnIDBytes || expectedPacketNumber > quicPacketNumberLimit {
-		return 0, nil, fmt.Errorf("%w: invalid QUIC 1-RTT decoder or packet context", ErrInvalidQUIC)
+		return 0, 0, nil, fmt.Errorf("%w: invalid QUIC 1-RTT decoder or packet context", ErrInvalidQUIC)
 	}
 	pnOffset := 1 + len(dcid)
 	sampleOffset := pnOffset + 4
 	// The supplied connection context and AEAD authenticate packets even when
 	// the sender clears the fixed bit under RFC 9287.
 	if len(packet) < sampleOffset+aes.BlockSize || packet[0]&0x80 != 0 || !bytes.Equal(dcid, packet[1:pnOffset]) {
-		return 0, nil, fmt.Errorf("%w: invalid QUIC 1-RTT header or destination connection ID", ErrInvalidQUIC)
+		return 0, 0, nil, fmt.Errorf("%w: invalid QUIC 1-RTT header or destination connection ID", ErrInvalidQUIC)
 	}
 
-	return d.openPacket(packet, pnOffset, expectedPacketNumber, 0x1f, 0x1c)
+	forbidden := byte(0x18)
+	if tracker == nil {
+		forbidden |= 0x04
+	}
+	return d.openProtected(packet, pnOffset, expectedPacketNumber, 0x1f, forbidden, tracker)
 }
 
 // The long and short headers differ in which low bits are protected and
 // reserved, but authenticate the same packet number, nonce and header.
 func (d *QUIC1RTTDecoder) openPacket(packet []byte, pnOffset int, expectedPacketNumber uint64, protectedBits, forbiddenBits byte) (uint64, []byte, error) {
+	pn, _, payload, err := d.openProtected(packet, pnOffset, expectedPacketNumber, protectedBits, forbiddenBits, nil)
+	return pn, payload, err
+}
+
+func (d *QUIC1RTTDecoder) openProtected(packet []byte, pnOffset int, expectedPacketNumber uint64, protectedBits, forbiddenBits byte, tracker *QUIC1RTTKeyTracker) (uint64, uint8, []byte, error) {
 	sampleOffset := pnOffset + 4
 	var mask [aes.BlockSize]byte
 	d.keys.hp.Encrypt(mask[:], packet[sampleOffset:sampleOffset+aes.BlockSize])
@@ -89,17 +104,24 @@ func (d *QUIC1RTTDecoder) openPacket(packet []byte, pnOffset int, expectedPacket
 	}
 	packetNumber := decodeQUICPacketNumber(truncated, expectedPacketNumber, pnLen)
 	if packetNumber >= quicPacketNumberLimit {
-		return 0, nil, fmt.Errorf("%w: QUIC packet number out of range", ErrInvalidQUIC)
+		return 0, 0, nil, fmt.Errorf("%w: QUIC packet number out of range", ErrInvalidQUIC)
 	}
-	nonce := xorTLS13Nonce(d.keys.iv, packetNumber)
-	plaintext, err := d.keys.aead.Open(work[headerLen:][:0], nonce[:], packet[headerLen:], aad)
+	keys, generation := d.keys, uint8(0)
+	if tracker != nil {
+		keys, generation = tracker.selectKeys(packetNumber, (firstByte>>2)&1)
+	}
+	if keys.aead == nil {
+		return 0, 0, nil, ErrInvalidQUIC
+	}
+	nonce := xorTLS13Nonce(keys.iv, packetNumber)
+	plaintext, err := keys.aead.Open(work[headerLen:][:0], nonce[:], packet[headerLen:], aad)
 	if err != nil {
-		return 0, nil, fmt.Errorf("%w: QUIC packet authentication failed", ErrInvalidQUIC)
+		return 0, 0, nil, fmt.Errorf("%w: QUIC packet authentication failed", ErrInvalidQUIC)
 	}
 	if firstByte&forbiddenBits != 0 {
-		return 0, nil, fmt.Errorf("%w: invalid protected QUIC header bits", ErrInvalidQUIC)
+		return 0, 0, nil, fmt.Errorf("%w: invalid protected QUIC header bits", ErrInvalidQUIC)
 	}
-	return packetNumber, plaintext, nil
+	return packetNumber, generation, plaintext, nil
 }
 
 // decodeQUICPacketNumber reconstructs the packet number in the window around
