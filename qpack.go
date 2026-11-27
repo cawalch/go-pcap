@@ -61,6 +61,11 @@ type QPACKFieldSection struct {
 // return [ErrInvalidHTTP3]; connection-wide input or encoder limits return
 // [ErrHTTP3Limit]. On those errors the function returns no rows.
 func DecodeQPACKSections(encoder QUICStream, maxTableCapacity uint64, sections []QPACKSectionInput) ([]QPACKFieldSection, error) {
+	remaining := MaxHTTP2DecodedHeaderBytes
+	return decodeQPACKSections(encoder, maxTableCapacity, sections, &remaining)
+}
+
+func decodeQPACKSections(encoder QUICStream, maxTableCapacity uint64, sections []QPACKSectionInput, remaining *int) ([]QPACKFieldSection, error) {
 	if len(sections) > MaxQUICStreamFrames || len(encoder.Data) > MaxQUICStreamBytes {
 		return nil, ErrHTTP3Limit
 	}
@@ -94,7 +99,7 @@ func DecodeQPACKSections(encoder QUICStream, maxTableCapacity uint64, sections [
 			off = size
 		}
 	}
-	scan := qpackScan{max: maxTableCapacity, remaining: MaxHTTP2DecodedHeaderBytes, sections: sections, rows: make([]QPACKFieldSection, len(sections))}
+	scan := qpackScan{max: maxTableCapacity, remaining: *remaining, sections: sections, rows: make([]QPACKFieldSection, len(sections))}
 	for n := 0; off < len(encoder.Data); n++ {
 		if n == MaxQUICStreamFrames {
 			return nil, ErrHTTP3Limit
@@ -118,6 +123,7 @@ func DecodeQPACKSections(encoder QUICStream, maxTableCapacity uint64, sections [
 		}
 	}
 	scan.receiveBefore(len(encoder.Data) + 1)
+	*remaining = scan.remaining
 	return scan.rows, nil
 }
 

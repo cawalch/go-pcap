@@ -1148,6 +1148,52 @@ belong to the consuming stream or transaction analysis.
 [Runnable example](../example_test.go) ·
 [RFC and aioquic capture cases](../qpack_test.go)
 
+### Recover keyed HTTP/3 request streams
+
+Call `capture.KeyedHTTP3Transactions(data, extraKeyLog)` or
+`capture.KeyedHTTP3TransactionsFromReaderAt(r, extraKeyLog)`. The scan
+requires an authenticated server-selected `h3` and at least one authenticated
+1-RTT packet carrying request-stream evidence. Supply matching keys through
+an embedded or caller-supplied key log. `ConnectionIndex` addresses the
+keyed ALPN scan for the same capture and key set. `StreamID` identifies a
+client-initiated bidirectional stream within that connection. A request-only
+or response-only stream produces a row. Push streams and push promises
+are outside this transaction projection.
+
+Inspect each direction's ordered sections for initial headers, informational
+responses and trailers. A blocked, malformed or limited field section keeps
+its QPACK state and source range. An undecodable section can make the roles
+of later sections uncertain. Missing peer SETTINGS leaves a nonzero Required
+Insert Count unresolved. The decoder infers encoder progress from capture
+order and the first contiguous prefix. Network reordering between the
+observation point and endpoint can change the endpoint's arrival order.
+
+`BodyState` uses the entity decoding and content-length checks shared with
+HTTP/2. `EndStream` requires a clean final size. A gap or reset can leave a
+partial body, including a prefix that ends within a DATA frame. A missing
+FIN can also leave a partial body with neither flag set. Malformed HTTP
+framing marks the affected direction invalid. The scan admits 65,536
+framed HTTP/3 records and 262,144 QPACK context range inspections in total.
+Message, packet-reference, decoded-header and entity-body output share
+the HTTP transaction scan limits. A scan error discards all rows.
+
+Directional `PacketIndices` include every observed STREAM or RESET_STREAM
+packet for the selected stream direction, including repeats and bytes beyond
+a gap. `SharedPackets` means a datagram also carried another QUIC frame or
+coalesced long header. `QPACKPacketIndices` identifies encoder and peer
+SETTINGS packets that intersect a decoded dynamic section's supporting
+prefixes. These packets can also support other streams. `ALPNPacketIndices`
+supplies the authenticated EncryptedExtensions context separately.
+
+In the aioquic fixture, selecting frame 2 (ALPN), frame 10 (request) and
+frame 12 (response) and reopening with external keys recovers no transaction.
+Adding the independently identified client Initial in frame 1 recovers both
+bodies and status 200. The same four ciphertext frames without keys produce
+no transaction. Replaying another connection can require different Initial,
+packet-number and QPACK history. The API exposes packet selection for these
+observations. [Reopening test](../http3_transactions_test.go) ·
+[Runnable Go example](../example_test.go)
+
 ## Decrypt TLS 1.2 and TLS 1.3 streams offline
 
 Call `capture.DecryptedTLSStreams(data, extraKeyLog)` to decrypt TLS 1.2

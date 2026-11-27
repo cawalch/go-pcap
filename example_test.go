@@ -758,3 +758,27 @@ func ExampleDecodeQPACKSections() {
 	}
 	// Output: stream 4 offset 2 :method GET
 }
+func ExampleCapture_KeyedHTTP3Transactions() {
+	data, err := os.ReadFile("testdata/http3-framing.pcapng")
+	if err != nil {
+		log.Fatal(err)
+	}
+	c, err := pcap.New(data)
+	if err != nil {
+		log.Fatal(err)
+	}
+	rows, err := c.KeyedHTTP3Transactions(data, nil)
+	if err != nil {
+		log.Fatal(err)
+	}
+	for _, row := range rows {
+		if row.Request != nil && row.Response != nil {
+			fmt.Printf("stream %d status %d request packets %v response packets %v\n",
+				row.StreamID, row.StatusCode, row.Request.PacketIndices, row.Response.PacketIndices)
+			fmt.Printf("bodies %q %q\n", row.Request.Body, row.Response.Body)
+		}
+	}
+	// Output:
+	// stream 0 status 200 request packets [9] response packets [11]
+	// bodies "request" "response"
+}
