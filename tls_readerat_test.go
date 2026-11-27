@@ -5,6 +5,8 @@ import (
 	"encoding/binary"
 	"io"
 	"os"
+	"reflect"
+	"strings"
 	"testing"
 )
 
@@ -64,6 +66,14 @@ func TestTLSFromReaderAtHandshakeBudget(t *testing.T) {
 			if err != nil || len(rows) != 1 || rows[0].FlowIndex != 1 || rows[0].Handshake.ClientHello.SNI != "late.example" || r.bytesRead > 1<<20 {
 				t.Fatalf("got %d rows, %v after %d bytes in %d reads", len(rows), err, r.bytesRead, r.calls)
 			}
+			raw := make([]byte, c.fileSize)
+			if _, err := f.ReadAt(raw, 0); err != nil {
+				t.Fatal(err)
+			}
+			want, err := c.TLS(raw)
+			if err != nil || !reflect.DeepEqual(rows, want) {
+				t.Fatalf("file and byte TLS records differ: %v", err)
+			}
 		})
 	}
 }
@@ -118,5 +128,84 @@ func TestTLSFromReaderAtDeferredProxy(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+func TestTLSFromReaderAtReusedTupleByteLimit(t *testing.T) {
+	src, dst := [4]byte{192, 0, 2, 1}, [4]byte{192, 0, 2, 2}
+	frame := func(port uint16, seq uint32, flags byte, payload []byte) []byte {
+		return buildEthernetIPv4TCPFrame(src, dst, 12000, port, seq, 0, flags, payload)
+	}
+	frames := [][]byte{frame(443, 0, TCPFlagSYN, nil)}
+	noise := make([]byte, 60<<10)
+	for n := 0; n < MaxFlowStreamBytes; n += len(noise) {
+		frames = append(frames, frame(443, 1+uint32(n), TCPFlagACK, noise))
+	}
+	hello := buildTLS13ClientHelloRecord("reuse.example", "h2")
+	// The exhausted side of the reused 5-tuple cannot expose a new hello.
+	// A different tuple still has its own byte allowance.
+	frames = append(frames, frame(443, 99, TCPFlagSYN, nil), frame(443, 100, TCPFlagACK, hello), frame(8443, 1, TCPFlagACK, hello))
+	raw := buildClassicPCAP(binary.LittleEndian, false, LinkTypeEthernet, 65535, frames)
+	c, err := New(raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rows := checkReaderParity(t, raw, c.TLS, c.TLSFromReaderAt)
+	if len(rows) != 1 || rows[0].FlowIndex != 1 {
+		t.Fatalf("got %+v", rows)
+	}
+}
+
+func TestTLSFromReaderAtCandidateApplicationData(t *testing.T) {
+	src, dst := [4]byte{192, 0, 2, 1}, [4]byte{192, 0, 2, 2}
+	hello := buildTLS13ClientHelloRecord("opaque.example", "h2")
+	wire := bytes.Clone(hello)
+	for range 65 {
+		wire = append(wire, TLSRecordApplicationData, 3, 3, 0x40, 0)
+		wire = append(wire, make([]byte, 16384)...)
+	}
+	// An incomplete last record is observable even when its body is opaque.
+	wire = append(wire, TLSRecordApplicationData, 3, 3, 0x40, 0, 1, 2)
+	var frames [][]byte
+	for i := 0; i < len(wire); i += 32 << 10 {
+		frames = append(frames, buildEthernetIPv4TCPFrame(src, dst, 12345, 45678, 1+uint32(i), 0, TCPFlagACK, wire[i:min(len(wire), i+32<<10)]))
+	}
+	for _, raw := range [][]byte{
+		buildClassicPCAP(binary.LittleEndian, false, LinkTypeEthernet, 65535, frames),
+		buildPCAPNGFixture(binary.LittleEndian, []byte("SERVER_HANDSHAKE_TRAFFIC_SECRET "+strings.Repeat("bb", 32)+" "+strings.Repeat("ee", 32)+"\n"), frames),
+	} {
+		c, err := New(raw)
+		if err != nil {
+			t.Fatal(err)
+		}
+		r := &measuredReaderAt{Reader: bytes.NewReader(raw)}
+		want, err := c.TLS(raw)
+		if err != nil {
+			t.Fatal(err)
+		}
+		rows, err := c.TLSFromReaderAt(r)
+		if err != nil || !reflect.DeepEqual(rows, want) {
+			t.Fatalf("selective TLS records differ: %v", err)
+		}
+		if len(rows) != 1 || !rows[0].Handshake.Anomalies.TruncatedRecord || r.bytesRead > 32<<10 {
+			t.Fatalf("got %d records after %d bytes", len(rows), r.bytesRead)
+		}
+	}
+}
+
+func TestTLSReaderAtPlanOverlapAndGap(t *testing.T) {
+	// The first captured payload owns a conflicting overlap. The bytes after
+	// the gap still consume the shared budget and cannot enter the TLS prefix.
+	segments := []TCPSegmentInput{{Seq: 100, Flags: TCPFlagSYN}, {Seq: 104, Payload: []byte("D")}, {Seq: 101, Payload: []byte("A")}, {Seq: 112, Payload: []byte("L")}}
+	src := []byte("DEFGHabcdefghLMN")
+	reader := tlsStreamReader{size: int64(len(src)), budget: scanReadBudget{r: bytes.NewReader(src), remaining: 64}}
+	refs := []tlsSegmentRead{{0, 1, 0, 5}, {0, 2, 5, 8}, {0, 3, 13, 3}}
+	d, used, err := reader.plan(segments, refs, 0, 10)
+	if err != nil || used != 10 || d.size() != 8 {
+		t.Fatalf("planned %d contiguous, %d charged: %v", d.size(), used, err)
+	}
+	got := make([]byte, d.size())
+	if err := d.read(&reader, got, 0); err != nil || string(got) != "AbcDEFGH" {
+		t.Fatalf("%q, %v", got, err)
 	}
 }

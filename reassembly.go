@@ -81,6 +81,12 @@ func ReassembleTCP(segments []TCPSegmentInput) (StreamBuffer, error) {
 type tcpWriteObserver func(segment, end int, seq uint32, gap bool)
 
 func reassembleTCPWithBudget(segments []TCPSegmentInput, remainingBudget int64, written tcpWriteObserver) (StreamBuffer, int64, error) {
+	return assembleTCPRanges(segments, nil, remainingBudget, written)
+}
+
+// Non-nil wireLengths plan the same bounded ownership ranges without reading
+// or copying segment bodies. TLS ReaderAt can then fetch only handshake bytes.
+func assembleTCPRanges(segments []TCPSegmentInput, wireLengths []int, remainingBudget int64, written tcpWriteObserver) (StreamBuffer, int64, error) {
 	if len(segments) > MaxSegmentsPerFlow {
 		return StreamBuffer{}, 0, fmt.Errorf("%w: %d segments exceed %d", ErrReassemblyLimit, len(segments), MaxSegmentsPerFlow)
 	}
@@ -101,7 +107,7 @@ func reassembleTCPWithBudget(segments []TCPSegmentInput, remainingBudget int64, 
 			hasSYN = true
 			break
 		}
-		if !haveBase && len(seg.Payload) > 0 {
+		if !haveBase && (len(seg.Payload) > 0 || wireLengths != nil && wireLengths[i] > 0) {
 			baseSeq = seg.Seq
 			haveBase = true
 		}
@@ -117,15 +123,21 @@ func reassembleTCPWithBudget(segments []TCPSegmentInput, remainingBudget int64, 
 	var inline [8]normSegment
 	norm := inline[:0]
 	if len(segments) > len(inline) {
-		if data := copyContiguousTCP(segments, baseSeq, min(int64(MaxFlowStreamBytes), remainingBudget), written); data != nil {
-			out.Data = data
-			return out, int64(len(data)), nil
+		if wireLengths == nil {
+			if data := copyContiguousTCP(segments, baseSeq, min(int64(MaxFlowStreamBytes), remainingBudget), written); data != nil {
+				out.Data = data
+				return out, int64(len(data)), nil
+			}
 		}
 		norm = make([]normSegment, 0, len(segments))
 	}
 	for i := range segments {
 		seg := &segments[i]
-		if len(seg.Payload) == 0 {
+		size, payload := len(seg.Payload), seg.Payload
+		if wireLengths != nil {
+			size, payload = wireLengths[i], nil
+		}
+		if size == 0 {
 			continue
 		}
 		seq := seg.Seq
@@ -136,15 +148,18 @@ func reassembleTCPWithBudget(segments []TCPSegmentInput, remainingBudget int64, 
 		if hasSYN && rel < 0 {
 			// Segment precedes the chosen initial sequence number.
 			trim := -rel
-			if trim >= int64(len(seg.Payload)) {
+			if trim >= int64(size) {
 				out.Anomalies.Retransmission = true
 				out.OverlapCount++
 				continue
 			}
+			if payload != nil {
+				payload = payload[trim:]
+			}
 			norm = append(norm, normSegment{
 				relStart: 0,
-				relEnd:   int64(len(seg.Payload)) - trim,
-				payload:  seg.Payload[trim:],
+				relEnd:   int64(size) - trim,
+				payload:  payload,
 				order:    i,
 			})
 			out.Anomalies.Retransmission = true
@@ -154,8 +169,8 @@ func reassembleTCPWithBudget(segments []TCPSegmentInput, remainingBudget int64, 
 		}
 		norm = append(norm, normSegment{
 			relStart: rel,
-			relEnd:   rel + int64(len(seg.Payload)),
-			payload:  seg.Payload,
+			relEnd:   rel + int64(size),
+			payload:  payload,
 			order:    i,
 		})
 	}
@@ -182,7 +197,7 @@ func reassembleTCPWithBudget(segments []TCPSegmentInput, remainingBudget int64, 
 
 	// Size the result from distinct captured ranges. Reserving the whole
 	// sequence span would charge gaps and retransmissions to the heap.
-	if len(norm) > 1 {
+	if wireLengths == nil && len(norm) > 1 {
 		end := cursor
 		var size int64
 		for i := range norm {
@@ -199,6 +214,7 @@ func reassembleTCPWithBudget(segments []TCPSegmentInput, remainingBudget int64, 
 		buf.Grow(int(size))
 	}
 
+	var used int64
 	for i := 0; i < len(norm); {
 		seg := &norm[i]
 		gap := seg.relStart > cursor
@@ -220,17 +236,20 @@ func reassembleTCPWithBudget(segments []TCPSegmentInput, remainingBudget int64, 
 			end = max(end, next.relEnd)
 			j++
 		}
-		length := min(end-seg.relStart, maxBytes-int64(buf.Len()))
+		length := min(end-seg.relStart, maxBytes-used)
 		if length > 0 {
 			if j == i+1 {
-				buf.Write(seg.payload[:length])
-				if written != nil {
-					written(seg.order, buf.Len(), baseSeq+uint32(seg.relStart), gap)
+				if wireLengths == nil {
+					buf.Write(seg.payload[:length])
 				}
-			} else if appendTCPOverlap(&buf, norm[i:j], segments, length, baseSeq, gap, written) {
+				if written != nil {
+					written(seg.order, int(used+length), baseSeq+uint32(seg.relStart), gap)
+				}
+			} else if appendTCPOverlap(&buf, norm[i:j], segments, length, baseSeq, gap, written, int(used), wireLengths != nil) {
 				out.Anomalies.OverlapConflict = true
 			}
 		}
+		used += length
 		if length < end-seg.relStart {
 			out.Anomalies.Truncated = true
 			break
@@ -240,7 +259,7 @@ func reassembleTCPWithBudget(segments []TCPSegmentInput, remainingBudget int64, 
 	}
 
 	out.Data = buf.Bytes()
-	return out, int64(len(out.Data)), nil
+	return out, used, nil
 }
 
 // copyContiguousTCP copies the direction only when all payloads fit the budget
@@ -292,10 +311,9 @@ func copyContiguousTCP(segments []TCPSegmentInput, baseSeq uint32, limit int64, 
 
 // appendTCPOverlap assigns each range by checksum evidence and capture order.
 // The heap changes only at segment boundaries, independent of the sequence span.
-func appendTCPOverlap(buf *bytes.Buffer, group []normSegment, segments []TCPSegmentInput, length int64, baseSeq uint32, gap bool, written tcpWriteObserver) bool {
+func appendTCPOverlap(buf *bytes.Buffer, group []normSegment, segments []TCPSegmentInput, length int64, baseSeq uint32, gap bool, written tcpWriteObserver, offset int, planOnly bool) bool {
 	start := group[0].relStart
 	limit := start + length
-	offset := buf.Len()
 	var active captureOrderHeap
 	next := 0
 	for pos := start; pos < limit; {
@@ -316,12 +334,17 @@ func appendTCPOverlap(buf *bytes.Buffer, group []normSegment, segments []TCPSegm
 		if next < len(group) {
 			end = min(end, group[next].relStart)
 		}
-		buf.Write(owner.payload[pos-owner.relStart : end-owner.relStart])
+		if !planOnly {
+			buf.Write(owner.payload[pos-owner.relStart : end-owner.relStart])
+		}
 		if written != nil {
-			written(owner.order%MaxSegmentsPerFlow, buf.Len(), baseSeq+uint32(pos), gap)
+			written(owner.order%MaxSegmentsPerFlow, offset+int(end-start), baseSeq+uint32(pos), gap)
 		}
 		gap = false
 		pos = end
+	}
+	if planOnly {
+		return false
 	}
 	data := buf.Bytes()[offset:]
 	for _, seg := range group {
@@ -676,11 +699,6 @@ func collectStreamPayloads(source ipFrameSource, port uint16, meta *[]streamMeta
 	remaining := int64(MaxTotalStreamBytes)
 	for i := range collected {
 		entry := &collected[i]
-		if tlsReader != nil {
-			if err := tlsReader.complete(i, entry); err != nil {
-				return nil, err
-			}
-		}
 		st := TCPStream{
 			FlowIndex: entry.flowIndex, SrcAddr: entry.srcAddr, DstAddr: entry.dstAddr,
 			SrcPort: entry.srcPort, DstPort: entry.dstPort,
@@ -690,6 +708,17 @@ func collectStreamPayloads(source ipFrameSource, port uint16, meta *[]streamMeta
 			info.confirmedOpening = wire[i].confirmedOpening()
 		}
 		state := &usage[entry.flowIndex]
+		if tlsReader != nil && len(tlsReader.pending[i]) != 0 {
+			client, server, err := tlsReader.opening(i, entry, &state.budget, &remaining)
+			if err != nil {
+				return nil, err
+			}
+			st.Client.Data, st.Server.Data = client, server
+			info.clientPrefix, info.serverPrefix = len(client), len(server)
+			streams = append(streams, st)
+			*meta = append(*meta, info)
+			continue
+		}
 		for dir, segments := range [2][]TCPSegmentInput{entry.client, entry.server} {
 			side := tcpSide(entry.canonical)
 			if dir == 1 {

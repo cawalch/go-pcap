@@ -429,12 +429,18 @@ func (c *Capture) TLSFromReaderAt(r io.ReaderAt) ([]TLSRecord, error) {
 		r = window
 	}
 	reader := tlsStreamReader{budget: scanReadBudget{r: r, remaining: MaxReaderAtScanBytes}, size: c.fileSize}
+	for _, secret := range c.Secrets {
+		if secret.SecretsType == SecretsTypeTLSKeyLog {
+			reader.keyed = true
+			break
+		}
+	}
 	var meta []streamMetadata
 	streams, err := collectStreamPayloads(ipFrameSource{capture: c}, 0, &meta, tcpWireNone, &reader)
 	if err != nil {
 		return nil, err
 	}
-	return c.tlsFromStreams(streams, meta, nil)
+	return c.tlsFromStreams(streams, meta, nil, &reader)
 }
 
 // QUICFromReaderAt extracts QUIC v1/v2 Initial handshakes and fingerprints
