@@ -1750,6 +1750,34 @@ malformed commands. When `Message.IsEncrypted` is true, `SessionID` and
 `OriginalMessageSize` are observations from the 52-byte SMB3 transform
 header. The ciphertext stays opaque.
 
+### Find the original packets for an SMB command
+
+Call `capture.SMB2Evidence(data)` or
+`capture.SMB2EvidenceFromReaderAt(source)` to locate decoded SMB commands
+and visible transform headers. The result embeds the same SMB fields as
+`SMB` in the same opening and direction order. The first observed packet
+identifies the TCP opening. A new opening can reuse the same flow index
+and message ID. Set `SeparateTCPInterfaces` when interfaces observe
+independent networks.
+
+`PacketIndex` locates the packet supplying the first magic byte of the
+command. `StreamOffset` locates that byte in the recovered TCP direction
+before removing any proxy handshake. Use the source and destination
+endpoints with that offset to distinguish compound commands in one packet.
+The sorted `PacketIndices` list includes every packet supplying command
+bytes up to the next compound command or enclosing frame boundary. An
+unframed last command covers the remaining contiguous input. A repeated
+packet contributes only if it supplies new bytes. For a transform the
+range covers the 52-byte visible header. The ciphertext stays opaque.
+
+The evidence scan charges at most 262,144 packet span references and
+retains the usual SMB record and TCP reassembly limits. A scan or limit
+error discards results. The ReaderAt path reads TCP payloads on any port
+up to the 64 MiB read budget. [Runnable original-packet example](../example_smb_evidence_test.go) ·
+[Fixture and independent decode](../testdata/framing/smb-evidence.md)
+
+### Read Kerberos and RDP negotiation fields
+
 Call `ParseKRB5(buf)` or `capture.Kerberos(data)` to decode ASN.1 DER Kerberos
 v5 `AS-REQ`, `AS-REP`, `TGS-REQ`, `TGS-REP`, and `KRB-ERROR` messages over UDP
 and TCP port 88, including client/service principal names, realm, requested

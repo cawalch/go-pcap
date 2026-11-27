@@ -492,6 +492,7 @@ const (
 	tcpWireNone tcpWireMode = iota
 	tcpWireUnanchored
 	tcpWireAll
+	tcpWireSpans // Track payload ownership without collecting TCP closure evidence.
 )
 
 type tcpWireCapture struct {
