@@ -1300,10 +1300,14 @@ func (out *TLSHandshake) readTLS13CertificateFlight(stream, secret []byte, clien
 		return nil
 	}
 	offset := 0
+	finishedSize := tls13FinishedSize(out.ServerHello.CipherSuite)
 	for offset+4 <= len(hsData) {
 		msgType := hsData[offset]
 		msgLen := int(hsData[offset+1])<<16 | int(hsData[offset+2])<<8 | int(hsData[offset+3])
 		if msgLen > MaxTLSHandshakeBytes || offset+4+msgLen > len(hsData) {
+			break
+		}
+		if msgType == 20 && msgLen == finishedSize {
 			break
 		}
 		body := hsData[offset+4 : offset+4+msgLen]

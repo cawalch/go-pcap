@@ -234,3 +234,37 @@ func TestTLSFromReaderAtSkipsKeyedApplicationTail(t *testing.T) {
 		t.Fatalf("read %d bytes from %d-byte capture after the handshake", r.bytesRead, len(raw))
 	}
 }
+
+func TestTLSFromReaderAtFinishedBoundary(t *testing.T) {
+	chain := sanTestChain(t, []string{"trace.example"}, nil, false)
+	cert := certificateTestRecord(chain, true)[5:]
+	client, server := [4]byte{192, 0, 2, 1}, [4]byte{192, 0, 2, 2}
+	hello, sh := buildTLS13ClientHelloRecord("trace.example", "h2"), buildTLSServerHelloRecord()
+	secret := bytes.Repeat([]byte{0x77}, 32)
+	keys := []byte("SERVER_HANDSHAKE_TRAFFIC_SECRET " + strings.Repeat("42", 32) + " " + strings.Repeat("77", 32))
+	for _, size := range []int{0, 32} {
+		finished := append([]byte{20, 0, 0, byte(size)}, make([]byte, size)...)
+		for _, shared := range []bool{false, true} {
+			wire := bytes.Clone(sh)
+			if shared {
+				finished = append(finished, cert...)
+			}
+			wire = append(wire, encryptTLS13AppDataRecord(t, secret, TLS_AES_128_GCM_SHA256, 0, TLSRecordHandshake, finished)...)
+			if !shared {
+				wire = append(wire, encryptTLS13AppDataRecord(t, secret, TLS_AES_128_GCM_SHA256, 1, TLSRecordHandshake, cert)...)
+			}
+			raw := keyedCapture(t, keys, [][]byte{
+				buildEthernetIPv4TCPFrame(client, server, 40000, 443, 1, 0, TCPFlagACK, hello),
+				buildEthernetIPv4TCPFrame(server, client, 443, 40000, 1, 0, TCPFlagACK, wire),
+			})
+			c, err := New(raw)
+			if err != nil {
+				t.Fatal(err)
+			}
+			rows := checkReaderParity(t, raw, c.TLS, c.TLSFromReaderAt)
+			if len(rows) != 1 || (len(rows[0].Handshake.Certificates) != 0) != (size == 0) {
+				t.Fatalf("size=%d shared=%t: unexpected certificates", size, shared)
+			}
+		}
+	}
+}

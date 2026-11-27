@@ -271,7 +271,10 @@ func decryptTLS13Records(stream []byte, cipherSuite uint16, handshakeSecret, app
 	seenAppEpoch := false
 	var hsBuf, appBuf bytes.Buffer
 	var hsFull, appFull bool
-	var handshakeEnd int
+	var handshakeEnd, finishedSize int
+	if source != nil {
+		finishedSize = tls13FinishedSize(cipherSuite)
+	}
 
 	for len(stream)-offset >= 5 {
 		start := offset
@@ -420,10 +423,10 @@ func decryptTLS13Records(stream []byte, cipherSuite uint16, handshakeSecret, app
 					if n > len(h)-4 {
 						break
 					}
-					if h[0] == 20 {
-						return data, nil, nil
-					}
 					handshakeEnd += 4 + n
+					if h[0] == 20 && n == finishedSize {
+						return data[:handshakeEnd], nil, nil
+					}
 				}
 			}
 			if inAppPhase && postHandshake.endsWithKeyUpdate(innerContent) {
@@ -484,6 +487,14 @@ func decryptTLS13Records(stream []byte, cipherSuite uint16, handshakeSecret, app
 	}
 
 	return hsBuf.Bytes(), appBuf.Bytes(), nil
+}
+
+func tls13FinishedSize(suite uint16) int {
+	hashFn, _ := tls13SuiteParams(suite)
+	if hashFn == nil {
+		return -1
+	}
+	return hashFn().Size()
 }
 
 // xorTLS13Nonce XORs the IV with the padded TLS record sequence number or
