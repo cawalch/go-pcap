@@ -1141,6 +1141,40 @@ Check the match flag and error before using the DNS message. Inspect
 `DNSMessage.Anomalies` for partial DNS sections. Use the flow index and
 HTTP/2 stream ID to pair requests with responses. [RFC 8484](https://www.rfc-editor.org/rfc/rfc8484#section-4)
 
+### Choose TLS and QUIC key sources
+
+Pass a capture snapshot and optional key-log bytes to a keyed scan. Use a
+private value copy of the snapshot to select which sources that call can use.
+
+| Mode | Capture used for the call | Extra key-log bytes |
+| --- | --- | --- |
+| Passive without traffic secrets | Value copy with `Secrets = nil` | `nil` |
+| Embedded secrets | Original capture | `nil` |
+| External secrets | Value copy with `Secrets = nil` | External key log |
+| Combined | Original capture | External key log |
+
+```go
+externalOnly := *capture
+externalOnly.Secrets = nil
+rows, err := externalOnly.KeyedHTTP1TransactionsFromReaderAt(source, externalKeyLog)
+```
+
+Use the same immutable source bytes or seekable source for each view. Set the
+field on the copy before starting its scan. Leave the original snapshot, its
+shared slices, and the key bytes read-only during concurrent calls. Passive
+QUIC Initial analysis is still available through public Initial keys.
+
+`TLSKeyLog` reads supported embedded blocks in capture order, then the
+external key log. The last accepted line for the same client random and label
+wins. A missing label leaves that secret unavailable. Record the selected mode
+with any finding and report external or embedded as the usable source when a
+scan with that source alone authenticates the selected evidence. In combined
+mode, a successful scan can depend on either source or both. Keep key bytes,
+key-log entries and capture-wide secret blocks out of diagnostic output.
+
+Packet-only flow and transaction exports omit embedded secrets. To decrypt on
+reopen, provide authorized key-log bytes separately. [Capture exports](#write-captures)
+
 ## Inspect explicit proxy tunnels
 
 TLS, HTTP, HTTP/2, SSH, SMB, and RDP capture methods inspect the payload after
