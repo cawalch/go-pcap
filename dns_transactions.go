@@ -99,13 +99,7 @@ func scanDNSTransactions(source ipFrameSource) ([]DNSTransaction, error) {
 			SrcAddr: src.Addr(), DstAddr: dst.Addr(), SrcPort: src.Port(), DstPort: dst.Port(), Message: m,
 		}
 		key := dnsTransactionKey{client: client, resolver: resolver, iface: iface, opening: opening, id: m.TransactionID}
-		if m.Opcode == 0 && !m.Anomalies.Any() && m.QuestionCount == 1 && len(m.Questions) == 1 {
-			q := &m.Questions[0]
-			// IXFR and AXFR can have multiple replies on a TCP stream.
-			if q.Type != 251 && q.Type != 252 {
-				key.qtype, key.class, key.name = q.Type, q.Class, dnsPairingName(wire[12:])
-			}
-		}
+		key.setQuestion(&m, wire)
 		observations = append(observations, dnsTransactionObservation{r, key})
 		return nil
 	}
@@ -200,6 +194,18 @@ func pairDNSObservations(observations []dnsTransactionObservation) []DNSTransact
 		rows = append(rows, row)
 	}
 	return rows
+}
+
+// setQuestion limits pairing to an ordinary lookup with one wire question.
+func (k *dnsTransactionKey) setQuestion(m *DNSMessage, wire []byte) {
+	if m.Opcode != 0 || m.Anomalies.Any() || m.QuestionCount != 1 || len(m.Questions) != 1 {
+		return
+	}
+	q := &m.Questions[0]
+	// IXFR and AXFR can have multiple replies on a TCP stream.
+	if q.Type != 251 && q.Type != 252 {
+		k.qtype, k.class, k.name = q.Type, q.Class, dnsPairingName(wire[12:])
+	}
 }
 
 func dnsUnicast(addr netip.Addr) bool {
