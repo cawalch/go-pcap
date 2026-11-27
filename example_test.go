@@ -685,3 +685,34 @@ func ExampleCapture_ExtractHTTP2TransactionPCAPNG() {
 	}
 	// Output: stream 3, POST /two → 201 "two" (9 packets)
 }
+
+func ExampleCapture_TLSHandshakeEvidence() {
+	data, err := os.ReadFile("testdata/deployments/client.pcapng")
+	if err != nil {
+		panic(err)
+	}
+	c, err := pcap.New(data)
+	if err != nil {
+		panic(err)
+	}
+	rows, err := c.TLSHandshakeEvidence(data, nil)
+	if err != nil {
+		panic(err)
+	}
+	// A later TCP opening reuses this five-tuple. Resolve the selected
+	// observation against packet numbers in the original file.
+	packets, err := c.Packets(data)
+	if err != nil {
+		panic(err)
+	}
+	for _, row := range rows {
+		if row.Handshake.ClientHello.SNI == "trace.example" {
+			for _, index := range row.ClientHello.PacketIndices {
+				pkt := packets[index]
+				fmt.Printf("flow=%d opening_frame=%d hello_frame=%d link=%d\n", row.FlowIndex, row.OpeningPacket+1, pkt.Index+1, pkt.LinkType)
+			}
+		}
+	}
+	// Output:
+	// flow=1 opening_frame=2 hello_frame=6 link=1
+}

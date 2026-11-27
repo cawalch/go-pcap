@@ -220,10 +220,10 @@ func DecryptTLS13Records(
 	handshakeSecret []byte,
 	appSecret []byte,
 ) (handshakePlain []byte, appPlain []byte, err error) {
-	return decryptTLS13Records(stream, cipherSuite, handshakeSecret, appSecret, nil, nil)
+	return decryptTLS13Records(stream, cipherSuite, handshakeSecret, appSecret, nil, nil, nil)
 }
 
-func decryptTLS13Records(stream []byte, cipherSuite uint16, handshakeSecret, appSecret, earlySecret []byte, provenance *tlsRecordMapper) (handshakePlain, appPlain []byte, err error) {
+func decryptTLS13Records(stream []byte, cipherSuite uint16, handshakeSecret, appSecret, earlySecret []byte, provenance *tlsRecordMapper, trace *tlsHandshakeTrace) (handshakePlain, appPlain []byte, err error) {
 	offset := 0
 	if provenance != nil {
 		defer func() {
@@ -274,6 +274,9 @@ func decryptTLS13Records(stream []byte, cipherSuite uint16, handshakeSecret, app
 
 	for len(stream)-offset >= 5 {
 		start := offset
+		if trace != nil && !trace.inspect() {
+			return nil, nil, ErrTLSLimit
+		}
 		if provenance != nil && !provenance.inspect(start) {
 			break
 		}
@@ -384,6 +387,9 @@ func decryptTLS13Records(stream []byte, cipherSuite uint16, handshakeSecret, app
 		case TLSRecordHandshake:
 			if !hsFull {
 				rem := MaxTLSHandshakeBytes - hsBuf.Len()
+				if trace != nil {
+					trace.fragment(hsBuf.Len(), min(rem, len(innerContent)), start, offset)
+				}
 				if len(innerContent) <= rem {
 					hsBuf.Write(innerContent)
 				} else {
@@ -778,8 +784,8 @@ func decryptTLSStream(st TCPStream, keyLog *TLSKeyLog, mappers *[2]tlsRecordMapp
 	suite := hsServer.ServerHello.CipherSuite
 	var clientApp, serverApp []byte
 	if hsServer.ServerHello.NegotiatedVersion == TLSVersion13 || len(entry.ClientTrafficSecret0) > 0 || len(entry.ServerTrafficSecret0) > 0 {
-		_, clientApp, _ = decryptTLS13Records(cData, suite, entry.ClientHandshakeSecret, entry.ClientTrafficSecret0, entry.ClientEarlyTrafficSecret, client)
-		_, serverApp, _ = decryptTLS13Records(sData, suite, entry.ServerHandshakeSecret, entry.ServerTrafficSecret0, nil, server)
+		_, clientApp, _ = decryptTLS13Records(cData, suite, entry.ClientHandshakeSecret, entry.ClientTrafficSecret0, entry.ClientEarlyTrafficSecret, client, nil)
+		_, serverApp, _ = decryptTLS13Records(sData, suite, entry.ServerHandshakeSecret, entry.ServerTrafficSecret0, nil, server, nil)
 	} else if len(entry.MasterSecret) > 0 || mappers != nil {
 		mode := tls12CBCMACThenEncrypt
 		if slices.Contains(hsServer.ServerHello.Extensions, tlsExtEncryptThenMAC) {

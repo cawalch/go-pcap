@@ -866,6 +866,33 @@ go-pcap looks up traffic keys by the observed ClientHello random and leaves
 the inner hello opaque. A key log can contain traffic keys without making
 them usable by that lookup. [TLS and ECH key-log labels in RFC 9850](https://www.rfc-editor.org/rfc/rfc9850.html#section-2.1)
 
+### Locate a hello or certificate chain in the original packets
+
+Call `capture.TLSHandshakeEvidence(data, extraKeyLog)` or
+`capture.TLSHandshakeEvidenceFromReaderAt(r, extraKeyLog)` to locate the
+ClientHello, ServerHello, or Certificate message whose fields the TLS parser
+selected. Both methods accept embedded and caller-supplied key logs. Each row
+contains the ordinary TLS observation and its zero-based opening packet. Two
+openings can share a flow index and Community ID. The opening packet can be a
+SYN, a midstream packet, or the start of a proxy negotiation.
+
+Each field's `PacketIndices` is the sorted set of packets supplying its
+message bytes. For a plaintext message this includes its contributing TLS
+record headers. For a protected certificate chain the set covers every
+authenticated ciphertext record containing part of the Certificate message,
+including headers and tags. A selected packet or record can also carry other
+messages. A missing field has an empty set. Packet order reflects capture
+order, so a reordered segment can precede the packet containing the first
+byte of a hello. After a HelloRetryRequest, the ServerHello evidence locates
+the first hello retained in the TLS observation. A later hello can supply
+the resumption decision.
+
+Attribution charges up to 65,536 record inspections and 262,144 packet-span
+intersections across the capture. Plaintext scanning and keyed recovery both
+charge their record inspections. A read or limit error discards all rows.
+The ReaderAt method shares the regular read budget across TCP payload and
+length reads. [Runnable example](../example_test.go)
+
 ## Decrypt QUIC Initial packets
 
 Call `DecryptQUICInitial(datagrams)` on a slice of UDP payloads or call

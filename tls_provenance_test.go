@@ -350,7 +350,7 @@ func TestTLSRecordProvenanceBudget(t *testing.T) {
 				{end: uint32(secondStart + 3), packet: tcpPacketEvidence{index: 5}},
 				{end: uint32(len(wire)), packet: tcpPacketEvidence{index: 6}},
 			}}
-			_, app, err := decryptTLS13Records(wire, TLS_AES_128_GCM_SHA256, entry.ClientHandshakeSecret, entry.ClientTrafficSecret0, nil, &mapper)
+			_, app, err := decryptTLS13Records(wire, TLS_AES_128_GCM_SHA256, entry.ClientHandshakeSecret, entry.ClientTrafficSecret0, nil, &mapper, nil)
 			if err != nil || string(app) != tlsProofFirst || mapper.stop != (tlsProvenanceBoundary{tc.wantBoundary, tlsStopLimit}) ||
 				len(mapper.records) != 1 || !slices.Equal(mapper.records[0].packets, []int{4, 5}) {
 				t.Fatalf("plaintext %q, err %v, provenance %+v", app, err, mapper.tlsDirectionProvenance)
