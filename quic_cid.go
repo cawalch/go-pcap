@@ -1,5 +1,7 @@
 package pcap
 
+import "net/netip"
+
 // Limits for authenticated connection-ID history. Each direction starts with
 // the Initial source ID issued by its peer. Sequence numbers are sparse.
 const (
@@ -27,6 +29,7 @@ func (r *quicFrameReader) newConnectionID() quicCIDChange {
 }
 
 type quicCIDEntry struct {
+	client     netip.Addr // One observed client IP per learned ID, bounded by MaxKeyedQUICLearnedIDs.
 	id         quicCID
 	token      [16]byte
 	tokenKnown bool
@@ -153,7 +156,7 @@ func (s *quicKeyedScan) applyCID(dir *quicKeyedDirection, op quicCIDChange, numb
 	if active > MaxKeyedQUICActiveIDs {
 		return ErrQUICLimit
 	}
-	key := s.registerCID(dir.initial.path, 0, op.id)
+	key := s.registerCID(dir.initial.path.anyClient(), 0, op.id)
 	s.candidates[key] = append(s.candidates[key], dir)
 	return nil
 }

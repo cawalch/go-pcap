@@ -46,7 +46,11 @@ type KeyedQUICRecord struct {
 // Authenticated NEW_CONNECTION_ID and RETIRE_CONNECTION_ID frames update the
 // eligible destinations in capture order. An empty ID requires the original
 // tuple. A nonempty ID can follow a client port change on the same IP pair
-// and server port.
+// and server port. Standalone short-header packets can follow a client IP
+// change on that server endpoint using IDs learned from authenticated
+// NEW_CONNECTION_ID frames. Each learned ID follows only the first client
+// IP on which it authenticates.
+// The IP addresses themselves are outside QUIC packet authentication.
 // Results follow Initial exchange order and contain at least one packet.
 // A scan or resource-limit error returns no results.
 func (c *Capture) KeyedQUIC(data, extraKeyLog []byte) ([]KeyedQUICRecord, error) {
@@ -75,6 +79,11 @@ type quicKeyedPath struct {
 	client     netip.Addr
 	server     netip.AddrPort
 	fromServer bool
+}
+
+func (p quicKeyedPath) anyClient() quicKeyedPath {
+	p.client = netip.Addr{}
+	return p
 }
 
 type quicKeyedCID struct {
@@ -156,10 +165,20 @@ func scanKeyedQUIC(source ipFrameSource, extraKeyLog []byte, alpn bool) ([]Keyed
 	if len(scan.candidates)+len(scan.handshakes) == 0 {
 		return nil, nil
 	}
+	visit := scan.visit
 	if source.reader != nil {
 		source.needsPayload = scan.needsPayload
+		// The visitor retains only owned, decrypted bytes.
+		source.borrowUDPPayload = true
+	} else {
+		visit = func(record PacketRecord, frame Frame, datagram []byte) error {
+			if !scan.needsPayload(frame, datagram) {
+				return nil
+			}
+			return scan.visit(record, frame, datagram)
+		}
 	}
-	if err := source.walk(scan.visit); err != nil {
+	if err := source.walk(visit); err != nil {
 		return nil, err
 	}
 	var out []KeyedQUICRecord
@@ -205,16 +224,38 @@ func keyedQUICPaths(f Frame) [2]quicKeyedPath {
 	}
 }
 
-func (s *quicKeyedScan) needsPayload(f Frame, _ []byte) bool {
+func (s *quicKeyedScan) needsPayload(f Frame, prefix []byte) bool {
 	if f.IPProtocol != IPProtoUDP || f.mayContainUDPFragment() || f.PayloadLength < 21 {
 		return false
 	}
 	paths := keyedQUICPaths(f)
-	return s.lengths[paths[0]]|s.lengths[paths[1]] != 0
+	if s.lengths[paths[0]]|s.lengths[paths[1]] != 0 {
+		return true
+	}
+	if len(prefix) != 0 && prefix[0]&0x80 != 0 {
+		return false
+	}
+	for _, path := range paths {
+		path = path.anyClient()
+		for sizes := s.lengths[path]; sizes != 0; sizes &= sizes - 1 {
+			size := bits.TrailingZeros32(sizes)
+			if f.PayloadLength < uint32(21+size) {
+				break
+			}
+			if len(prefix) < 1+size {
+				return true
+			}
+			cid := makeQUICCID(prefix[1 : 1+size])
+			if len(s.candidates[quicKeyedCID{path: path, cid: cid}]) != 0 {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 func (s *quicKeyedScan) visit(record PacketRecord, frame Frame, datagram []byte) error {
-	if !s.needsPayload(frame, nil) {
+	if len(datagram) < 21 {
 		return nil
 	}
 	var visit func(uint32, []byte, int, []byte) error
@@ -230,7 +271,7 @@ func (s *quicKeyedScan) visit(record PacketRecord, frame Frame, datagram []byte)
 	if len(packet) < 21 {
 		return nil
 	}
-	dir, number, generation, payload, err := s.authenticate(frame, packet)
+	dir, number, generation, payload, err := s.authenticate(frame, packet, len(packet) != len(datagram))
 	if err != nil || dir == nil {
 		return err
 	}
@@ -251,14 +292,18 @@ func (s *quicKeyedScan) visit(record PacketRecord, frame Frame, datagram []byte)
 	return s.observeCIDs(dir, number, payload)
 }
 
-func (s *quicKeyedScan) authenticate(frame Frame, packet []byte) (*quicKeyedDirection, uint64, uint8, []byte, error) {
+func (s *quicKeyedScan) authenticate(frame Frame, packet []byte, coalesced bool) (*quicKeyedDirection, uint64, uint8, []byte, error) {
 	var match *quicKeyedDirection
 	var idUsed quicCID
+	var learnedID *quicCIDEntry
+	var clientIP netip.Addr
 	var number uint64
 	var generation uint8
 	var payload []byte
 	ports := [2]uint16{frame.SrcPort, frame.DstPort}
-	for i, path := range keyedQUICPaths(frame) {
+	paths := keyedQUICPaths(frame)
+	for i, path := range [4]quicKeyedPath{paths[0], paths[1], paths[0].anyClient(), paths[1].anyClient()} {
+		actual := paths[i%2]
 		for sizes := s.lengths[path]; sizes != 0; sizes &= sizes - 1 {
 			size := bits.TrailingZeros32(sizes)
 			if len(packet) < 21+size {
@@ -267,11 +312,23 @@ func (s *quicKeyedScan) authenticate(frame Frame, packet []byte) (*quicKeyedDire
 			id := packet[1 : 1+size]
 			key := quicKeyedCID{path: path, cid: makeQUICCID(id)}
 			if size == 0 {
-				key.clientPort = ports[i]
+				key.clientPort = ports[i%2]
 			}
 			for _, candidate := range s.candidates[key] {
 				if !s.probe(len(packet)) {
 					return nil, 0, 0, nil, ErrQUICLimit
+				}
+				var learned *quicCIDEntry
+				if !path.client.IsValid() {
+					history := candidate.ids
+					learned = history.bySequence[history.byID[key.cid]]
+					if learned.client.IsValid() && learned.client != actual.client {
+						continue
+					}
+					// A retired, previously unobserved ID cannot establish a new IP.
+					if actual.client != candidate.initial.path.client && (coalesced || learned.retired && !learned.client.IsValid()) {
+						continue
+					}
 				}
 				pn, proposed, plain, err := candidate.decoder.headerDecoder.open(packet, id, candidate.expected, candidate.decoder)
 				if err != nil {
@@ -281,6 +338,7 @@ func (s *quicKeyedScan) authenticate(frame Frame, packet []byte) (*quicKeyedDire
 					return nil, 0, 0, nil, nil // More than one candidate authenticated.
 				}
 				match, number, generation, payload, idUsed = candidate, pn, proposed, plain, key.cid
+				learnedID, clientIP = learned, actual.client
 			}
 		}
 	}
@@ -289,6 +347,9 @@ func (s *quicKeyedScan) authenticate(frame Frame, packet []byte) (*quicKeyedDire
 			return nil, 0, 0, nil, nil
 		}
 		match.packetCID = idUsed
+		if learnedID != nil {
+			learnedID.client = clientIP
+		}
 	}
 	return match, number, generation, payload, nil
 }

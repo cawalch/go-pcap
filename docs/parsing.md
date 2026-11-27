@@ -252,11 +252,20 @@ Conflicting bytes and inconsistent final sizes invalidate the reconstruction.
 Use `KeyedQUIC` or `KeyedQUICFromReaderAt` when Initials and application keys
 are available. Each authenticated packet retains its capture packet index,
 UDP offset, and key generation. Only uniquely authenticated associations
-contribute evidence. The scan tracks bounded connection-ID rotation within
-the observed path scope and up to 32 key updates per direction. It can
-decode reordered packets from the immediately preceding generation. Missing
-issuance or generation history can keep later packets opaque.
+contribute evidence. The scan tracks bounded connection-ID rotation and up
+to 32 key updates per direction. It can decode reordered packets from the
+immediately preceding generation. Missing issuance or key update history can
+keep later packets opaque.
 [Rotation and key-update fixture](../testdata/quic-key-updates.md)
+
+Standalone short-header packets can follow a client IP change when the
+server IP and port stay the same and the capture shows authenticated
+issuance of the destination connection ID. The scan binds each learned ID
+to the client IP of its first uniquely authenticated packet. The existing
+`MaxKeyedQUICLearnedIDs` cap therefore also bounds tracked new addresses.
+IP addresses are outside QUIC packet authentication. Flow indices and
+endpoints still identify the original Initial exchange.
+[Address change fixture](../testdata/quic-migration.md)
 
 ### Observe the server-selected QUIC ALPN
 
