@@ -487,6 +487,37 @@ func ExampleHTTP2HeaderBlock_DNSOverHTTPS() {
 	// Output: example.org
 }
 
+func ExampleCapture_DoHTransactions() {
+	data, err := os.ReadFile("testdata/doh-exchanges.pcapng")
+	if err != nil {
+		log.Fatal(err)
+	}
+	keys, err := os.ReadFile("testdata/doh-exchanges.keys")
+	if err != nil {
+		log.Fatal(err)
+	}
+	c, err := pcap.New(data)
+	if err != nil {
+		log.Fatal(err)
+	}
+	rows, err := c.DoHTransactions(data, keys)
+	if err != nil {
+		log.Fatal(err)
+	}
+	for _, row := range rows {
+		if row.Query.State == pcap.DoHComplete && row.Reply.State == pcap.DoHComplete &&
+			len(row.Query.DNS.Questions) != 0 && len(row.Reply.DNS.Answers) != 0 {
+			fmt.Printf("%s %s query packets %v reply packets %v\n", row.Query.DNS.Questions[0].Name,
+				row.Reply.DNS.Answers[0].Address, row.Query.PacketIndices, row.Reply.PacketIndices)
+		}
+	}
+	// Output:
+	// one.example 192.0.2.10 query packets [10] reply packets [19]
+	// two.example 192.0.2.11 query packets [11] reply packets [18]
+	// one.example 192.0.2.10 query packets [29] reply packets [38]
+	// two.example 192.0.2.11 query packets [30] reply packets [37]
+}
+
 func ExampleCapture_Web() {
 	data, err := os.ReadFile("testdata/deployments/proxy.pcapng")
 	if err != nil {
