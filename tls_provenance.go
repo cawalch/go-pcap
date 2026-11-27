@@ -21,6 +21,8 @@ const (
 	tlsStopInvalidRecord
 	tlsStopUnsupported
 	tlsStopLimit
+	tlsStopIndeterminate
+	tlsStopAlert
 )
 
 type tlsProvenanceBoundary struct {
@@ -158,6 +160,13 @@ func authenticatedTLSClose(alert []byte) bool {
 // of their legacy level, except for user_canceled.
 func terminalTLSAlert(alert []byte, tls13 bool) bool {
 	return len(alert) != 2 || alert[0] != 1 || tls13 && alert[1] != 90 && alert[1] != 0
+}
+
+func tlsAlertStopReason(alert []byte) tlsStopReason {
+	if len(alert) == 2 && (alert[0] == 1 || alert[0] == 2) {
+		return tlsStopAlert
+	}
+	return tlsStopInvalidRecord
 }
 
 func (p *tlsRecordMapper) captureClose(start, end, plainEnd int) {

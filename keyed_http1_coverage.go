@@ -27,6 +27,10 @@ const (
 	TLSCoverageUnsupported
 	// TLSCoverageLimit marks a local scan limit.
 	TLSCoverageLimit
+	// TLSCoverageClosed marks an authenticated close_notify.
+	TLSCoverageClosed
+	// TLSCoverageAlert marks an authenticated non-closure alert that stopped recovery.
+	TLSCoverageAlert
 )
 
 // TLSCoverageBoundary locates a boundary within the directional TCP stream,
@@ -100,8 +104,12 @@ func annotatedTLSCoverage(d *tlsDirectionProvenance, size int) TLSDirectionCover
 	if d.before.reason != tlsStopEnd {
 		before = tlsCoverageBoundary(d.before)
 	}
+	end := tlsCoverageBoundary(d.stop)
+	if d.closeNotify != nil {
+		end = TLSCoverageBoundary{WireOffset: d.closeNotify.wireEnd, Reason: TLSCoverageClosed}
+	}
 	return TLSDirectionCoverage{
-		Bytes: size, Before: before, End: tlsCoverageBoundary(d.stop), AuthenticatedClose: d.closeNotify != nil,
+		Bytes: size, Before: before, End: end, AuthenticatedClose: d.closeNotify != nil,
 	}
 }
 
@@ -124,6 +132,10 @@ func tlsCoverageBoundary(b tlsProvenanceBoundary) TLSCoverageBoundary {
 		reason = TLSCoverageUnsupported
 	case tlsStopLimit:
 		reason = TLSCoverageLimit
+	case tlsStopIndeterminate:
+		reason = TLSCoverageUnknown
+	case tlsStopAlert:
+		reason = TLSCoverageAlert
 	default:
 		return TLSCoverageBoundary{WireOffset: -1}
 	}

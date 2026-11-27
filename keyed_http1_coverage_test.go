@@ -117,3 +117,55 @@ func BenchmarkKeyedHTTP1OpeningCoverage(b *testing.B) {
 		}
 	})
 }
+
+func TestKeyedHTTP1AnalysisOpaqueEpochAndAlerts(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		alert  string
+		reason TLSCoverageReason
+	}{
+		{"close before captured tail", "\x01\x00", TLSCoverageClosed},
+		{"fatal alert", "\x02\x28", TLSCoverageAlert},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newKeyedFixture(t, TLSVersion13)
+			f.send(true, TCPFlagACK, f.seal(true, 0, TLSRecordAlert, tc.alert))
+			f.send(true, TCPFlagACK, f.seal(true, 1, TLSRecordApplicationData, "tail"))
+			raw := keyedCapture(t, f.keys, f.packets)
+			c, err := New(raw)
+			if err != nil {
+				t.Fatal(err)
+			}
+			a, err := c.AnalyzeKeyedHTTP1(raw, nil)
+			if err != nil || len(a.Openings) != 1 {
+				t.Fatalf("opening coverage unavailable: %v", err)
+			}
+			end := a.Openings[0].ServerCoverage
+			if end.End.Reason != tc.reason || end.AuthenticatedClose != (tc.reason == TLSCoverageClosed) {
+				t.Fatalf("alert coverage %+v", end)
+			}
+		})
+	}
+
+	f := newKeyedFixture(t, TLSVersion13)
+	f.pipeline()
+	var appKeys []byte
+	for line := range bytes.SplitSeq(f.keys, []byte("\n")) {
+		if bytes.HasPrefix(line, []byte("SERVER_TRAFFIC_SECRET_0 ")) {
+			appKeys = append(appKeys, line...)
+		}
+	}
+	raw := keyedCapture(t, appKeys, f.packets)
+	c, err := New(raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	a, err := c.AnalyzeKeyedHTTP1(raw, nil)
+	if err != nil || len(a.Openings) != 1 {
+		t.Fatalf("opening coverage unavailable: %v", err)
+	}
+	coverage := a.Openings[0].ServerCoverage
+	if coverage.Bytes == 0 || coverage.Before.Reason != TLSCoverageUnknown || coverage.Before.WireOffset < 0 {
+		t.Fatalf("opaque epoch has a known boundary and ambiguous cause: %+v", coverage)
+	}
+}

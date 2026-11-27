@@ -351,8 +351,13 @@ func decryptTLS13Records(stream []byte, cipherSuite uint16, handshakeSecret, app
 		if plain == nil {
 			if provenance != nil {
 				reason := tlsStopAuthentication
-				if !seenAppEpoch && (hsAEAD == nil || appAEAD == nil || provenance.earlyOffered && len(earlySecret) == 0) {
-					reason = tlsStopMissingKey
+				if !seenAppEpoch {
+					switch {
+					case hsAEAD == nil && appAEAD == nil && len(earlySecret) == 0:
+						reason = tlsStopMissingKey
+					case hsAEAD == nil || appAEAD == nil || provenance.earlyOffered && len(earlySecret) == 0:
+						reason = tlsStopIndeterminate
+					}
 				}
 				// The regular application epoch starts at its own sequence zero.
 				// Before producing any application records, allow recovery there.
@@ -474,7 +479,7 @@ func decryptTLS13Records(stream []byte, cipherSuite uint16, handshakeSecret, app
 					return hsBuf.Bytes(), appBuf.Bytes(), nil
 				}
 				if terminalTLSAlert(innerContent, true) {
-					provenance.stopAt(start, tlsStopInvalidRecord)
+					provenance.stopAt(start, tlsAlertStopReason(innerContent))
 					return hsBuf.Bytes(), appBuf.Bytes(), nil
 				}
 			}
@@ -737,7 +742,7 @@ func decryptTLS12Records(stream []byte, cipherSuite uint16, masterSecret []byte,
 				break
 			}
 			if terminalTLSAlert(plain, false) {
-				provenance.stopAt(start, tlsStopInvalidRecord)
+				provenance.stopAt(start, tlsAlertStopReason(plain))
 				break
 			}
 		}
