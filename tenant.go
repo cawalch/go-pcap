@@ -93,6 +93,36 @@ func (t *TenantCapture) DNSFromReaderAt(r io.ReaderAt) ([]DNSRecord, error) {
 	return scanDNS(source)
 }
 
+// DNSTransactions pairs observed unicast DNS queries and replies within this
+// view. Flow indices refer to the view and packet indices to the original
+// capture. The pairing and limits follow [Capture.DNSTransactions].
+func (t *TenantCapture) DNSTransactions(data []byte) ([]DNSTransaction, error) {
+	return scanDNSTransactions(ipFrameSource{capture: t.capture, data: data, scope: &t.scope})
+}
+
+// DNSTransactionsFromReaderAt is the bounded ReaderAt equivalent of
+// [TenantCapture.DNSTransactions].
+func (t *TenantCapture) DNSTransactionsFromReaderAt(r io.ReaderAt) ([]DNSTransaction, error) {
+	source := t.capture.dnsTransactionReaderAt(r)
+	source.scope = &t.scope
+	return scanDNSTransactions(source)
+}
+
+// TLSHandshakeEvidence identifies TLS hellos and certificates within this
+// view. Flow indices refer to the view and packet indices to the original
+// capture. Keys, provenance, and limits follow [Capture.TLSHandshakeEvidence].
+func (t *TenantCapture) TLSHandshakeEvidence(data, extraKeyLog []byte) ([]TLSHandshakeEvidence, error) {
+	return scanTLSHandshakeEvidence(ipFrameSource{capture: t.capture, data: data, scope: &t.scope}, extraKeyLog)
+}
+
+// TLSHandshakeEvidenceFromReaderAt is the bounded ReaderAt equivalent of
+// [TenantCapture.TLSHandshakeEvidence].
+func (t *TenantCapture) TLSHandshakeEvidenceFromReaderAt(r io.ReaderAt, extraKeyLog []byte) ([]TLSHandshakeEvidence, error) {
+	source := t.capture.tcpReaderAt(r)
+	source.scope = &t.scope
+	return scanTLSHandshakeEvidence(source, extraKeyLog)
+}
+
 // HTTP1Transactions reports cleartext HTTP/1 transactions within this view.
 func (t *TenantCapture) HTTP1Transactions(data []byte) ([]HTTP1Transaction, error) {
 	return scanHTTP1Transactions(ipFrameSource{capture: t.capture, data: data, scope: &t.scope}, nil)
