@@ -1129,6 +1129,30 @@ and packet references share a further 262,144-entry budget. A record used by
 two transactions charges its references twice. Exceeding an aggregate HTTP
 limit returns `ErrHTTPLimit` and no rows.
 
+### Explain keyed HTTP/1 coverage
+
+Use `Capture.AnalyzeKeyedHTTP1` or `Capture.AnalyzeKeyedHTTP1FromReaderAt`
+when you need both transaction rows and the coverage of identified TLS
+openings. Each direction reports plaintext byte count, an earlier opaque
+range if observed, and the reason recovery stopped. An opening with visible
+client and server hellos can have zero rows when its traffic keys are
+unavailable. A scan that cannot identify both hellos leaves that opening's
+coverage unknown.
+
+Use the original opening packet and capture-wide flow index to locate the
+connection. Directional wire offsets include any proxy prefix. The end of
+captured input and an authenticated close notify are separate observations.
+An unsuccessful authentication establishes a record boundary without
+establishing which key or input bytes were wrong. Transaction pairing and
+body completeness still govern observations about an individual exchange.
+Capture-wide truncation and unsupported link counts are available separately.
+A terminal scan error discards the result and preserves the error for
+`errors.Is`.
+
+The [external Go example](../keyed_http1_coverage_example_test.go) locates the
+packets behind a complete response, shows a defined match and non-match,
+and reports unknown when an observed TLS opening lacks its keys.
+
 ### Export an HTTP/1 exchange as ciphertext
 
 Pass a row's `ID` to `ExtractKeyedHTTP1TransactionPCAPNG` or
