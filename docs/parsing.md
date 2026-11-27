@@ -596,6 +596,28 @@ signatures before using these port hints. A result is a candidate for further
 parsing. `L7Unknown` can also mean the identifying bytes are incomplete or the
 capture starts after the protocol opening.
 
+### Identify fragmented TCP coverage
+
+Capture-level TCP analyzers skip segments carried in IPv4 or IPv6 fragments.
+Complete protocol records from unfragmented TCP can still appear. To identify
+this coverage limit, iterate packet references and inspect `Frame.Anomalies.IPFragment`,
+`IPProtocol`, and the fragment offset and ID. Treat a fragmented packet with
+an IPv6 extension after the Fragment header as unresolved transport until
+you have enough bytes to decode the extension chain. Bound the packet work
+in your caller when inspecting a large capture.
+
+The [fragmented TCP example](../example_framing_test.go) reports the packet
+indices where this capture contains TCP fragments, then returns TLS hellos
+from the competing unfragmented flows on either input path. A nonempty
+fragment list is a reason to leave questions about the affected traffic
+unresolved. A fragment alone cannot establish the TCP opening or port tuple.
+
+`DefragmentIP` can reconstruct datagram bytes after the caller groups
+fragments. The capture-level fragment collectors currently dispatch DNS and
+QUIC over UDP. Applying them to TCP would also require preserving the
+observed opening and attributing any recovered segment to all contributing
+original packets. [Independent reference](../testdata/framing/README.md#fragmented-tcp)
+
 ## Parse DNS messages and tunneling metrics
 
 Call `ParseDNS(payload)` on a single DNS message or `capture.DNS(data)` to

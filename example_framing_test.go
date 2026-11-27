@@ -1,8 +1,11 @@
 package pcap_test
 
 import (
+	"bytes"
 	"fmt"
 	"net/netip"
+	"os"
+	"reflect"
 
 	pcap "github.com/cawalch/go-pcap"
 )
@@ -44,4 +47,53 @@ func ExampleClassifyL7() {
 	}
 	// Output:
 	// HTTP/1 candidate
+}
+
+func ExampleCapture_TLSFromReaderAt_fragmentedTCP() {
+	data, err := os.ReadFile("testdata/framing/fragmented-tcp.pcap")
+	if err != nil {
+		panic(err)
+	}
+	source := bytes.NewReader(data)
+	c, err := pcap.NewFromReaderAt(source, int64(len(data)))
+	if err != nil {
+		panic(err)
+	}
+	// Keep packet references for the fragmented input omitted by the TLS scan.
+	for pkt, err := range c.PacketSeqFromReaderAt(source) {
+		if err != nil {
+			panic(err)
+		}
+		body, err := c.PacketPayloadFromReaderAt(source, pkt)
+		if err != nil {
+			panic(err)
+		}
+		frame, err := pcap.DecodeFrame(body, pkt.LinkType)
+		if err != nil {
+			panic(err)
+		}
+		if frame.Anomalies.IPFragment && frame.IPProtocol == pcap.IPProtoTCP {
+			fmt.Printf("packet %d: IPv%d TCP fragment, ID %d offset %d\n", pkt.Index, frame.IPVersion, frame.IPID, frame.IPFragOffset)
+		}
+	}
+	rows, err := c.TLSFromReaderAt(source)
+	if err != nil {
+		panic(err)
+	}
+	sliceRows, err := c.TLS(data)
+	if err != nil || !reflect.DeepEqual(rows, sliceRows) {
+		panic("TLS results differ across capture inputs")
+	}
+	for _, row := range rows {
+		fmt.Printf("TLS: source port %d, SNI %s\n", row.SrcPort, row.Handshake.ClientHello.SNI)
+	}
+	// Output:
+	// packet 0: IPv4 TCP fragment, ID 50 offset 0
+	// packet 1: IPv4 TCP fragment, ID 50 offset 40
+	// packet 2: IPv4 TCP fragment, ID 51 offset 0
+	// packet 4: IPv6 TCP fragment, ID 50 offset 0
+	// packet 5: IPv6 TCP fragment, ID 50 offset 40
+	// packet 6: IPv6 TCP fragment, ID 51 offset 0
+	// TLS: source port 41002, SNI fragment.example
+	// TLS: source port 42002, SNI fragment.example
 }

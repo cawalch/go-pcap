@@ -120,3 +120,22 @@ tshark -n -r icmp-errors.pcapng -T fields -e frame.number -e frame.protocols \
 | --- | --- | --- |
 | 1 | `eth:ethertype:ip:icmp:ip:tcp` | 40000 → 8080 |
 | 2 | `eth:ethertype:ipv6:icmpv6:ipv6:tcp` | 41000 → 8443 |
+
+## Fragmented TCP
+
+The generator creates a benign TLS ClientHello in IPv4 and IPv6 TCP segments.
+Each address pair has one full two-fragment datagram, one initial fragment
+whose tail is absent, and one unfragmented control.
+
+```sh
+python3 generate_fragmented_tcp.py
+tshark -2 -n -r fragmented-tcp.pcap -o ip.defragment:true -o ipv6.defragment:true \
+  -T fields -e frame.number -e ip.reassembled_in -e ipv6.reassembled.in \
+  -e tcp.srcport -e tls.handshake.extensions_server_name
+```
+
+TShark 4.6.10 (commit `eac916f07299`) reports `fragment.example` on original
+frames 2, 4, 6 and 8. Frames 2 and 6 complete fragment reassembly. Frames 3
+and 7 lack their tail and have no matching hello. The go-pcap example reports
+original TCP fragment packet indices and returns only the controls on frames
+4 and 8. Go packet indices are zero-based.
