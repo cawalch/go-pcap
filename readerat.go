@@ -258,6 +258,10 @@ func (c *Capture) UnsupportedLinkTypePacketsFromReaderAt(r io.ReaderAt) (count i
 // and frame reads together are limited to [MaxReaderAtScanBytes].
 // See [Capture.UnsupportedLinkTypePackets] for link-type coverage.
 func (c *Capture) FlowsFromReaderAt(r io.ReaderAt) ([]FlowSummary, error) {
+	return c.flowsFromReaderAt(r, nil)
+}
+
+func (c *Capture) flowsFromReaderAt(r io.ReaderAt, scope *TenantScope) ([]FlowSummary, error) {
 	if err := c.validateContainer(); err != nil {
 		return nil, err
 	}
@@ -271,10 +275,10 @@ func (c *Capture) FlowsFromReaderAt(r io.ReaderAt) ([]FlowSummary, error) {
 		defer w.release()
 		r = w
 	}
-	if c.LinkType == LinkTypeIEEE80211RadioTap || slices.ContainsFunc(c.Interfaces, func(iface InterfaceDescriptor) bool {
+	if scope != nil || c.LinkType == LinkTypeIEEE80211RadioTap || slices.ContainsFunc(c.Interfaces, func(iface InterfaceDescriptor) bool {
 		return iface.LinkType == LinkTypeIEEE80211RadioTap
 	}) {
-		return c.flowsFromRadiotapReader(r)
+		return c.flowsFromPrefixReader(r, scope)
 	}
 	acc := flowAccumulator{separateInterfaces: c.SeparateTCPInterfaces && len(c.Interfaces) > 1}
 	var header [256]byte
@@ -310,12 +314,12 @@ func (c *Capture) FlowsFromReaderAt(r io.ReaderAt) ([]FlowSummary, error) {
 	return acc.flows, nil
 }
 
-// flowsFromRadiotapReader uses the shared prefix walker to retry large Radiotap
-// headers. Other captures use the direct loop without that recovery path.
-func (c *Capture) flowsFromRadiotapReader(r io.ReaderAt) ([]FlowSummary, error) {
+// flowsFromPrefixReader uses the shared prefix walker for scope selection or
+// large Radiotap headers. Other captures use the direct loop above.
+func (c *Capture) flowsFromPrefixReader(r io.ReaderAt, scope *TenantScope) ([]FlowSummary, error) {
 	budget := scanReadBudget{r: r, remaining: MaxReaderAtScanBytes}
 	acc := flowAccumulator{separateInterfaces: c.SeparateTCPInterfaces && len(c.Interfaces) > 1}
-	err := c.walkFlowPrefixes(&budget, func(pkt PacketRecord, f Frame, prefix []byte) error {
+	err := c.walkScopedFlowPrefixes(&budget, scope, func(pkt PacketRecord, f Frame, prefix []byte) error {
 		return acc.observe(&pkt, &f, prefix)
 	})
 	if err != nil {
@@ -401,11 +405,15 @@ func completeFlowPrefix(f *Frame, prefix []byte, captured int64) (complete bool,
 // DNS transport and UDP fragment reads under [MaxReaderAtScanBytes].
 // See [Capture.UnsupportedLinkTypePackets] for link-type coverage.
 func (c *Capture) DNSFromReaderAt(r io.ReaderAt) ([]DNSRecord, error) {
+	return scanDNS(c.dnsReaderAt(r))
+}
+
+func (c *Capture) dnsReaderAt(r io.ReaderAt) ipFrameSource {
 	// ParseDNS owns the decoded names and never keeps the original bytes.
-	return scanDNS(ipFrameSource{capture: c, reader: r, borrowUDPPayload: true, needsPayload: func(f Frame, _ []byte) bool {
+	return ipFrameSource{capture: c, reader: r, borrowUDPPayload: true, needsPayload: func(f Frame, _ []byte) bool {
 		return f.mayContainUDPFragment() ||
 			(f.IPProtocol == IPProtoUDP || f.IPProtocol == IPProtoTCP) && (isDNSPort(f.SrcPort) || isDNSPort(f.DstPort))
-	}})
+	}}
 }
 
 // tcpReaderAt visits all IP frames for flow indexing and reads full payloads only for TCP.
@@ -554,7 +562,7 @@ func (s ipFrameSource) walkReaderAt(visit func(PacketRecord, Frame, []byte) erro
 		s.reader = w
 	}
 	budget := scanReadBudget{r: s.reader, remaining: MaxReaderAtScanBytes}
-	return s.capture.walkFlowPrefixes(&budget, func(pkt PacketRecord, f Frame, data []byte) error {
+	return s.capture.walkScopedFlowPrefixes(&budget, s.scope, func(pkt PacketRecord, f Frame, data []byte) error {
 		start, end := int64(f.PayloadOffset), int64(f.PayloadOffset)+int64(f.PayloadLength)
 		available := data[start:min(end, int64(len(data)))]
 		if f.PayloadLength == 0 || !s.needsPayload(f, available) {
@@ -581,9 +589,16 @@ func (s ipFrameSource) walkReaderAt(visit func(PacketRecord, Frame, []byte) erro
 // walkFlowPrefixes supplies borrowed frame bytes through the transport header.
 // The prefix can be shorter than the frame's declared payload.
 func (c *Capture) walkFlowPrefixes(budget *scanReadBudget, visit func(PacketRecord, Frame, []byte) error) error {
+	return c.walkScopedFlowPrefixes(budget, nil, visit)
+}
+
+func (c *Capture) walkScopedFlowPrefixes(budget *scanReadBudget, scope *TenantScope, visit func(PacketRecord, Frame, []byte) error) error {
 	var header [256]byte
 	var scratch []byte
 	return c.walkPacketsFromReaderAt(budget, false, func(pkt PacketRecord) error {
+		if scope != nil && pkt.InterfaceID != scope.InterfaceID {
+			return nil
+		}
 		n := min(pkt.PayloadLength, int64(len(header)))
 		if n == 0 {
 			return nil
@@ -609,7 +624,7 @@ func (c *Capture) walkFlowPrefixes(budget *scanReadBudget, visit func(PacketReco
 				return err
 			}
 		}
-		if f.IPVersion == 0 {
+		if f.IPVersion == 0 || scope != nil && !scope.matchFrame(&f, data) {
 			return nil
 		}
 		return visit(pkt, f, data)

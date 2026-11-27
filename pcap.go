@@ -441,6 +441,7 @@ type ipFrameSource struct {
 	reader           io.ReaderAt
 	needsPayload     func(Frame, []byte) bool
 	borrowUDPPayload bool
+	scope            *TenantScope
 }
 
 func (s ipFrameSource) walk(visit func(PacketRecord, Frame, []byte) error) error {
@@ -455,12 +456,15 @@ func (s ipFrameSource) walk(visit func(PacketRecord, Frame, []byte) error) error
 	}
 	r := NewSafeReader(s.data)
 	return s.capture.walkPackets(r, func(pkt PacketRecord) error {
+		if s.scope != nil && pkt.InterfaceID != s.scope.InterfaceID {
+			return nil
+		}
 		payload, err := r.Slice(pkt.PayloadOffset, pkt.PayloadLength)
 		if err != nil {
 			return err
 		}
 		frame, err := decodeCaptureFrame(payload, pkt.LinkType)
-		if err != nil || frame.IPVersion == 0 {
+		if err != nil || frame.IPVersion == 0 || s.scope != nil && !s.scope.matchFrame(&frame, payload) {
 			return nil
 		}
 		return visit(pkt, frame, payload[frame.PayloadOffset:frame.PayloadOffset+frame.PayloadLength])
