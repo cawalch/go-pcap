@@ -41,7 +41,7 @@ Privileged live capture on Windows and macOS requires separate verification.
 Measure metadata scans and flow indexing with `BenchmarkReaderAtScan`, protocol
 scans with `BenchmarkReaderAtProtocols` and `BenchmarkReaderAtFileProtocols`,
 and bounded export with `BenchmarkFileFlowExport`. Compare read counts, bytes,
-allocations and elapsed time on the same inputs. [Benchmark guide](../CONTRIBUTING.md#measure-performance)
+allocations and elapsed time on the same inputs. [Benchmark guide](../CONTRIBUTING.md#measure-performance) · [Embedded workload measurements](embedded-workload.md)
 
 ### Protocol and integration proposals
 
