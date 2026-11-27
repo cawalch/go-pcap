@@ -52,7 +52,7 @@ flow=0 query_frame=13 id=0006 name="pending.example" type=1 class=1 no_reply_obs
 	if err != nil {
 		t.Fatal(err)
 	}
-	records, err := c.DNS(data)
+	records, err := c.DNSTransactions(data)
 	if err != nil {
 		t.Fatal(err)
 	}

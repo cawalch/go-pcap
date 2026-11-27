@@ -629,7 +629,7 @@ interfaces. Both settings use the same flow indices and scan-wide fragment limit
 ### Diagnose DNS transactions
 
 Run the [DNS transaction example](../examples/dns-transactions/main.go) from
-the repository root. It scans a seekable capture using `DNSFromReaderAt`.
+the repository root. It scans a seekable capture using `DNSTransactionsFromReaderAt`.
 Frame numbers start at one so you can jump to them in Wireshark.
 
 ```sh
@@ -661,16 +661,23 @@ transactions.
 | 12 | A SERVFAIL reply (header RCODE 2) was observed without its query. |
 | 13 | The capture ended with an outstanding query. Packet loss, a one-sided capture, and ending the capture too early can all leave a query unanswered in the report. |
 
-The example pairs single-question, standard DNS queries on port 53 by flow,
-directional endpoints, transaction ID, and decoded question name, type and
-class. Names compare case-insensitively for ASCII letters. After identical
-outstanding questions collide, that key stays ambiguous for the remainder of
-the capture. Unsupported question shapes and structural anomalies produce an
-`unsupported` observation when the DNS parser returns a record.
+Use `DNSTransactions` or `DNSTransactionsFromReaderAt` to pair standard,
+single-question unicast lookups on port 53. Each PcapNG interface supplies an
+independent observation point, including for IP fragments and TCP openings.
+UDP pairs use directional endpoints, transaction ID and the question's name,
+type and class. TCP pairs also require the same observed connection opening.
+Names preserve label boundaries and compare ASCII letters case-insensitively.
+A five-tuple reused without a visible new opening can be indistinguishable
+from one TCP connection.
 
-Use a capture from one observation point. A flow index groups a five-tuple
-and can span reused connections. For TCP, frame numbers identify the packet
-containing the first length-prefix byte. Elapsed time includes everything
+`DNSPaired` rows retain both original DNS records. An unpaired observation
+has a single record and reports a missing query, missing reply, ambiguity or
+unsupported input. Overlapping identical questions leave the key ambiguous
+for that UDP observation point or TCP opening for the rest of the scan.
+Zone transfers, unusual question shapes, and structurally anomalous messages
+produce unsupported rows. Multicast and discovery traffic are skipped.
+For TCP, frame numbers identify the packet containing the first length-prefix
+byte. Elapsed time includes everything
 between the two observations, including network transit. Missing, zero or
 backward timestamps leave it unknown. Inspect the original packets for the
 TC flag, EDNS extended response codes, and any evidence outside this pairing.
