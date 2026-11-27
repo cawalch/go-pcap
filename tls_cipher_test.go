@@ -77,9 +77,34 @@ func TestTLS12AndTLS13CipherCoverage(t *testing.T) {
 			t.Fatalf("AES-GCM control %d: %+v", i, tx)
 		}
 	}
+	withKeys, err := capture.AnalyzeKeyedHTTP1(data, nil)
+	if err != nil || len(withKeys.Openings) != len(suites) {
+		t.Fatalf("keyed analysis reports %d openings, err=%v", len(withKeys.Openings), err)
+	}
+	for _, i := range []int{1, 3} {
+		opening := withKeys.Openings[i]
+		if opening.FlowIndex != i {
+			t.Fatalf("opening %d refers to flow %d", i, opening.FlowIndex)
+		}
+		for _, direction := range []TLSDirectionCoverage{opening.ClientCoverage, opening.ServerCoverage} {
+			if direction.Bytes != 0 || direction.End.Reason != TLSCoverageUnsupported {
+				t.Fatalf("ChaCha20 flow %d coverage = %+v", i, direction)
+			}
+		}
+	}
+
 	withoutKeys := *capture
 	withoutKeys.Secrets = nil
-	if tx, err := withoutKeys.KeyedHTTP1Transactions(data, nil); err != nil || len(tx) != 0 {
-		t.Fatalf("keyless capture returned %d transactions, err=%v", len(tx), err)
+	keyless, err := withoutKeys.AnalyzeKeyedHTTP1(data, nil)
+	if err != nil || len(keyless.Openings) != len(suites) || len(keyless.Transactions) != 0 {
+		t.Fatalf("keyless analysis reports %d openings, %d transactions, err=%v", len(keyless.Openings), len(keyless.Transactions), err)
+	}
+	for _, i := range []int{0, 2} {
+		opening := keyless.Openings[i]
+		for _, direction := range []TLSDirectionCoverage{opening.ClientCoverage, opening.ServerCoverage} {
+			if direction.Bytes != 0 || direction.End.Reason != TLSCoverageMissingKey {
+				t.Fatalf("keyless AES-GCM flow %d coverage = %+v", i, direction)
+			}
+		}
 	}
 }

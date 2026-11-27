@@ -27,3 +27,43 @@ arbitrary traffic keys and nonces nor the QUIC header protection primitive.
 The library keeps its Go 1.26 floor and zero runtime dependencies.
 [Go 1.26 HPKE](https://pkg.go.dev/crypto/hpke@go1.26.0) ·
 [QUIC header protection](https://www.rfc-editor.org/rfc/rfc9001.html#section-5.4.4)
+
+## Measured coverage gap
+
+| Keyed endpoint fixture | Reference decoder | go-pcap |
+| --- | --- | --- |
+| TLS 1.2 and 1.3 [OpenSSL HTTP/1](../testdata/tls/README.md#tls-aes-gcm-and-chacha20-poly1305) | Four exchanges, two AES-GCM and two ChaCha20-Poly1305 | Two AES-GCM exchanges. All four selected suites are visible. |
+| QUIC v1 [aioquic DNS-over-QUIC](../testdata/doq-exchanges.md) | Two exchanges for each of AES-GCM and ChaCha20-Poly1305 | Two AES-GCM exchanges. Both selected suites are visible in Initial packets. |
+
+For TCP, `Capture.TLS` shows the selected suite when the ServerHello is visible.
+`Capture.AnalyzeKeyedHTTP1` reports `TLSCoverageUnsupported` in both directions
+of the keyed ChaCha20 exchanges above. Removing the keys from the AES controls
+reports `TLSCoverageMissingKey`. Failed record authentication has a separate
+`TLSCoverageAuthenticationFailed` boundary. A missing hello can leave no
+opening to diagnose.
+
+For QUIC, `Capture.QUIC` shows the selected suite and ClientHello random when
+the Initial exchange is available. `Capture.TLSKeyLog` lets callers check for
+a matching secret. `Capture.KeyedQUICWithALPN` and `Capture.DoQTransactions`
+return no rows in the ChaCha20 case, even with the matching keys. An empty
+result also occurs with missing keys, missing Initial context, or failed
+authentication. `NewQUIC1RTTDecoder` describes unsupported protection in its
+error, which wraps the same `ErrInvalidQUIC` sentinel used for invalid context
+and failed authentication.
+
+TShark 4.6.10 found seven ServerHellos across the 11 checked-in
+[deployment fixtures](../testdata/deployments/README.md). All seven selected
+AES. Only the enterprise LDAPS exchange supplies a negotiated suite and
+verified keys for application traffic. These are synthetic fixtures, so
+the frequency of key-backed ChaCha20 traffic in deployments is unknown.
+
+Keep the existing cipher boundary until a representative, key-backed capture
+shows an affected consumer workload. TLS record recovery would require a
+public ChaCha20-Poly1305 AEAD that accepts the traffic key and record nonce.
+QUIC would additionally require ChaCha20 header protection. On Go 1.26,
+support would require revisiting the runtime dependency decision for those
+primitives.
+
+```sh
+go test -count=1 -run 'CipherCoverage|QUIC1RTT|TestKeyedHTTP1Analysis$' .
+```
