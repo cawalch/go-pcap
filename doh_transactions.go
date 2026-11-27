@@ -74,7 +74,8 @@ type DoHTransaction struct {
 // respective keyed analyzers' order. Each analyzer's limits apply. This scan
 // also limits DNS wire bytes to [MaxTotalStreamBytes] and retains at most
 // 65,536 DNS questions and resource records in total. A scan-wide error
-// returns no results.
+// returns no results. [Capture.AnalyzeKeyedQUIC] also reports protection
+// coverage for the QUIC transport.
 func (c *Capture) DoHTransactions(data, extraKeyLog []byte) ([]DoHTransaction, error) {
 	return dohTransactions(func() ([]KeyedHTTP2Transaction, error) {
 		return c.KeyedHTTP2Transactions(data, extraKeyLog)
@@ -124,8 +125,12 @@ func dohTransactions(http2 func() ([]KeyedHTTP2Transaction, error), http3 func()
 	if err != nil {
 		return nil, err
 	}
+	return appendHTTP3DoH(out, quic, &budget)
+}
+
+func appendHTTP3DoH(out []DoHTransaction, quic []KeyedHTTP3Transaction, budget *dohBudget) ([]DoHTransaction, error) {
 	for i := range quic {
-		row, match, err := dohFromHTTP3(&quic[i], &budget)
+		row, match, err := dohFromHTTP3(&quic[i], budget)
 		if err != nil {
 			return nil, err
 		}

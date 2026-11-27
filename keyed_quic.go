@@ -2,6 +2,7 @@ package pcap
 
 import (
 	"encoding/binary"
+	"errors"
 	"fmt"
 	"io"
 	"math/bits"
@@ -54,16 +55,16 @@ type KeyedQUICRecord struct {
 // Results follow Initial exchange order and contain at least one packet.
 // A scan or resource-limit error returns no results.
 func (c *Capture) KeyedQUIC(data, extraKeyLog []byte) ([]KeyedQUICRecord, error) {
-	return scanKeyedQUIC(ipFrameSource{capture: c, data: data}, extraKeyLog, false)
+	return scanKeyedQUIC(ipFrameSource{capture: c, data: data}, extraKeyLog, false, nil)
 }
 
 // KeyedQUICFromReaderAt is the bounded ReaderAt equivalent of [Capture.KeyedQUIC].
 // Both passes share [MaxReaderAtScanBytes].
 func (c *Capture) KeyedQUICFromReaderAt(r io.ReaderAt, extraKeyLog []byte) ([]KeyedQUICRecord, error) {
-	return c.keyedQUICReaderAt(r, extraKeyLog, false)
+	return c.keyedQUICReaderAt(r, extraKeyLog, false, nil)
 }
 
-func (c *Capture) keyedQUICReaderAt(r io.ReaderAt, extraKeyLog []byte, alpn bool) ([]KeyedQUICRecord, error) {
+func (c *Capture) keyedQUICReaderAt(r io.ReaderAt, extraKeyLog []byte, alpn bool, coverage *[]QUICConnectionCoverage) ([]KeyedQUICRecord, error) {
 	if err := c.validateContainer(); err != nil {
 		return nil, err
 	}
@@ -72,7 +73,7 @@ func (c *Capture) keyedQUICReaderAt(r io.ReaderAt, extraKeyLog []byte, alpn bool
 	}
 	// Charge reads from both walks directly to the original source.
 	budget := scanReadBudget{r: r, remaining: MaxReaderAtScanBytes}
-	return scanKeyedQUIC(ipFrameSource{capture: c, reader: &budget, needsPayload: quicInitialPayload}, extraKeyLog, alpn)
+	return scanKeyedQUIC(ipFrameSource{capture: c, reader: &budget, needsPayload: quicInitialPayload}, extraKeyLog, alpn, coverage)
 }
 
 type quicKeyedPath struct {
@@ -93,6 +94,7 @@ type quicKeyedCID struct {
 }
 
 type quicKeyedDirection struct {
+	coverage  *QUICProtectionObservation
 	peer      *quicKeyedDirection
 	initial   quicKeyedCID
 	packetCID quicCID
@@ -118,15 +120,25 @@ type quicKeyedScan struct {
 	probes, probeBytes, kept int
 }
 
-func scanKeyedQUIC(source ipFrameSource, extraKeyLog []byte, alpn bool) ([]KeyedQUICRecord, error) {
-	keys, err := source.capture.TLSKeyLog(extraKeyLog)
-	if err != nil || len(keys.Entries) == 0 {
+func scanKeyedQUIC(source ipFrameSource, extraKeyLog []byte, alpn bool, coverage *[]QUICConnectionCoverage) ([]KeyedQUICRecord, error) {
+	keyLog := source.capture.TLSKeyLog
+	if coverage != nil {
+		keyLog = source.capture.boundedTLSKeyLog
+	}
+	keys, err := keyLog(extraKeyLog)
+	if err != nil || (coverage == nil && len(keys.Entries) == 0) {
 		return nil, err
 	}
-	var serverIDs []quicCID
-	initials, err := scanQUIC(source, &serverIDs)
+	var contexts []quicInitialContext
+	initials, err := scanQUIC(source, &contexts)
 	if err != nil {
 		return nil, err
+	}
+	if len(initials) == 0 {
+		return nil, nil
+	}
+	if coverage != nil {
+		*coverage = make([]QUICConnectionCoverage, len(initials))
 	}
 	scan := quicKeyedScan{
 		lengths:    make(map[quicKeyedPath]uint32),
@@ -135,18 +147,21 @@ func scanKeyedQUIC(source ipFrameSource, extraKeyLog []byte, alpn bool) ([]Keyed
 	connections := make([]quicKeyedConnection, len(initials))
 	for i, initial := range initials {
 		hs := &initial.Handshake
-		if !hs.HasServerHello {
-			continue
-		}
-		entry, ok := keys.Entries[hs.ClientHello.Random]
-		if !ok {
-			continue
-		}
+		entry, hasKeys := keys.Entries[hs.ClientHello.Random]
 		conn := &connections[i]
+		var evidence *QUICConnectionCoverage
+		if coverage != nil {
+			evidence = &(*coverage)[i]
+			*evidence = quicConnectionCoverage(initial, contexts[i].packetIndex, entry)
+			conn.client.coverage, conn.server.coverage = &evidence.Client1RTT, &evidence.Server1RTT
+		}
+		if !hs.HasServerHello || !hasKeys {
+			continue
+		}
 		conn.initial = initial
 		conn.client.peer, conn.server.peer = &conn.server, &conn.client
 		path := quicKeyedPath{client: initial.SrcAddr, server: netip.AddrPortFrom(initial.DstAddr, initial.DstPort)}
-		scan.register(path, initial.SrcPort, serverIDs[i], &conn.client, hs, entry.ClientTrafficSecret0)
+		scan.register(path, initial.SrcPort, contexts[i].serverID, &conn.client, hs, entry.ClientTrafficSecret0)
 		path.fromServer = true
 		cid := makeQUICCID(hs.SCID)
 		scan.register(path, initial.SrcPort, cid, &conn.server, hs, entry.ServerTrafficSecret0)
@@ -154,6 +169,9 @@ func scanKeyedQUIC(source ipFrameSource, extraKeyLog []byte, alpn bool) ([]Keyed
 			decoder, err := NewQUIC1RTTDecoder(hs.Version, hs.ServerHello.CipherSuite, entry.ServerHandshakeSecret)
 			if err == nil {
 				conn.handshake = &quicALPNDirection{decoder: decoder, version: hs.Version}
+				if evidence != nil {
+					conn.handshake.coverage = &evidence.ServerHandshake
+				}
 				if scan.handshakes == nil {
 					scan.handshakes = make(map[quicKeyedCID][]*quicALPNDirection)
 				}
@@ -184,11 +202,21 @@ func scanKeyedQUIC(source ipFrameSource, extraKeyLog []byte, alpn bool) ([]Keyed
 	var out []KeyedQUICRecord
 	for i := range connections {
 		c := &connections[i]
+		if coverage != nil {
+			for _, dir := range [2]*quicKeyedDirection{&c.client, &c.server} {
+				if len(dir.packets) != 0 {
+					dir.coverage.authenticated(dir.packets[0].PacketIndex)
+				}
+			}
+		}
 		var selection *QUICALPNSelection
 		if c.handshake != nil {
 			selection = c.handshake.selection()
 		}
 		if len(c.client.packets)+len(c.server.packets) != 0 || selection != nil {
+			if coverage != nil {
+				(*coverage)[i].RecordIndex = len(out)
+			}
 			out = append(out, KeyedQUICRecord{QUICRecord: c.initial, Client: c.client.packets, Server: c.server.packets, ALPN: selection})
 		}
 	}
@@ -271,7 +299,7 @@ func (s *quicKeyedScan) visit(record PacketRecord, frame Frame, datagram []byte)
 	if len(packet) < 21 {
 		return nil
 	}
-	dir, number, generation, payload, err := s.authenticate(frame, packet, len(packet) != len(datagram))
+	dir, number, generation, payload, err := s.authenticate(record.Index, frame, packet, len(packet) != len(datagram))
 	if err != nil || dir == nil {
 		return err
 	}
@@ -292,8 +320,10 @@ func (s *quicKeyedScan) visit(record PacketRecord, frame Frame, datagram []byte)
 	return s.observeCIDs(dir, number, payload)
 }
 
-func (s *quicKeyedScan) authenticate(frame Frame, packet []byte, coalesced bool) (*quicKeyedDirection, uint64, uint8, []byte, error) {
+func (s *quicKeyedScan) authenticate(packetIndex int, frame Frame, packet []byte, coalesced bool) (*quicKeyedDirection, uint64, uint8, []byte, error) {
 	var match *quicKeyedDirection
+	var failed *QUICProtectionObservation
+	probesBefore := s.probes
 	var idUsed quicCID
 	var learnedID *quicCIDEntry
 	var clientIP netip.Addr
@@ -332,6 +362,9 @@ func (s *quicKeyedScan) authenticate(frame Frame, packet []byte, coalesced bool)
 				}
 				pn, proposed, plain, err := candidate.decoder.headerDecoder.open(packet, id, candidate.expected, candidate.decoder)
 				if err != nil {
+					if candidate.coverage != nil && errors.Is(err, errQUICAuthentication) {
+						failed = candidate.coverage
+					}
 					continue
 				}
 				if match != nil {
@@ -341,6 +374,9 @@ func (s *quicKeyedScan) authenticate(frame Frame, packet []byte, coalesced bool)
 				learnedID, clientIP = learned, actual.client
 			}
 		}
+	}
+	if match == nil && failed != nil && s.probes-probesBefore == 1 {
+		failed.authenticationFailed(packetIndex)
 	}
 	if match != nil {
 		if !match.ids.accepts(idUsed, number) {

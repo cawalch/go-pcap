@@ -289,6 +289,20 @@ authenticate EncryptedExtensions and identify the selected Application-Layer
 Protocol Negotiation (ALPN) value and its packet indices. An application row
 can have nil `ALPN`. Client offers establish no server selection.
 
+### Diagnose unavailable keyed QUIC evidence
+
+Use `AnalyzeKeyedQUIC` or `AnalyzeKeyedQUICFromReaderAt` for protection
+coverage in observed Initial exchanges. Each connection reports client and
+server 1-RTT and server Handshake separately. A failed, uniquely attempted
+authentication includes a packet index. A connection whose ClientHello
+could not be recovered has no coverage row.
+
+Call the analysis's `HTTP3Transactions`, `DoQTransactions`, or `DoHTransactions`
+method to decode transactions from the same scan. The latter handles HTTP/3
+DoH. Protection coverage remains available when transaction decoding yields
+no rows. The HTTP/3 connection index matches the coverage record index.
+[Protection outcomes](offline-crypto.md#measured-coverage-gap)
+
 ### Delimit HTTP/3 frames
 
 Use `ParseHTTP3Stream` on a directional stream from a confirmed HTTP/3

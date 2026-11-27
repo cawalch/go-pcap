@@ -54,6 +54,7 @@ type DoQTransaction struct {
 // connection order and then ascending stream ID. Each direction requires a
 // clean FIN and exactly one length-framed DNS message with ID zero to report
 // a completed lookup. AXFR and IXFR are recognized as unsupported.
+// Use [Capture.AnalyzeKeyedQUIC] when protection coverage is also needed.
 func (c *Capture) DoQTransactions(data, extraKeyLog []byte) ([]DoQTransaction, error) {
 	connections, err := c.KeyedQUICWithALPN(data, extraKeyLog)
 	if err != nil {

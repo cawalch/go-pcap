@@ -38,3 +38,32 @@ func ExampleCapture_DoQTransactionsFromReaderAt() {
 	// one.example -> 192.0.2.10, stream 0, packets [5] and [8]
 	// two.example -> 192.0.2.11, stream 4, packets [6] and [7]
 }
+
+func ExampleCapture_AnalyzeKeyedQUICFromReaderAt() {
+	data, err := os.ReadFile("testdata/doq-exchanges.pcap")
+	if err != nil {
+		panic(err)
+	}
+	r := bytes.NewReader(data)
+	c, err := pcap.NewFromReaderAt(r, r.Size())
+	if err != nil {
+		panic(err)
+	}
+	analysis, err := c.AnalyzeKeyedQUICFromReaderAt(r, nil)
+	if err != nil {
+		panic(err)
+	}
+	rows, err := analysis.DoQTransactions()
+	if err != nil {
+		panic(err)
+	}
+	fmt.Printf("%d DNS transactions\n", len(rows))
+	for _, connection := range analysis.Connections {
+		if connection.ServerHandshake.State == pcap.QUICProtectionMissingKey {
+			fmt.Printf("Initial packet %d: server Handshake key unavailable\n", connection.InitialPacketIndex)
+		}
+	}
+	// Output:
+	// 0 DNS transactions
+	// Initial packet 0: server Handshake key unavailable
+}

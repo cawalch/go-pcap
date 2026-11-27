@@ -22,16 +22,17 @@ type QUICALPNSelection struct {
 // on an application row whose selection could not be recovered. Both encryption
 // levels share the scan-wide authentication and retained-byte limits.
 func (c *Capture) KeyedQUICWithALPN(data, extraKeyLog []byte) ([]KeyedQUICRecord, error) {
-	return scanKeyedQUIC(ipFrameSource{capture: c, data: data}, extraKeyLog, true)
+	return scanKeyedQUIC(ipFrameSource{capture: c, data: data}, extraKeyLog, true, nil)
 }
 
 // KeyedQUICWithALPNFromReaderAt is the bounded ReaderAt equivalent of
 // [Capture.KeyedQUICWithALPN]. Both passes share [MaxReaderAtScanBytes].
 func (c *Capture) KeyedQUICWithALPNFromReaderAt(r io.ReaderAt, extraKeyLog []byte) ([]KeyedQUICRecord, error) {
-	return c.keyedQUICReaderAt(r, extraKeyLog, true)
+	return c.keyedQUICReaderAt(r, extraKeyLog, true, nil)
 }
 
 type quicALPNDirection struct {
+	coverage *QUICProtectionObservation
 	decoder  *QUIC1RTTDecoder
 	version  uint32
 	expected uint64 // Server Handshake packet number space, separate from 1-RTT.
@@ -55,6 +56,8 @@ func (s *quicKeyedScan) observeHandshake(packetIndex int, f Frame, version uint3
 		key.clientPort = f.DstPort
 	}
 	var match *quicALPNDirection
+	var failed *QUICProtectionObservation
+	probesBefore := s.probes
 	var plain []byte
 	var number uint64
 	for _, candidate := range s.handshakes[key] {
@@ -66,6 +69,9 @@ func (s *quicKeyedScan) observeHandshake(packetIndex int, f Frame, version uint3
 		}
 		pn, p, err := candidate.decoder.openPacket(packet, pnOffset, candidate.expected, 0x0f, 0x0c)
 		if err != nil {
+			if candidate.coverage != nil && errors.Is(err, errQUICAuthentication) {
+				failed = candidate.coverage
+			}
 			continue
 		}
 		if match != nil {
@@ -74,7 +80,13 @@ func (s *quicKeyedScan) observeHandshake(packetIndex int, f Frame, version uint3
 		match, plain, number = candidate, p, pn
 	}
 	if match == nil {
+		if failed != nil && s.probes-probesBefore == 1 {
+			failed.authenticationFailed(packetIndex)
+		}
 		return nil
+	}
+	if match.coverage != nil {
+		match.coverage.authenticated(packetIndex)
 	}
 	match.expected = max(match.expected, number+1)
 	var chunks []quicALPNChunk
