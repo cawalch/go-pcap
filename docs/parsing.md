@@ -441,6 +441,23 @@ Responses to HEAD and bodyless statuses end at the headers. Pass the row's
 ID and original input to `ExtractHTTP1TransactionPCAPNG` or its ReaderAt
 variant. Shared packets can carry adjacent messages.
 
+### Select a cleartext HTTP/1 response for scanning
+
+Call `ResponseArtifact` on a row from `HTTP1Transactions`, its ReaderAt
+variant, or a tenant view. Pass `Body` to a whole-entity scanner when coverage
+is `HTTP1ArtifactComplete`. A complete empty entity has zero bytes. HEAD,
+responses that carry no entity, unsupported encodings, and unobserved
+responses yield unavailable scan input. A retained prefix or range can support
+a partial scan. A `206` response can have complete HTTP body coverage while
+carrying only part of the representation. Multipart ranges retain their
+multipart boundaries. The library leaves range assembly to the caller.
+
+Scan offsets are relative to `Body`. The response packet and payload offset
+locate the start of the final response. `ExchangePacketIndices` covers the
+whole exchange, including any interim responses. Shared packets can contain
+adjacent exchanges. The result borrows the transaction's body and packet
+slices with no additional capture reads. [Runnable example](../example_test.go)
+
 ### Inspect cleartext HTTP/1 request evidence
 
 Use `HTTP1RequestEvidence` or its ReaderAt variant for the raw target,
