@@ -28,10 +28,10 @@ interface options still leave overlapping TCP bytes and one DNS record.
 | VNI 201 | 4, 9, 14, 19, 24, 29, 34 | `/vni201` | `vni201.mirror.example` |
 | VNI 202 | 5, 10, 15, 20, 25, 30, 35 | `/vni202` | `vni202.mirror.example` |
 
-Select the raw scope first, then decode each subset with fresh reassembly.
-Frames 4, 5 and 7 in each subset carry the request, reply and completed
-DNS query respectively. The Go example translates those local records
-back to zero-based original packet indices.
+For comparison, select the raw scope in TShark before reassembly.
+Frames 4, 5, and 7 in each TShark subset carry the request, reply, and completed
+DNS query. The Go example runs both input paths on the original capture and
+reports its zero-based packet indices.
 
 ```sh
 subsets=$(mktemp -d)
@@ -46,5 +46,5 @@ vlan12|ieee8021ad.id == 100 && vlan.id == 12
 vni201|vxlan.vni == 201
 vni202|vxlan.vni == 202
 FILTERS
-go test -count=1 -run '^ExampleCapture_HTTP1Transactions_tenantScope$' .
+go test -count=1 -run '^ExampleCapture_SelectTenant$' .
 ```

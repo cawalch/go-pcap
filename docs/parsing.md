@@ -129,9 +129,20 @@ the gap. A new opening SYN can separate connections that share a flow index.
 Set `Capture.SeparateTCPInterfaces` or `Capture.SeparateIPFragmentInterfaces`
 before analysis when interface IDs distinguish observations you need to keep
 apart. These options affect TCP opening and supported UDP fragment grouping.
-Flow indices remain capture-wide. Inspect layer spans for VLAN or tunnel
-tenant boundaries that interface IDs alone cannot represent.
-[Tenant fixture](../testdata/framing/tenant-scope.md)
+Without a scope, flow indices remain capture-wide.
+
+Use `Capture.SelectTenant` to limit flow, DNS message, and cleartext HTTP/1
+transaction scans to one Ethernet observation point. Specify its capture interface
+and outer VLAN stack. To select VXLAN, also specify the VNI, outer IP endpoint pair,
+and inner VLAN stack. Empty VLAN lists select untagged traffic at their respective
+layers. The endpoint pair matches either tunnel direction. A VXLAN scope can
+specify up to two VLAN tags across both layers. The selector skips identities
+that are incomplete or exceed the frame layer limit.
+
+Both slice and ReaderAt methods use the original input. Packet indices remain
+capture-wide and flow indices refer to the view's `Flows` order. Each scan uses
+its existing read and reassembly limits.
+[Tenant fixture and example](../testdata/framing/tenant-scope.md)
 
 ### Identify an application protocol from a prefix
 

@@ -130,6 +130,10 @@ func (t *flowIndexTable) lookupOrInsert(k flowKey) (idx int, exists bool, err er
 // Non-IP packets (such as ARP) are skipped.
 // See [Capture.UnsupportedLinkTypePackets] for link-type coverage.
 func (c *Capture) Flows(data []byte) ([]FlowSummary, error) {
+	return c.flows(data, nil)
+}
+
+func (c *Capture) flows(data []byte, scope *TenantScope) ([]FlowSummary, error) {
 	if err := c.validateContainer(); err != nil {
 		return nil, err
 	}
@@ -141,12 +145,15 @@ func (c *Capture) Flows(data []byte) ([]FlowSummary, error) {
 	acc := flowAccumulator{separateInterfaces: c.SeparateTCPInterfaces && len(c.Interfaces) > 1}
 
 	err := c.walkPackets(&r, func(pkt PacketRecord) error {
+		if scope != nil && pkt.InterfaceID != scope.InterfaceID {
+			return nil
+		}
 		payload, err := r.Slice(pkt.PayloadOffset, pkt.PayloadLength)
 		if err != nil {
 			return err
 		}
 		frame, err := decodeCaptureFrame(payload, pkt.LinkType)
-		if err != nil || frame.IPVersion == 0 {
+		if err != nil || frame.IPVersion == 0 || scope != nil && !scope.matchFrame(&frame, payload) {
 			return nil
 		}
 
