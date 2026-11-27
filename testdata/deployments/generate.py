@@ -112,13 +112,13 @@ def block(kind, body):
     return pack("<2I", kind, length) + body + pack("<I", length)
 
 
-def write_pcapng(name, interfaces, packets, extra_blocks=b""):
+def write_pcapng(name, interfaces, packets, extra_blocks=b"", *, interval_us=1_000):
     data = block(0x0A0D0D0A, pack("<I2Hq", 0x1A2B3C4D, 1, 0, -1))
     for iface in interfaces:
         data += block(1, pack("<2HI", 1, 0, 262144) + option(2, iface.encode()) + option(0, b""))
     data += extra_blocks
     for number, (interface, frame_data, snap_length, options) in enumerate(packets, 1):
-        timestamp_us = 1_700_000_000_000_000 + number * 1_000
+        timestamp_us = 1_700_000_000_000_000 + number * interval_us
         captured = frame_data[:snap_length]
         header = pack("<5I", interface, timestamp_us >> 32, timestamp_us & 0xFFFFFFFF,
                       len(captured), len(frame_data))

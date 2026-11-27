@@ -145,6 +145,20 @@ capture-wide and flow indices refer to the view's `Flows` order. Each scan uses
 its existing read and reassembly limits.
 [Tenant fixture and example](../testdata/framing/tenant-scope.md)
 
+### Link observed DNS answers to HTTP/1 requests
+
+Call `TenantCapture.DNSHTTP1Links` or its ReaderAt variant with a capture ID
+and maximum answer age. A candidate is a paired, complete direct A or AAAA
+answer for the request's destination IP, observed from the same client in
+the selected scope. The completed reply precedes the request in packet order.
+The age must be within the caller's window and below the answer's TTL.
+
+Use the link status to distinguish one candidate, multiple eligible replies,
+and unresolved evidence. The result carries original DNS completion and HTTP
+request packet indices. Pair the capture ID and scope with the opening or
+request ID to distinguish reused tuples. Community ID still correlates the
+TCP tuple with other tools. [DNS-to-HTTP fixture](../testdata/framing/tenant-scope.md#dns-to-http-links)
+
 ### Identify an application protocol from a prefix
 
 Use `ClassifyL7` to choose a parser. Treat a match as a hint. The parser

@@ -562,7 +562,7 @@ func scanDNS(source ipFrameSource) ([]DNSRecord, error) {
 	if len(tcp.directions) == 0 {
 		return records, nil
 	}
-	err = tcp.walk(2, 12, 65535, func(dir *tcpMessageDirection, pkt messagePacket, data []byte) error {
+	err = tcp.walk(2, 12, 65535, false, func(dir *tcpMessageDirection, pkt messagePacket, data []byte) error {
 		msg, err := ParseDNS(data)
 		if err != nil {
 			return nil
@@ -637,7 +637,7 @@ func (c *Capture) HasDNSQuery(data []byte, qname string) (bool, error) {
 	if found {
 		return true, nil
 	}
-	err = tcp.walk(2, 12, 65535, func(_ *tcpMessageDirection, _ messagePacket, data []byte) error {
+	err = tcp.walk(2, 12, 65535, false, func(_ *tcpMessageDirection, _ messagePacket, data []byte) error {
 		if dnsPayloadHasQuery(data, target) {
 			return errStopWalk
 		}

@@ -69,7 +69,7 @@ func (c *Capture) extractHTTP1TransactionPCAPNG(source flowExportSource, w io.Wr
 	if c.Format == FormatPCAPNG && len(c.Interfaces) > 1 {
 		selection.interfaces = make(map[int]uint32)
 	}
-	if _, err := scanHTTP1Transactions(frames, &selection); err != nil {
+	if _, err := scanHTTP1Transactions(frames, &selection, nil); err != nil {
 		return err
 	}
 	return c.writeSelectedPackets(&source, w, selection.packetIndices, selection.interfaces)

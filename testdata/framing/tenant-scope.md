@@ -54,3 +54,23 @@ vni202|vxlan.vni == 202
 FILTERS
 go test -count=1 -run 'TestTenant|ExampleCapture_SelectTenant' .
 ```
+
+## DNS-to-HTTP links
+
+`tenant-dns-http.pcapng` reuses the HTTP tuple across VNI 201 and VNI 202.
+At a ten-second maximum age, VNI 201 request 12 links to reply 2. Reused
+opening 16 has request 19 and two eligible replies on frames 2 and 15.
+Request 26 is 1.2 seconds after its one-second answer TTL began. VNI 202
+request 7 has an unanswered lookup. The untagged TCP DNS reply completes
+out of order on frame 38, between HTTP requests 36 and 42.
+
+Frame numbers here are one-based. The Go API uses zero-based indices.
+
+```sh
+source=testdata/framing/tenant-dns-http.pcapng
+tshark -n -r "$source" -o tcp.analyze_sequence_numbers:FALSE -Y 'vxlan && (dns || http.request)' \
+  -T fields -e frame.number -e frame.time_relative -e vxlan.vni -e dns.a -e dns.resp.ttl -e http.request.uri
+tshark -n -r "$source" -o tcp.reassemble_out_of_order:TRUE -Y '!vxlan && (dns || http.request)' \
+  -T fields -e frame.number -e dns.qry.name -e http.request.uri
+go test -count=1 -run 'TestTenantDNSHTTP1|ExampleTenantCapture_DNSHTTP1Links' .
+```
