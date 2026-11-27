@@ -8,12 +8,57 @@ for pre-v1 releases (`0.y.z` minor bumps may include API additions or changes).
 
 ## Unreleased
 
-- Report unsupported link-layer packet counts and interface IDs through
-  `Capture.UnsupportedLinkTypePackets` and its ReaderAt counterpart.
-- Decrypt supported TLS 1.2 AES-CBC suites from `CLIENT_RANDOM` key-log secrets,
-  including both MAC-then-encrypt and encrypt-then-MAC records.
-- Stop SMB, RDP, and SSH capture message parsing at the first known TCP
-  sequence gap in each direction.
+## [v0.2.0](https://github.com/cawalch/go-pcap/releases/tag/v0.2.0) - 2026-11-26
+
+This experimental release adds capture-local protocol observations and
+packet-only evidence export. The module remains pure Go and requires Go 1.26.
+
+### Added
+
+- Separate TCP openings after a new SYN and optionally isolate TCP openings
+  and UDP fragments by PcapNG interface. The ordinary flow index still
+  identifies the capture-wide bidirectional five-tuple.
+- Report bounded unicast DNS transactions with query and reply packet
+  references and ambiguous retry outcomes. Add keyed DNS over TLS and a
+  helper for wire-format DNS inside HTTP/2.
+- Recover supported TLS 1.2 AES-CBC records, including both MAC orders.
+  Handle TLS 1.3 client early data and directional application key updates.
+  Expose observed TLS name comparison and certificate validity.
+- Authenticate supported QUIC v1 and v2 application packets from supplied
+  secrets, associate them with an Initial exchange, and reconstruct
+  directional streams. Delimit HTTP/3 frames on streams already identified
+  by the caller. QPACK field sections remain compressed.
+- Select bounded cleartext and keyed HTTP/1 and HTTP/2 transactions on
+  either input path. Retain the original packet evidence and export
+  packet-only PcapNG with needed decoding context. Keyed exports contain
+  original ciphertext and require keys separately when reopened.
+- Report bounded LDAP and LDAPS requests, DCE/RPC fragment metadata over
+  direct TCP and supported SMB2 pipes, and additional Kerberos metadata.
+- Decode additional datalinks and IP-in-IP. Report unsupported link-layer
+  packet counts, ICMP errors along quoted flows, TCP zero windows, checksum
+  evidence and scoped neighbor binding observations.
+- Enumerate native live devices and provide a small numeric IPv4 BPF filter
+  compiler. Stage gzip captures and pipes in the two offline example
+  commands. Detect unsupported Zstandard and XZ wrappers at capture open.
+
+### Fixed
+
+- Stop TLS, SMB, RDP and SSH capture parsing at a known TCP sequence gap.
+  HTTP transaction evidence distinguishes complete, incomplete and ambiguous
+  observations.
+- Improve PcapNG timestamps, obsolete Packet Blocks, Darwin attribution,
+  selected packet export and Linux capture length and buffer handling.
+- Bound TLS record coalescing, QUIC and HTTP decoding, and protocol scan
+  work. See the [limits and partial results](docs/compatibility.md#limits-and-errors)
+  and [coverage baseline](docs/capabilities.md).
+
+### Platform verification
+
+| Platform | Release candidate check |
+| --- | --- |
+| Linux | Hosted Go 1.26 and stable race tests, 386 tests, and privileged loopback on AMD64 and 386. |
+| macOS | Hosted native tests and datalink discovery with BPF access. |
+| Windows | Hosted native tests. Privileged Windows live capture remains unverified. |
 
 ## [v0.1.1](https://github.com/cawalch/go-pcap/releases/tag/v0.1.1) - 2026-11-23
 
