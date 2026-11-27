@@ -610,7 +610,7 @@ The [fragmented TCP example](../example_framing_test.go) reports the packet
 indices where this capture contains TCP fragments, then returns TLS hellos
 from the competing unfragmented flows on either input path. A nonempty
 fragment list is a reason to leave questions about the affected traffic
-unresolved. A fragment alone cannot establish the TCP opening or port tuple.
+unresolved. The frame decoder exposes no TCP ports on these fragments.
 
 `DefragmentIP` can reconstruct datagram bytes after the caller groups
 fragments. The capture-level fragment collectors currently dispatch DNS and
@@ -1192,9 +1192,9 @@ QUIC Initial analysis is still available through public Initial keys.
 `TLSKeyLog` reads supported embedded blocks in capture order, then the
 external key log. The last accepted line for the same client random and label
 wins. A missing label leaves that secret unavailable. Record the selected mode
-with any finding and report external or embedded as the usable source when a
-scan with that source alone authenticates the selected evidence. In combined
-mode, a successful scan can depend on either source or both. Keep key bytes,
+with any finding. When an isolated scan authenticates the selected evidence,
+report that source as sufficient. Both sources can independently suffice.
+In combined mode, authentication can also require keys from both sources. Keep key bytes,
 key-log entries and capture-wide secret blocks out of diagnostic output.
 
 Packet-only flow and transaction exports omit embedded secrets. To decrypt on
