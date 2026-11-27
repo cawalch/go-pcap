@@ -50,3 +50,42 @@ tshark -n -r tls12-cbc.pcapng \
   -e tcp.stream -e tls.handshake.ciphersuite -e tls.handshake.extension.type \
   -e http.request.uri -e http.response.code
 ```
+
+## TLS AES-GCM and ChaCha20-Poly1305
+
+`cipher-coverage.pcapng` holds four OpenSSL 4.1.0 loopback exchanges.
+The relay retains the original TLS byte order and wraps the records in
+synthetic Ethernet, IP and TCP headers. Test-only secrets are embedded in
+a Decryption Secrets Block. The OpenSSL client requests `/response` and
+receives status 200 with body `cipher fixture` in all four exchanges.
+
+Regenerate the fixture with OpenSSL 4.1.0 and Python 3.13.18. TLS randoms and
+TCP segmentation can change between generations.
+
+```sh
+PYTHONDONTWRITEBYTECODE=1 python3 testdata/tls/generate-cipher-coverage.py
+```
+
+TShark 4.6.10 (commit `eac916f07299`) reports the following frame numbers
+in the checked-in fixture.
+
+| TLS version | Selected cipher | ServerHello frame | Request frame | Response frame |
+| --- | --- | --- | --- | --- |
+| 1.2 | ECDHE_RSA with AES-128-GCM (`0xc02f`) | 4 | 7 | 8 |
+| 1.2 | ECDHE_RSA with ChaCha20-Poly1305 (`0xcca8`) | 13 | 16 | 17 |
+| 1.3 | AES-128-GCM (`0x1301`) | 24 | 26 | 27 |
+| 1.3 | ChaCha20-Poly1305 (`0x1303`) | 34 | 36 | 37 |
+
+```sh
+tshark -n -o tls.keylog_file: -r testdata/tls/cipher-coverage.pcapng \
+  -Y 'tls.handshake.type == 2 || http.request || http.response' -T fields \
+  -e frame.number -e tcp.stream -e tls.handshake.ciphersuite \
+  -e http.request.uri -e http.response.code -e http.file_data
+go test -count=1 -run '^TestTLS12AndTLS13CipherCoverage$' .
+```
+
+The Go test checks all four observed cipher IDs and finds a matching
+secret for each exchange. It recovers the two AES-GCM transactions when
+their secrets are available and verifies the direct decryptors' errors for
+the ChaCha20 suites. Without the secrets, capture analysis returns no
+application transactions.

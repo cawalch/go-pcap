@@ -1022,6 +1022,9 @@ and TLS 1.3 (`CLIENT_TRAFFIC_SECRET_0` / `SERVER_TRAFFIC_SECRET_0` with
 secrets embedded in PcapNG Decryption Secrets Blocks (`DSB`) or supplied in
 `extraKeyLog` (`SSLKEYLOGFILE` format).
 
+See the [offline cipher coverage matrix](offline-crypto.md) for the exact
+TLS and QUIC suites and ways to distinguish unavailable plaintext.
+
 TLS 1.2 AES-CBC decryption supports MAC-then-encrypt and encrypt-then-MAC.
 Capture analysis uses the ServerHello extension to select the record layout.
 The directional `DecryptTLS12Records` function selects the layout from the
