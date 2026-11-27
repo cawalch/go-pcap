@@ -129,7 +129,7 @@ func TestKeyedHTTP3MultiplexingAndQPACKContext(t *testing.T) {
 }
 
 func TestKeyedHTTP3GapResetAndReordering(t *testing.T) {
-	headers := []byte{1, 5, 0, 0, 0xd1, 0xd7, 0xc1}
+	headers := []byte{1, 8, 0, 0, 0xd1, 0xd7, 0xc1, 0x50, 1, 'x'}
 	start := append(slices.Clone(headers), 0, 4, 'a', 'b')
 	record := KeyedQUICRecord{ALPN: &QUICALPNSelection{Protocol: "h3"},
 		Client: []QUIC1RTTPacket{
@@ -160,5 +160,83 @@ func TestKeyedHTTP3GapResetAndReordering(t *testing.T) {
 	m = rows[3].Request
 	if !m.Invalid || !m.EndStream || m.BodyState != HTTPBodyUnknown || m.Sections[0].State != QPACKMalformed {
 		t.Fatalf("invalid %+v", m)
+	}
+}
+
+func TestKeyedHTTP3ConnectData(t *testing.T) {
+	// A regular or extended CONNECT request and the tunnel's DATA can share
+	// a packet. The 2xx status applies to both directions of the same stream.
+	for _, extended := range []bool{false, true} {
+		header := []byte{0, 0, 0xcf, 0x50, 3, 'x', ':', '9'} // CONNECT, :authority=x:9.
+		if extended {
+			header = append(header, 0xd7, 0xc1, 0x27, 2)
+			header = append(header, ":protocol"...)
+			header = append(header, 9)
+			header = append(header, "websocket"...)
+		}
+		request := append([]byte{1, byte(len(header))}, header...)
+		request = append(request, 0, 3, 'a', 'b', 'c')
+		for _, tc := range []struct {
+			status   int
+			field    byte
+			response string
+		}{
+			{200, 0xd9, ""}, {404, 0xdb, "xyz"},
+		} {
+			record := KeyedQUICRecord{ALPN: &QUICALPNSelection{Protocol: "h3"},
+				Client: []QUIC1RTTPacket{{PacketIndex: 2, Payload: h3TestStream(0, 0, false, request)}},
+				Server: []QUIC1RTTPacket{{PacketIndex: 3, Payload: h3TestStream(0, 0, true, []byte{1, 3, 0, 0, tc.field, 0, 3, 'x', 'y', 'z'})}},
+			}
+			rows, err := keyedHTTP3Transactions([]KeyedQUICRecord{record})
+			if err != nil || len(rows) != 1 {
+				t.Fatalf("rows %+v, %v", rows, err)
+			}
+			cl, sv := rows[0].Request, rows[0].Response
+			if cl.Body != nil || cl.BodyState != HTTPBodyComplete || cl.EndStream || cl.Invalid || !slices.Equal(cl.PacketIndices, []int{2}) ||
+				rows[0].StatusCode != tc.status || string(sv.Body) != tc.response || sv.BodyState != HTTPBodyComplete || sv.Invalid || !slices.Equal(sv.PacketIndices, []int{3}) {
+				t.Fatalf("extended=%t status=%d: request %+v response %+v", extended, tc.status, cl, sv)
+			}
+			if tc.status == 200 {
+				record.Client = nil
+				rows, err = keyedHTTP3Transactions([]KeyedQUICRecord{record})
+				if err != nil || rows[0].Response.Body != nil || rows[0].Response.BodyState != HTTPBodyUnknown {
+					t.Fatalf("response without method: %+v %v", rows, err)
+				}
+			}
+		}
+	}
+}
+
+func TestKeyedHTTP3RequestAuthority(t *testing.T) {
+	for _, tc := range []struct {
+		name, authority, host string
+		valid                 bool
+	}{
+		{"absent", "-", "-", false}, {"empty authority", "", "-", false}, {"empty host", "-", "", false},
+		{"empty authority with host", "", "x", false}, {"missing host value", "x", "", false},
+		{"conflicting", "x", "y", false}, {"authority only", "x", "-", true}, {"host only", "-", "x", true},
+		{"both equal", "x", "x", true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			fields := []byte{0, 0, 0xd1, 0xd7, 0xc1}
+			if tc.authority != "-" {
+				fields = append(fields, 0x50, byte(len(tc.authority)))
+				fields = append(fields, tc.authority...)
+			}
+			if tc.host != "-" {
+				fields = append(fields, 0x24, 'h', 'o', 's', 't', byte(len(tc.host)))
+				fields = append(fields, tc.host...)
+			}
+			wire := append([]byte{1, byte(len(fields))}, fields...)
+			record := KeyedQUICRecord{ALPN: &QUICALPNSelection{Protocol: "h3"}, Client: []QUIC1RTTPacket{{PacketIndex: 2, Payload: h3TestStream(0, 0, true, wire)}}}
+			rows, err := keyedHTTP3Transactions([]KeyedQUICRecord{record})
+			if err != nil || len(rows) != 1 {
+				t.Fatalf("rows %+v %v", rows, err)
+			}
+			m := rows[0].Request
+			if m.Invalid == tc.valid || (m.Sections[0].Kind == HTTP3InitialSection) != tc.valid || (m.BodyState == HTTPBodyComplete) != tc.valid {
+				t.Fatalf("request %+v", m)
+			}
+		})
 	}
 }

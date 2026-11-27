@@ -1169,7 +1169,17 @@ order and the first contiguous prefix. Network reordering between the
 observation point and endpoint can change the endpoint's arrival order.
 
 `BodyState` uses the entity decoding and content-length checks shared with
-HTTP/2. `EndStream` requires a clean final size. A gap or reset can leave a
+HTTP/2. CONNECT requests and their successful responses have empty HTTP
+entities. Their DATA still contributes to the directional packet indices,
+including on extended CONNECT streams. A rejected CONNECT response can
+carry an ordinary entity. For a 2xx response with DATA and no observed
+request method, the entity is unknown because it could be tunnel traffic.
+An HTTP or HTTPS request needs a nonempty `:authority` or `host`. If both
+appear, their values must agree. Malformed fields remain available in their
+decoded QPACK section and the request is marked invalid.
+[CONNECT in HTTP/3](https://www.rfc-editor.org/rfc/rfc9114.html#section-4.4)
+
+`EndStream` requires a clean final size. A gap or reset can leave a
 partial body, including a prefix that ends within a DATA frame. A missing
 FIN can also leave a partial body with neither flag set. Malformed HTTP
 framing marks the affected direction invalid. The scan admits 65,536

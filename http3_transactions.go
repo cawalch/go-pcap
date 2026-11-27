@@ -7,6 +7,7 @@ import (
 	"net/netip"
 	"slices"
 	"strconv"
+	"strings"
 )
 
 // Aggregate limits for a keyed HTTP/3 transaction scan.
@@ -211,6 +212,7 @@ func (s *http3LocatedStream) message(request bool, method string, dir, peer *htt
 	budget.packetRefs -= len(m.PacketIndices)
 	var body HTTP2MessageEvidence
 	var initial, trailers, uncertain bool
+	var tunnel, possibleTunnel, opaqueData bool
 	var section, status, encoderEnd int
 	for _, f := range s.framing.Frames {
 		switch f.Type {
@@ -226,7 +228,7 @@ func (s *http3LocatedStream) message(request bool, method string, dir, peer *htt
 			if !uncertain && !m.Invalid {
 				block := http3HeaderBlock(row.Headers)
 				switch {
-				case trailers || !validHTTP2Fields(block, request, initial):
+				case trailers || !validHTTP2Fields(block, request, initial) || request && !initial && !validHTTP3Authority(block):
 					m.Invalid = true
 				case initial:
 					h.Kind = HTTP3TrailerSection
@@ -235,6 +237,9 @@ func (s *http3LocatedStream) message(request bool, method string, dir, peer *htt
 					h.Kind = HTTP3InitialSection
 					initial = true
 					method = block.Method
+					// A CONNECT request has no entity. Client DATA can already carry
+					// prospective tunnel bytes before the response appears.
+					tunnel = method == "CONNECT"
 					body.HTTP2HeaderBlock = block
 				default:
 					code, err := strconv.Atoi(block.Status)
@@ -247,6 +252,8 @@ func (s *http3LocatedStream) message(request bool, method string, dir, peer *htt
 						h.Kind = HTTP3InitialSection
 						initial = true
 						status = code
+						tunnel = method == "CONNECT" && code/100 == 2
+						possibleTunnel = method == "" && code/100 == 2
 						body.HTTP2HeaderBlock = block
 					}
 				}
@@ -256,12 +263,15 @@ func (s *http3LocatedStream) message(request bool, method string, dir, peer *htt
 			if !uncertain && (!initial || trailers) {
 				m.Invalid = true
 			}
-			if initial && !trailers && !uncertain && !m.Invalid {
+			if possibleTunnel && f.PayloadLength != 0 {
+				opaqueData = true
+			}
+			if initial && !trailers && !uncertain && !m.Invalid && !tunnel && !possibleTunnel {
 				body.Body = append(body.Body, s.stream.Data[f.PayloadOffset:f.PayloadOffset+f.PayloadLength]...)
 			}
 		}
 	}
-	if initial && !trailers && !m.Invalid && !uncertain && s.framing.Truncated {
+	if initial && !trailers && !m.Invalid && !uncertain && !tunnel && s.framing.Truncated {
 		// ParseHTTP3Stream lists complete frames. A gap within a DATA frame
 		// still provides the entity prefix after its full type and length.
 		off := 0
@@ -271,8 +281,12 @@ func (s *http3LocatedStream) message(request bool, method string, dir, peer *htt
 		}
 		tail := s.stream.Data[off:]
 		if typ, n, ok := ReadQUICVarint(tail); ok && typ == HTTP3FrameData {
-			if _, k, ok := ReadQUICVarint(tail[n:]); ok {
-				body.Body = append(body.Body, tail[n+k:]...)
+			if length, k, ok := ReadQUICVarint(tail[n:]); ok {
+				if possibleTunnel {
+					opaqueData = opaqueData || length != 0
+				} else {
+					body.Body = append(body.Body, tail[n+k:]...)
+				}
 			}
 		}
 	}
@@ -280,7 +294,7 @@ func (s *http3LocatedStream) message(request bool, method string, dir, peer *htt
 		m.Invalid = true
 	}
 	body.EndStream = m.EndStream
-	if err := finishHTTP2Body(&body, m.Invalid || !initial || uncertain, !request && httpResponseHasNoBody(method, status), budget); err != nil {
+	if err := finishHTTP2Body(&body, m.Invalid || !initial || uncertain || opaqueData, tunnel || !request && httpResponseHasNoBody(method, status), budget); err != nil {
 		return nil, "", 0, err
 	}
 	m.Body, m.BodyState, m.BodyLimitExceeded = body.Body, body.BodyState, body.BodyLimitExceeded
@@ -314,6 +328,30 @@ func (s *http3LocatedStream) contextPackets(end int, indices map[int]bool, remai
 		}
 	}
 	return nil
+}
+
+// RFC 9114 section 4.3.1 requires a nonempty authority for HTTP(S).
+// When both forms appear they must carry the same field value.
+func validHTTP3Authority(block HTTP2HeaderBlock) bool {
+	if !strings.EqualFold(block.Scheme, "http") && !strings.EqualFold(block.Scheme, "https") {
+		return true
+	}
+	var host string
+	for _, field := range block.Headers {
+		if field.Name != ":authority" && field.Name != "host" {
+			continue
+		}
+		if field.Value == "" || strings.ContainsAny(field.Value, " \t@/?#") {
+			return false
+		}
+		if field.Name == "host" {
+			if host != "" {
+				return false
+			}
+			host = field.Value
+		}
+	}
+	return (block.Authority != "" || host != "") && (block.Authority == "" || host == "" || block.Authority == host)
 }
 
 func http3HeaderBlock(fields []HTTPHeader) HTTP2HeaderBlock {
