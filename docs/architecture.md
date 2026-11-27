@@ -35,6 +35,7 @@ evidence belongs in this package. Consumers own rules and scoring.
 | Frames and tunnels | [frame.go](../frame.go) | Test clipped headers and nested layers. Check ReaderAt header read costs. |
 | Flow summaries | [flow.go](../flow.go) | Run `TestReaderAtFlowParity` and `BenchmarkFlows`. |
 | Reassembly and protocol fields | [reassembly.go](../reassembly.go), [tcp_messages.go](../tcp_messages.go), protocol source | Test direct and capture entry points, gaps, and seekable parity. |
+| HPACK and QPACK wire encoding | [internal/hpackwire](../internal/hpackwire), [hpack.go](../hpack.go), [qpack.go](../qpack.go) | Test HTTP/2 and HTTP/3 error classification and decoded length limits. |
 | Writers, exports, and live I/O | [writer.go](../writer.go), [extract.go](../extract.go), `live_*.go` | Reopen exports to check original packets and context. Exercise live behavior on the target OS. |
 
 Put protocol-specific types beside their parser. Use

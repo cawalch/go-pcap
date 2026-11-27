@@ -111,8 +111,9 @@ the licensor intends to cease maintenance of that version of the software.
 
 Go HPACK tables
 ---------------
-hpack_tables.go uses tables from Go 1.27.4. The source carries the Go
-Authors' copyright notice. LICENSE-hpack contains the distribution terms.
+hpack_tables.go and internal/hpackwire/huffman_tables.go use tables from
+Go 1.27.4. Both files carry the Go Authors' copyright notice. LICENSE-hpack
+contains the distribution terms.
 
 Community ID
 ------------
