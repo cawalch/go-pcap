@@ -42,8 +42,10 @@ type KeyedQUICRecord struct {
 // ClientHello, ServerHello and Initial source connection IDs, and returns
 // packets only when one candidate authenticates. It reads complete UDP
 // datagrams, including trailing short headers in coalesced datagrams.
-// An empty connection ID requires the original tuple. A nonempty ID can
-// associate a client port change on the same IP pair and server port.
+// Authenticated NEW_CONNECTION_ID and RETIRE_CONNECTION_ID frames update the
+// eligible destinations in capture order. An empty ID requires the original
+// tuple. A nonempty ID can follow a client port change on the same IP pair
+// and server port.
 // Results follow Initial exchange order and contain at least one packet.
 // A scan or resource-limit error returns no results.
 func (c *Capture) KeyedQUIC(data, extraKeyLog []byte) ([]KeyedQUICRecord, error) {
@@ -81,10 +83,14 @@ type quicKeyedCID struct {
 }
 
 type quicKeyedDirection struct {
-	decoder  *QUIC1RTTDecoder
-	expected uint64
-	packets  []QUIC1RTTPacket
-	bytes    int
+	peer      *quicKeyedDirection
+	initial   quicKeyedCID
+	packetCID quicCID
+	ids       *quicCIDHistory
+	decoder   *QUIC1RTTDecoder
+	expected  uint64
+	packets   []QUIC1RTTPacket
+	bytes     int
 }
 
 type quicKeyedConnection struct {
@@ -98,6 +104,7 @@ type quicKeyedScan struct {
 	candidates               map[quicKeyedCID][]*quicKeyedDirection
 	handshakes               map[quicKeyedCID][]*quicALPNDirection
 	fragments                int
+	learnedIDs               int
 	probes, probeBytes, kept int
 }
 
@@ -127,6 +134,7 @@ func scanKeyedQUIC(source ipFrameSource, extraKeyLog []byte, alpn bool) ([]Keyed
 		}
 		conn := &connections[i]
 		conn.initial = initial
+		conn.client.peer, conn.server.peer = &conn.server, &conn.client
 		path := quicKeyedPath{client: initial.SrcAddr, server: netip.AddrPortFrom(initial.DstAddr, initial.DstPort)}
 		scan.register(path, initial.SrcPort, serverIDs[i], &conn.client, hs, entry.ClientTrafficSecret0)
 		path.fromServer = true
@@ -177,6 +185,7 @@ func (s *quicKeyedScan) register(path quicKeyedPath, clientPort uint16, cid quic
 	}
 	dir.decoder = decoder
 	key := s.registerCID(path, clientPort, cid)
+	dir.initial = key
 	s.candidates[key] = append(s.candidates[key], dir)
 }
 
@@ -235,11 +244,12 @@ func (s *quicKeyedScan) visit(record PacketRecord, frame Frame, datagram []byte)
 	})
 	dir.bytes += len(payload)
 	s.kept += len(payload)
-	return nil
+	return s.observeCIDs(dir, number, payload)
 }
 
 func (s *quicKeyedScan) authenticate(frame Frame, packet []byte) (*quicKeyedDirection, uint64, []byte, error) {
 	var match *quicKeyedDirection
+	var idUsed quicCID
 	var number uint64
 	var payload []byte
 	ports := [2]uint16{frame.SrcPort, frame.DstPort}
@@ -265,9 +275,15 @@ func (s *quicKeyedScan) authenticate(frame Frame, packet []byte) (*quicKeyedDire
 				if match != nil {
 					return nil, 0, nil, nil // More than one candidate authenticated.
 				}
-				match, number, payload = candidate, pn, plain
+				match, number, payload, idUsed = candidate, pn, plain, key.cid
 			}
 		}
+	}
+	if match != nil {
+		if !match.ids.accepts(idUsed, number) {
+			return nil, 0, nil, nil
+		}
+		match.packetCID = idUsed
 	}
 	return match, number, payload, nil
 }

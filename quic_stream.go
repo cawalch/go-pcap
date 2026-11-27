@@ -255,13 +255,7 @@ func (r *quicFrameReader) skip(typ byte) {
 	case 0x07, 0x31: // NEW_TOKEN or DATAGRAM with a length.
 		r.take(r.varint())
 	case 0x18: // NEW_CONNECTION_ID.
-		r.skipVarints(2)
-		length := r.take(1)
-		if len(length) != 1 || length[0] == 0 || length[0] > MaxQUICConnIDBytes {
-			r.err = ErrInvalidQUIC
-			return
-		}
-		r.take(uint64(length[0]) + 16) // Connection ID and stateless reset token.
+		r.newConnectionID()
 	case 0x1a, 0x1b: // PATH_CHALLENGE, PATH_RESPONSE.
 		r.take(8)
 	case 0x1c: // CONNECTION_CLOSE with a transport error.

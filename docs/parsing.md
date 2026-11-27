@@ -1034,11 +1034,23 @@ long headers. Take the `Payload` fields from one sender when calling
 `ReassembleQUIC1RTTStreams`.
 
 Association covers complete UDP datagrams for QUIC v1/v2 with the decoder's
-initial AES-GCM traffic keys and the observed Initial IDs. Nonempty IDs can
-follow a client port change on the same IP pair and server port. An empty ID
-requires the original tuple. Packets that cannot authenticate uniquely are
-skipped. This includes packets using a rotated connection ID or a later key
-generation, and packets outside the available packet number window.
+initial AES-GCM traffic keys. An authenticated `NEW_CONNECTION_ID` makes
+the issued ID eligible for subsequent packets in the opposite direction.
+`RETIRE_CONNECTION_ID` removes that ID for packets with the same or higher
+sender packet number. An older packet observed afterward can still authenticate.
+`Retire Prior To` deactivates earlier sequence numbers. An explicit retirement
+supplies the sender's packet-number boundary for reordered traffic.
+
+Nonempty IDs can follow a client port change on the same IP pair and server
+port. An empty ID requires the original tuple and cannot acquire replacement
+IDs. The scan skips packets whose issuance has yet to be observed, packets
+outside the available key generation or number window, and packets that
+authenticate for multiple candidates. Conflicting assignments of a CID,
+sequence number or reset token stop future associations in that direction.
+The scan retains at most 16 active and 64 historical IDs per direction and
+16,384 learned sequence numbers across all connections. One packet can carry
+up to 64 ID operations. All original and rotated IDs share the authentication
+attempt and byte budgets.
 
 ReaderAt metadata and payload reads share the same 64 MiB budget across both
 passes. The scan limits authentication to 16,384 attempts and 64 MiB of
