@@ -1,202 +1,98 @@
 # Contributing to go-pcap
 
-Keep changes focused on the standalone packet capture and protocol parser.
-Include regression tests for behavior changes and benchmarks for changes to
-capture indexing, frame decoding, or flow aggregation.
-
 ## Scope a change
 
-Before adding a protocol dissector or analysis feature, assess existing Go
-libraries for suitable implementations. Consider their APIs, dependencies,
-licenses, input validation, resource use, and performance on comparable
-workloads. Use standard-library primitives where they meet the requirements.
-
-Keep scanner schemas, rule semantics, and scan lifecycle management in consuming
-projects. If a feature adds expensive parsing or stream reassembly, define its
-work limits and error behavior for general library callers.
+Keep changes focused on capture I/O and bounded protocol evidence. Before
+adding a dissector or analyzer, check existing Go implementations for
+coverage, bounded work, performance, dependencies, and licensing.
+[Architecture and source map](docs/architecture.md)
 
 ## Write documentation
 
-Follow the [Google developer documentation style guide](https://developers.google.com/style/)
-for the README, repository documentation, and prose in code comments. Follow
-[Go doc comment conventions](https://go.dev/doc/comment) for API comments and
-`gofmt` for Go code, including code samples.
-
-- Write direct sentences in active voice. Address the reader as "you" in instructions.
-- Use familiar words, sentence-case headings, and consistent technical terms.
-- Define abbreviations on first use when readers might not know them.
-- Put conditions before instructions. Use numbered lists for ordered steps.
-- Introduce code samples and commands. Provide runnable examples or identify
-  omitted context, and verify the examples you change.
-- Describe implemented behavior and relevant limits. Avoid promotional claims,
-  unsupported guarantees, and promises about future features.
-- Start exported API comments with the identifier's name. Link related symbols
-  with Go doc links, such as `[New]`.
+Use [Go doc conventions](https://go.dev/doc/comment) for API contracts and
+[Google's documentation style](https://developers.google.com/style/) for
+guides. Start exported comments with the identifier. Document ownership,
+units, limits, and partial results where they affect callers. Prefer runnable
+Go examples. Use sentence-case headings, direct instructions, and descriptive
+links. Keep signatures and field definitions in the API reference. Follow the
+[Google Go style guide](https://google.github.io/styleguide/go/guide) for code
+readability and use `gofmt` for formatting.
 
 ## Write the change description
 
-Start an issue or pull request with the affected files or symbols and the
-intended behavior. Include the commands reviewers can run, the results you
-observed, and the specific feedback you want.
-
-Before submitting, check paths, symbols, and line references against the
-revision you are describing. Check a pull request's claims about changed
-behavior against its diff. For example, use `go doc . NewFromReaderAt` to
-check an exported contract and `git grep -n 'func NewFromReaderAt' -- '*.go'`
-to locate its declaration.
-
-Open every reference link and check that it supports the nearby claim.
-For source code, use a commit permalink and include a short quoted excerpt
-from the referenced lines. Identify any references you could not verify.
-
-When several claims need checking, you can list them under `Claims`.
-Use a file and symbol or a file and line, followed by the assertion.
-For example, `readerat.go#NewFromReaderAt` accepts an `io.ReaderAt` and a
-capture length. For assisted changes, name the tool, model, relevant
-settings, and scope of the assistance.
+Start with the verified change direction and affected files or symbols. Give
+the verification commands, observed results, scope, and one line requesting
+specific feedback. Verify each evidence link and quote a short excerpt beside
+it. Pin source links to a commit and check that their lines support the claim.
+For assisted changes, disclose the tool, model, settings, and extent.
 
 ## Merge a change
 
-Open a pull request against `main` and resolve its review conversations.
-After reviewing the current changes, the owner applies the `run-ci` label
-to start the six required GitHub-hosted checks on the PR merge candidate:
-
-```sh
-gh pr edit NUMBER --add-label run-ci
-```
-
-Keep the branch up to date with `main`. After updating it, remove and
-reapply the label to test the new revision. Squash-merge after both Go
-test jobs, macOS and Windows tests, lint, and the vulnerability check pass.
-The sole maintainer can merge their own PR after these checks.
+Open a pull request against `main` and resolve review conversations. After
+reviewing the merge candidate, the owner applies the `run-ci` label. When the
+candidate changes, remove and reapply the label. Squash-merge after all six
+required checks pass. [CI policy](SECURITY.md#starting-ci)
 
 ## Validate a batch of reviewed changes
 
-Review each focused commit before combining it with the others on a branch
-from the current `main`. Keep one commit per change for review and list the
-issues it resolves in the integration pull request. Use a single set of
-required checks for that combined candidate.
-
-From a trusted checkout with Go and the pinned linter installed, run
-preflight against the committed candidate before opening the pull request.
-Pass the SSH destination of a Linux AMD64 host with the Go compatibility
-toolchain on its PATH. The local machine should use the stable Go release.
+Review focused commits before combining them on the current `main`. Run
+the same committed candidate on the local stable Go toolchain and a Linux
+AMD64 host at the compatibility floor.
 
 ```sh
 bash scripts/preflight.sh HEAD linux-test-host
 ```
 
-Both hosts unpack the same committed source. Preflight runs format, vet,
-race tests and the external consumer contract. It also runs lint locally and
-32-bit arithmetic tests on Linux. Use only reviewed refs on personal or
-shared machines. The GitHub-hosted checks validate the merge candidate,
-including native Windows and macOS tests, privileged live-capture tests,
-vulnerability analysis and timed fuzzing.
-
-Review the combined diff and confirm its base before applying `run-ci`.
-If `main` changes before merge, update the batch and apply the label again
-as described above.
+Use reviewed refs on personal or shared machines. Preflight covers format,
+vet, race tests, local lint, the external consumer, and Linux 386. GitHub CI
+also covers native platform tests, privileged Linux loopback, vulnerability
+analysis, and timed fuzzing.
 
 ## Validate a change
 
-From the repository root, format the Go files and run the tests and static checks:
+Run the following commands from the repository root.
 
 ```sh
 gofmt -w *.go
 golangci-lint run ./...
 go vet ./...
-go test -race -cover ./...
+go test -race ./...
 ```
 
-For a focused edit, start with the [source and test map](docs/architecture.md#where-to-make-a-change).
-For example, after changing a flow field, exercise both reader paths and an
-external caller:
-
-```sh
-go test -run 'TestReaderAtFlowParity|TestFlowHandshakeTimestamp|ExampleFlowSummary' .
-```
-
-The [consumer compatibility suite](testdata/consumer/contract_test.go) is a
-separate Go module. From `testdata/consumer`, run the same tests against
-the published module and your checkout. For a private clone, configure Go
-to access the repository directly with your GitHub credentials
-(`GOPRIVATE=github.com/cawalch/go-pcap`).
+Exercise both byte-slice and ReaderAt paths for capture changes. Run the
+[consumer contract](testdata/consumer/contract_test.go) against the tagged
+dependency and the checkout. Run the following commands from `testdata/consumer`.
 
 ```sh
 GOWORK=off go test -mod=readonly -count=1 ./...
 workdir=$(mktemp -d)
+trap 'rm -rf "$workdir"' EXIT
 (cd "$workdir" && go work init)
 export GOWORK="$workdir/go.work"
 go work use . ../..
 go test -count=1 ./...
 ```
 
-From `testdata/consumer`, run the DNS consumer benchmark against your
-checkout with the workspace created above.
-
-```sh
-GOWORK="$workdir/go.work" go test -run '^$' -bench '^BenchmarkClientDNS$' -benchmem -count=10 .
-```
-
-The fixtures contain 32 synthetic DNS responses each. One has A and CNAME
-records, and the other has HTTPS (type 65) records with placeholder ECH bytes.
-
-When comparing capture-reader changes, use separate Go workspaces for the
-baseline and candidate and run the same benchmark and fixtures on native AMD64
-and ARM64. Alternate which revision runs first in each pair and check an
-unchanged-source control before interpreting the results. On Linux, build with
-`go test -c` and overwrite the same executable file between runs to keep the
-path and inode fixed. Separate executable files produced different timings in
-an unchanged-source control.
-
-CI tests the Go 1.26 compatibility floor and the current stable toolchain.
-Use the patched release for each line when reproducing a result. To preview
-standard-library and language simplifications, run `go fix -diff ./...` with
-the stable toolchain. Review its suggestions against the module’s Go version.
-The Linux
-jobs cover race detection and 32-bit arithmetic. The stable job discovers
-fuzz targets with `go test -list '^Fuzz' .` and runs each for a bounded time.
-To exercise the ReaderAt parity target locally:
-
-```sh
-go test -run '^$' -fuzz '^FuzzReaderAt$' -fuzztime=30s -parallel=2 .
-```
-
-The tests use synthetic PCAP and PcapNG fixtures built in memory and offline
-[reference inputs](testdata/foxio/README.md) for fingerprint compatibility.
-The [deployment corpus](testdata/deployments/README.md) compares mixed
-whole-capture cases against TShark. Separate tests cover byte-order variants,
-nanosecond timestamps, PcapNG Decryption Secrets Blocks (`DSB`), Enhanced
-Packet Block process metadata,
-VLAN nesting, IPv4/IPv6 headers, TCP/UDP framing, truncation, arithmetic
-overflow, resource limits, and concurrent reads. These tests and bounded fuzz
-runs don't establish full format compatibility or prove that all inputs are
-safe.
+CI tests the Go 1.26 floor and stable Go. Use patched toolchains and
+review `go fix -diff ./...` suggestions against the module's minimum version.
+Run all timed targets with `bash scripts/test-fuzz.sh`.
 
 ## Measure performance
 
-To collect timing and allocation samples, run the benchmarks:
-
-```sh
-go test -run '^$' -bench . -benchmem -count=5
-```
-
-For a flow-accounting change, run the same fixtures on both revisions:
+Run the relevant benchmarks on both revisions with the same Go patch
+version, CPU, and inputs. Record time, allocations, and ReaderAt calls
+and bytes where applicable. Use repeated, alternating samples and an
+unchanged-source control for small changes. For Linux controls sensitive
+to executable layout, rebuild at the same path and preserve the inode.
 
 ```sh
 go test -run '^$' -bench '^BenchmarkFlows$|^BenchmarkReaderAtScan$/./^flows$' -benchmem -count=10 .
 ```
 
-Record the Go patch version, OS, CPU, and inputs with the samples. The
-ReaderAt benchmarks report calls and bytes read alongside time and heap
-allocations. Compare repeated samples with `benchstat`. Use a CPU or heap
-profile when an end-to-end result changes enough to investigate. Go 1.27
-changed how the compiler allocates small objects, so use the same toolchain
-on both sides of a source comparison.
-[Go 1.27 runtime changes](https://go.dev/doc/go1.27#runtime) ·
-[Go diagnostics](https://go.dev/doc/diagnostics) ·
-[benchstat](https://pkg.go.dev/golang.org/x/perf/cmd/benchstat)
+Use [benchstat](https://pkg.go.dev/golang.org/x/perf/cmd/benchstat) to compare
+samples. For changes to DNS scan cost, run `BenchmarkClientDNS` in the
+external consumer on native ARM64 and AMD64.
 
 ## Report vulnerabilities
 
-Report suspected vulnerabilities through the [security policy](SECURITY.md).
+Follow the [security policy](SECURITY.md).

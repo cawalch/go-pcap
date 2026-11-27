@@ -1,13 +1,9 @@
 # Verify published capture workflows
 
-These tests import go-pcap v0.2.0 at commit
-`7ffa353dcf974b7939d868c3cb3054d864f36e0c`. They read fixtures from this
-checkout and compare parsed records on byte-slice and seekable inputs. The
-nested module runs the same TLS fixture through go-yara at
-`3f53206e468b68a5d74b1ac211072f75157eaae0`. Run both modules from the
-repository root with Go 1.27.4. The standalone Go module also supports Go
-1.26. Tests need ordinary file access and a Go module cache. They read
-offline captures without live-capture privileges or reference decoders.
+These offline modules resolve go-pcap v0.2.0 (`7ffa353`). The nested
+module also pins go-yara at `3f53206`. Tests compare byte-slice and
+seekable results on the checked-in fixtures. Run from the repository root
+with Go 1.27.4. The standalone Go module also supports Go 1.26.
 
 ```sh
 (cd testdata/consumer/qualified &&
@@ -31,13 +27,9 @@ exchange and a DNS message whose question count hits a parser limit.
 
 ## Observed input and allocation cost
 
-Go 1.27.4 on Apple M3 Max, Darwin ARM64. These are three 150 ms samples
-per case on the checked-in fixtures. Reads count byte ranges returned to
-the caller, including repeated ranges. The standalone Go runs wrap an
-open file as a counting ReaderAt without file-descriptor prefetch. They
-include opening and scanning the capture. The go-yara run reuses a scanner
-and wraps a seekable memory reader. Its sequential scan reads the input
-once and the capture module makes its own random-access requests.
+Three 150 ms samples on Go 1.27.4 and Apple M3 Max. Reads include open,
+scan, and repeated ranges. The standalone file wrapper disables prefetch.
+The go-yara scanner also reads the input sequentially once.
 
 | Workflow | Input bytes | Sequential bytes/op | ReaderAt bytes/op and calls | Allocations/op | Allocated bytes/op |
 | --- | ---: | ---: | ---: | ---: | ---: |

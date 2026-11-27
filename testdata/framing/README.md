@@ -1,11 +1,8 @@
 # Wireless and IPsec framing reference
 
-The hex dumps contain eight synthetic packets with documentation addresses
-and no real wireless traffic or IPsec secrets. The repository license covers
-the dumps and the merged PcapNG fixture. The ESP body is a fixed byte sequence.
-
-Generate the fixture from this directory with Wireshark tools 4.6.10
-(commit `eac916f07299`).
+The hex dumps contain synthetic packets with documentation addresses
+and fixed ESP bytes. Run every command from this directory with Wireshark
+tools 4.6.10 (`eac916f07299`).
 
 ```sh
 fixture_tmp=$(mktemp -d)
@@ -17,8 +14,7 @@ mergecap -a -w "$fixture_tmp/merged.pcapng" "$fixture_tmp/ieee80211.pcapng" \
 editcap --discard-capture-comment "$fixture_tmp/merged.pcapng" wireless-ipsec.pcapng
 ```
 
-The host and tool metadata may vary. The packet bytes, order, and timestamps
-come from the dumps. Verify the packet classification with TShark.
+The dumps fix packet bytes, order, and timestamps. Host metadata can vary.
 
 ```sh
 tshark -n -r wireless-ipsec.pcapng -T fields \
@@ -38,13 +34,7 @@ tshark -n -r wireless-ipsec.pcapng -T fields \
 | 7 | UDP 500 → 53000, IKE version `0x20`, IKE length 36 |
 | 8 | UDP 53000 → 4500, Non-ESP Marker, IKE version `0x20`, IKE length 36 |
 
-The Go tests use this capture and checked-in expectations. They require no
-external decoder.
-
 ## PPP and PFLOG
-
-These captures use synthetic IPv4 SYNs and documentation addresses. Generate
-them with Wireshark tools 4.6.10 (commit `eac916f07299`).
 
 ```sh
 fixture_tmp=$(mktemp -d)
@@ -64,9 +54,7 @@ tshark -n -r ppp-pflog.pcapng -T fields -e frame.number -e frame.protocols \
 
 ## Standalone PPPoE and NFLOG
 
-These captures use synthetic IPv4 SYNs and documentation addresses. The NFLOG
-TLV headers use little-endian lengths and types. Generate the fixture on a
-little-endian host with Wireshark tools 4.6.10 (commit `eac916f07299`).
+Use a little-endian host for the NFLOG TLV lengths and types.
 
 ```sh
 fixture_tmp=$(mktemp -d)
@@ -85,9 +73,6 @@ tshark -n -r pppoe-nflog.pcapng -T fields -e frame.number -e frame.protocols \
 
 ## IP-in-IP
 
-`ipip.hex` contains synthetic Ethernet TCP SYNs with documentation addresses.
-Generate the fixture with Wireshark tools 4.6.10 (commit `eac916f07299`).
-
 ```sh
 fixture_tmp=$(mktemp -d)
 TZ=UTC text2pcap -q -t ISO -l 1 ipip.hex "$fixture_tmp/ipip.pcapng"
@@ -104,9 +89,7 @@ tshark -n -r ipip.pcapng -T fields -e frame.number -e frame.protocols \
 
 ## ICMP quoted packets
 
-`icmp-errors.hex` contains synthetic ICMPv4 and ICMPv6 errors with documentation
-addresses. The ICMPv4 error quotes its IPv4 header and eight TCP bytes.
-Generate the fixture with Wireshark tools 4.6.10 (commit `eac916f07299`).
+The ICMPv4 error quotes its IPv4 header and eight TCP bytes.
 
 ```sh
 fixture_tmp=$(mktemp -d)
@@ -134,8 +117,6 @@ tshark -2 -n -r fragmented-tcp.pcap -o ip.defragment:true -o ipv6.defragment:tru
   -e tcp.srcport -e tls.handshake.extensions_server_name
 ```
 
-TShark 4.6.10 (commit `eac916f07299`) reports `fragment.example` on original
-frames 2, 4, 6 and 8. Frames 2 and 6 complete fragment reassembly. Frames 3
-and 7 lack their tail and have no matching hello. The go-pcap example reports
-original TCP fragment packet indices and returns only the controls on frames
-4 and 8. Go packet indices are zero-based.
+TShark finds `fragment.example` in frames 2, 4, 6, and 8. Frames 2 and 6
+complete reassembly. Frames 3 and 7 lack tails. The Go capture scan finds
+the unfragmented controls in frames 4 and 8.

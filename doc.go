@@ -1,18 +1,18 @@
-// Package pcap reads and writes PCAP and PcapNG captures, captures live packets,
-// and decodes network flows and application protocols using the Go standard library.
+// Package pcap reads and writes PCAP and PcapNG, captures live traffic, and
+// decodes network protocols.
 //
-// Start with [New] for bytes or [NewFromReaderAt] for a seekable source.
-// A [Capture] owns its metadata. Pass the same capture contents to subsequent
-// scans. For a buffered prefix with a known total length, use [NewWithLength].
-// Check [Capture.InputTruncated] before assuming the last packet is complete.
+// Open bytes with [New] or a seekable source with [NewFromReaderAt]. The
+// [Capture] owns its metadata. Supply the same capture contents to later
+// scans. Check [Capture.InputTruncated] for an incomplete trailing record.
 //
-// Use [Capture.PacketSeq] to walk packet records in file order. [Capture.PacketPayload]
-// borrows the frame bytes from the input. [DecodeFrame] identifies their headers.
-// [Capture.Flows] groups bidirectional conversations by five-tuple. Protocol
-// methods such as [Capture.DNS], [Capture.TLS], and [Capture.HTTP1RequestEvidence]
-// reassemble the data they need and expose their own work and output limits.
+// Iterate packets with [Capture.PacketSeq] or [Capture.PacketSeqFromReaderAt].
+// Pass frame bytes to [DecodeFrame], or use [Capture.Flows] to group packets.
+// Protocol scans such as [Capture.DNS], [Capture.TLSHandshakeEvidence], and
+// [Capture.KeyedHTTP3Transactions] expose observed fields under bounded
+// reads, reassembly, and output. Packet indices refer to the original
+// capture and start at zero.
 //
-// [NewPCAPWriter] and [NewPCAPNGWriter] write captures to an [io.Writer].
-// [Capture.ExtractFlowPacketsPCAPNG] exports the packets of one flow, including
-// their original payloads. [OpenLive] reads from a local network interface.
+// Use [NewPCAPWriter] or [NewPCAPNGWriter] to write a capture,
+// [Capture.ExtractFlowPacketsPCAPNG] to export original packets,
+// and [OpenLive] to read from a local network interface.
 package pcap

@@ -1,12 +1,9 @@
 # Overlapping tenant scopes
 
-`tenant-scope.pcapng` contains 35 synthetic packets on one Ethernet
-interface named `mirror`. The five scopes share inner addresses, TCP ports
-and starting sequence numbers. Every scope includes one HTTP exchange and
-an IPv4 UDP DNS query split into two fragments with the same IP ID. The
-untagged scope is the control. The tagged scopes have a shared service tag
-over distinct customer tags. Both directions of each VXLAN session use the
-same VNI, and the outer endpoint addresses reverse for server packets.
+`tenant-scope.pcapng` has 35 synthetic packets on one Ethernet interface.
+Five scopes share a TCP tuple, starting sequences, and IPv4 fragment ID.
+Each has one HTTP exchange and one two-fragment DNS query. The untagged
+scope is the control.
 
 Regenerate the fixture and inspect the original frame numbers with TShark
 4.6.10 (commit `eac916f07299`). Run these commands from the repository root.
@@ -19,13 +16,9 @@ tshark -n -r "$mirror" -T fields -e frame.number -e frame.interface_id \
   -e ip.frag_offset
 ```
 
-Every frame is on interface zero. The left and right integers in the VLAN
-stack are the outer and inner IDs. Each reply is 200 and its body is the
-scope name. In the unfiltered input, the same-interface TCP opening has
-overlapping bytes and the DNS scan returns one record even with the two
-interface options enabled. The shared inner TCP tuple is
-`192.0.2.10:43000 → 198.51.100.20:80`. Its Community ID v1 with seed zero
-is `1:sOt0+JmdXpF66uyTH/7eX/9XeD4=` in every scope.
+Every scope returns HTTP 200 and uses Community ID
+`1:sOt0+JmdXpF66uyTH/7eX/9XeD4=` with seed zero. On the unfiltered input,
+interface options still leave overlapping TCP bytes and one DNS record.
 
 | Scope | Original TShark frames | Request URI | DNS question |
 | --- | --- | --- | --- |

@@ -1,2212 +1,481 @@
 # Parse packet captures, frames, and protocols
 
-For a runnable first scan, follow the [packet capture quick start](../README.md#quick-start-with-a-packet-capture).
+Start with the [quick start](../README.md#quick-start-with-a-packet-capture).
+Run `go doc -all .` from the repository root for signatures, fields, and
+limits. See the [runnable examples](../example_test.go) for code. This guide
+describes how to choose an API and interpret its results.
 
-| Task | Sections |
+| Task | Start here |
 | --- | --- |
-| Read a file | [Container metadata](#parse-capture-containers) · [Packet records](#read-packet-records) · [Limits](#work-and-output-limits) |
-| Identify devices and connections | [ARP and IPv6 neighbors](#observe-arp-and-ipv6-neighbors) · [DHCPv4 leases](#dhcpv4-address-assignments) · [Flows](#aggregate-5-tuple-flows) |
-| Investigate a web connection | [DNS](#parse-dns-messages-and-tunneling-metrics) · [TLS](#parse-tls-handshakes-and-ja4-fingerprints) · [QUIC](#decrypt-quic-initial-packets) · [HTTP](#parse-http-messages-and-carve-payloads) |
-| Collect or share traffic | [Live capture](#capture-live-interface-traffic) · [Write or export a capture](#write-captures) |
+| Open or scan a capture | [Containers](#parse-capture-containers), [packets](#read-packet-records), [limits](#work-and-output-limits) |
+| Inspect traffic | [Frames](#decode-l2l4-frames-and-tunnels), [flows](#aggregate-5-tuple-flows), [TCP streams](#reassemble-tcp-streams) |
+| Analyze protocols | [DNS](#parse-dns-messages-and-tunneling-metrics), [TLS](#parse-tls-handshakes-and-ja4-fingerprints), [QUIC](#decrypt-quic-initial-packets), [HTTP](#parse-http-messages-and-carve-payloads) |
+| Collect or share traffic | [Live capture](#capture-live-interface-traffic), [writers and exports](#write-captures) |
 
 ## Parse capture containers
 
-`New(data)` validates classic PCAP or PcapNG framing and copies container
-metadata, including PcapNG interfaces, names, process events, statistics and
-decryption secrets. The capture retains no reference to the input. Pass the
-same contents to later scans. For gzip input, call `DecompressCapture` first.
-It checks member trailers, limits combined output to 64 MiB and discards output
-on error. Plain input is returned by reference.
-
-Use `NewWithLength(data, streamLength)` for a buffered prefix of a known-length
-stream. After a valid initial header, an incomplete trailing record or block
-leaves the preceding records available. Check `InputTruncated()` and
-`DeclaredExtent()` to distinguish an incomplete input from an empty capture.
-
-Use `NewFromReaderAt(r, size)` for seekable input. Opening validates PcapNG
-metadata. Subsequent packet walks skip name, statistics and decryption-secret
-block bodies while reading interface descriptions, process events, packet
-headers, options and trailers. Large metadata blocks use a bounded read window.
-`PacketSeqFromReaderAt` lets you stop after the records you need.
-
-Flows start from up to 256 bytes per frame and read more to resolve headers.
-DNS selects DNS ports and UDP fragments, TLS reassembles TCP on any port, and
-QUIC selects candidate UDP long headers and fragments. Each bounded scan charges
-metadata, prefixes and selected payloads against `MaxReaderAtScanBytes`.
-Opening has a separate cost. A scan can finish on a file larger than its read
-budget. Exceeding the budget returns `ErrPacketLimit` and discards the results.
-
-Files and readers exposing `Fd() uintptr` can prefetch up to 64 KiB at a time.
-Prefetch uses only the allowance left after reserving exact reads, including
-overlapping block headers. Other readers get exact range requests. Cache hits
-still count against the selected-input limit. Reassembly, output and scratch
-memory have separate costs. For concurrent reads, keep the input and exported
-capture fields unchanged. [Input and buffer lifetimes](compatibility.md#inputs-and-payloads)
+Use `New` for bytes, `NewWithLength` for a buffered prefix of known total
+length, and `NewFromReaderAt` for a seekable source. The capture stores its own
+metadata, including PcapNG interfaces, names, process events, statistics, and
+secrets. Supply the same input contents on later calls. For concurrent
+analysis, keep the input and the capture's exported fields unchanged.
+[Input lifetimes](compatibility.md#inputs-and-payloads)
 
 ### Read compressed or non-seekable input
 
-When your input comes from a pipe or exceeds the in-memory gzip limit, copy
-the uncompressed capture to a temporary file with a caller-defined size limit.
-For gzip, wrap the input in `compress/gzip.NewReader` before copying. For
-uncompressed input, copy directly from the pipe. Use `io.LimitReader` with
-the limit plus one byte so you can detect excess output. If copying fails
-or exceeds the limit, discard the temporary file. Finish the copy before
-opening the capture so gzip trailer errors reach the caller.
+`DecompressCapture` accepts gzip with up to 64 MiB of total output. It returns
+plain input by reference. To handle a pipe or a larger gzip file, stage the
+uncompressed bytes in a temporary file with a size limit. Finish copying and
+check errors before opening the file with `NewFromReaderAt`.
+[Runnable gzip staging example](../example_test.go)
 
-Pass the temporary file and the copied byte count to `NewFromReaderAt`.
-Keep the file available during analysis and remove it after closing.
-Check `InputTruncated()` if your application requires complete packets.
-The normal ReaderAt scan limits apply to the temporary file.
-
-Capture open functions expect classic PCAP or PcapNG bytes. They report
-`ErrUnsupportedZstd` for a leading Zstandard data frame and `ErrUnsupportedXZ`
-for an XZ stream signature. Use `errors.Is` to select an external decoder and
-stage its output with the same limit. For bzip2, callers can use the standard
-library's `compress/bzip2.NewReader` with that staging workflow.
-
-Run `go test -run '^ExampleNewFromReaderAt_spoolGzip$' .` to check the
-[gzip staging example](../example_test.go).
+`ErrUnsupportedZstd` and `ErrUnsupportedXZ` identify compressed input that
+needs an external decoder. Use the same bounded staging workflow with its
+output.
 
 ## Work and output limits
 
-These limits apply to capture scans. Streaming writers check individual calls and can exceed the cumulative scan totals.
+| Work | Representative limits |
+| --- | --- |
+| Open a capture | `MaxPackets`, `MaxInterfaces`, `MaxPCAPNGBlocks`, `MaxSnapLen` |
+| Scan seekable input | `MaxReaderAtScanBytes` (64 MiB per bounded scan) |
+| Reassemble traffic | `MaxSegmentsPerFlow`, `MaxFlowStreamBytes`, `MaxTotalStreamBytes` |
+| Retain protocol evidence | The protocol's exported size, record, and work limits |
 
-| Limit | Maximum | Purpose |
-| --- | --- | --- |
-| `MaxDecompressedCaptureBytes` | 64 MiB | Bounds decompressed output across gzip members in `DecompressCapture` |
-| `MaxInterfaces` | 256 interfaces | Bounds PcapNG `IDB` descriptors per capture |
-| `MaxPackets` | 1,048,576 packets | Bounds packets indexed or returned by `New`, `PacketSeq`, `Packets`, and `Flows` |
-| `MaxFlows` | 65,536 flows | Bounds distinct five-tuples and the number of reassembled TCP connections |
-| `MaxDecryptionSecrets` | 256 blocks | Bounds PcapNG `DSB` blocks per capture |
-| `MaxDecryptionSecretBytes` | 4 MiB | Bounds cumulative secret payload bytes copied across all `DSB` blocks |
-| `MaxPCAPNGBlocks` | 2,097,152 blocks | Bounds all PcapNG block types across sections |
-| `MaxNamesPerRecord` | 64 names | Bounds nonempty names retained from a single name resolution record |
-| `MaxNameResolutionRecords` | 16,384 records | Counts all non-terminator records across PcapNG name resolution blocks |
-| `MaxInterfaceStats` | 1,024 blocks | Bounds PcapNG `ISB` statistics blocks per capture |
-| `MaxProcessEvents` | 16,384 entries | Bounds Darwin Process Event Blocks (`DPEB`) per capture |
-| `MaxOptionsPerBlock` | 64 options | Bounds PcapNG TLV options per block |
-| `MaxOptionStringBytes` | 4,096 bytes | Bounds individual PcapNG option or `NRB` record payloads |
-| `MaxSnapLen` | 16 MiB | Bounds maximum packet capture length accepted in headers |
-| `MaxFrameLayers` | 8 layers | Bounds stack-allocated layer spans per decoded frame |
-| `MaxVLANTags` | 4 tags | Bounds nested 802.1Q / 802.1ad VLAN tags per Ethernet header |
-| `MaxMPLSLabels` | 8 labels | Bounds MPLS label stack depth per frame |
-| `MaxIPv6ExtHeaders` | 8 headers | Bounds IPv6 extension headers traversed per packet |
-| `MaxSegmentsPerFlow` | 4,096 segments | Bounds TCP segments buffered per flow direction |
-| `MaxFlowStreamBytes` | 4 MiB | Bounds reassembled TCP stream bytes per flow direction |
-| `MaxTotalStreamBytes` | 64 MiB | Bounds total reassembled TCP stream bytes per `Streams` call |
-| `MaxDNSQuestions` | 64 questions | Bounds questions per DNS message |
-| `MaxDNSResourceRecords` | 256 records | Bounds total answer, authority, and additional records per DNS message |
-| `MaxDNSCompressionJumps` | 16 jumps | Bounds RFC 1035 label pointer hops per domain name |
-| `MaxDNSALPNProtocols` | 32 identifiers | Bounds ALPN identifiers per DNS `SVCB` or `HTTPS` record |
-| `MaxDNSMessagesPerScan` | 65,536 messages | Bounds DNS messages returned per capture scan |
-| `MaxTLSHandshakeRecords` | 128 records | Bounds the record scan for a directional plaintext handshake, including empty records and warning alerts |
-| `MaxTLSHandshakeBytes` | 256 KiB | Bounds coalesced TLS handshake payload size |
-| `MaxTLSExtensions` | 128 extensions | Bounds TLS extensions parsed per handshake message |
-| `MaxTLSCertSANsPerKind` | 64 per kind | Bounds retained DNS names and IP addresses independently for each certificate |
-| `MaxTLSCertificates` | 16 certificates | Bounds X.509 certificates parsed per TLS Certificate message |
-| `MaxTLSHandshakesPerScan` | 16,384 handshakes | Bounds TLS handshakes returned per capture scan |
-| `MaxTLSKeyLogEntries` | 4,096 entries | Bounds NSS keylog entries parsed per `ParseTLSKeyLog` / `TLSKeyLog` call |
-| `MaxQUICCryptoBytes` | 64 KiB | Bounds reassembled QUIC Initial `CRYPTO` stream size |
-| `MaxQUICPacketsPerFlow` | 64 datagrams | Bounds UDP datagrams inspected per QUIC Initial exchange |
-| `MaxQUICFlowsPerScan` | 16,384 exchanges | Bounds QUIC Initial exchanges tracked per capture scan |
-| `MaxHTTPHeaders` | 128 headers | Bounds HTTP header lines per request or response |
-| `MaxHTTPBodyBytes` | 4 MiB | Bounds each carved HTTP body before and after content decoding |
-| `MaxHTTPDecodedBodyBytesPerScan` | 64 MiB | Bounds cumulative HTTP/1.x content decoding per capture scan, including failed attempts |
-| `MaxHTTPMessagesPerScan` | 16,384 messages | Bounds HTTP/1.x and HTTP/2 records returned per capture scan |
-| `MaxHTTP1RequestEvidenceBytesPerScan` | 64 MiB | Bounds combined request-line, wire-header, and retained body bytes per HTTP/1 request evidence scan |
-| `MaxSSHKexPacketBytes` | 32 KiB | Bounds SSH `SSH_MSG_KEXINIT` packet length |
-| `MaxSSHHandshakesPerScan` | 16,384 handshakes | Bounds SSH handshakes returned per capture scan |
-| `MaxSMB2PacketBytes` | 64 KiB | Bounds NetBIOS-framed SMB2/3 message length |
-| `MaxNTLMTokenBytes` | 16 KiB | Bounds NTLMSSP token length |
-| `MaxSMBRecordsPerScan` | 16,384 records | Bounds SMB2/3 records returned per capture scan |
-| `MaxBPFFilterInstructions` | 4,096 instructions | Bounds classic BPF filter program length in `OpenLive` and `EvalBPF` |
-| `MaxReaderAtScanBytes` | 64 MiB | Bounds total reads per flow, DNS, TLS or QUIC ReaderAt scan |
-| `MaxFragmentGroups` | 1,024 groups | Bounds concurrent IPv4/IPv6 fragment groups tracked per scan |
-| `MaxFragmentsPerGroup` | 16 fragments | Bounds IP fragments reassembled per fragmented packet |
-| `MaxReassembledIPPacketBytes` | 65,535 bytes | Bounds reassembled IPv4/IPv6 packet payload size |
-| `MaxHTTP2FramesPerStream` | 1,024 frames | Bounds HTTP/2 frames parsed per directional stream |
-| `MaxHTTP2FramePayload` | 1 MiB | Bounds individual HTTP/2 frame payload size |
-| `MaxKRB5PacketBytes` | 64 KiB | Bounds Kerberos v5 message length |
-| `MaxKRB5RecordsPerScan` | 16,384 records | Bounds Kerberos v5 records returned per capture scan |
-| `MaxLDAPPacketBytes` | 64 KiB | Bounds a single LDAP request |
-| `MaxLDAPFilterDepth` | 16 levels | Bounds nested LDAP search filters, including the outer filter |
-| `MaxLDAPFilterBytes` | 16 KiB | Bounds the rendered LDAP filter |
-| `MaxLDAPAttributes` | 64 selectors | Bounds the LDAP search attribute list |
-| `MaxLDAPRecordsPerScan` | 16,384 records | Bounds LDAP requests returned per capture scan |
-| `MaxLDAPTextBytesPerScan` | 16 MiB | Bounds decoded LDAP string bytes retained per scan |
-| `MaxDCERPCContexts` | 64 entries | Bounds DCE/RPC presentation context offers and acknowledgment results |
-| `MaxDCERPCRecordsPerScan` | 16,384 records | Bounds DCE/RPC fragments returned per capture scan |
-| `MaxDCERPCContextsPerScan` | 65,536 entries | Bounds DCE/RPC presentation context offers retained per scan |
-| `MaxRDPPacketBytes` | 16 KiB | Bounds RDP TPKT/X.224 negotiation PDU length |
-| `MaxRDPRecordsPerScan` | 16,384 records | Bounds RDP negotiation records returned per capture scan |
-
-Use `errors.Is` with the sentinel documented by the operation, for example
-`errors.Is(err, pcap.ErrPacketLimit)`. [Limits and error contracts](compatibility.md#limits-and-errors)
+Opening and scanning charge separate budgets. A bounded scan can finish on
+a file larger than its read budget by reading selected ranges. For seekable
+exports, selection and copying share a budget. Check each operation's
+result and use `errors.Is` with its documented error.
+[Limits and error contracts](compatibility.md#limits-and-errors)
 
 ## Inspect truncation and anomalies
 
-Call `Capture.DeclaredExtent` or `Capture.InputTruncated` to check whether the
-input ends before a declared packet record or PcapNG block finishes. Call
-`Capture.Anomalies` to inspect non-fatal container anomalies:
-
-- `TruncatedPacketBlock`: A packet header or PcapNG block declared a length
-  extending past the end of `data`.
-- `CaptureLenExceedsOriginal`: A packet record declared `CaptureLen > OriginalLen`.
-- `CaptureLenExceedsSnapLen`: A packet record declared `CaptureLen` larger than
-  its interface's `SnapLen` (when `SnapLen > 0`).
-- `UnknownLinkType`: An interface declared an unrecognized link-layer type.
-- `TrailingBytes`: Trailing bytes after the last block were too short to form a
-  complete record header.
-- `UnalignedBlockLength`: A PcapNG block declared a total length that was not a
-  multiple of 4 bytes.
-- `InvalidTimestampResolution`: An interface declared an `if_tsresol` option
-  whose value is longer or shorter than one byte.
-
-In PcapNG, each section defines its own interface table and byte order. Packet
-and statistics records expose the resolved index into `Capture.Interfaces`.
-
-Call `capture.UnsupportedLinkTypePackets(data)` or
-`capture.UnsupportedLinkTypePacketsFromReaderAt(r)` before interpreting an
-empty or partial analysis result. These methods return the number of complete
-records with an unsupported link type and the IDs of the interfaces that
-carried them. A
-nonzero count equal to `capture.PacketCount` means every complete packet has
-an unsupported link type. A smaller nonzero count means only part of the
-capture has a supported link type. An unused interface can set
-`UnknownLinkType` without affecting either count or scan coverage. PcapNG
-captures with unsupported interfaces require a packet metadata pass. The
-ReaderAt variant applies `MaxReaderAtScanBytes` to that pass.
+After a valid header, an incomplete final record can leave a usable prefix.
+Check `InputTruncated`, `DeclaredExtent`, and `Anomalies` before interpreting
+absence. To distinguish unsupported link framing from missing traffic, use
+`UnsupportedLinkTypePackets` or its ReaderAt variant.
 
 ## Read packet records
 
-To stream packet records in file order without allocating a slice, use
-`capture.PacketSeq(data)` with a `for ... range` loop:
-
-```go
-for pkt, err := range capture.PacketSeq(data) {
-	if err != nil {
-		return err
-	}
-	payload, err := capture.PacketPayload(data, pkt)
-	if err != nil {
-		return err
-	}
-	frame, err := pcap.DecodeFrame(payload, pkt.LinkType)
-	// ...
-}
-```
-
-If you need a slice of all packet records, call `capture.Packets(data)` (or
-`capture.PacketsFromReaderAt(r)`). Each `PacketRecord` contains:
-
-- `Index`: Zero-based packet index in file order.
-- `InterfaceID` and `LinkType`: Link-layer encapsulation type for decoding.
-- `TimestampNs`: Packet timestamp normalized to nanoseconds since the Unix
-  epoch. PcapNG decimal ($10^{-N}$) and binary ($2^{-N}$) resolutions
-  round down to a whole nanosecond. The reader applies the signed
-  `if_tsoffset` in seconds before clamping the result to the signed
-  64-bit nanosecond range. Interface statistics use the same conversion.
-- `CaptureLen` and `OriginalLen`: Captured and on-wire byte counts.
-- `PayloadOffset` and `PayloadLength`: Byte range of the captured frame inside
-  `data`. Pass `pkt` to `capture.PacketPayload(data, pkt)` to obtain a
-  bounds-checked zero-copy slice into `data`.
-- `ProcessID`, `ThreadID`, `UserID`, `ProcessName`, `ProcessArgs`,
-  `ContainerID`, `Flags`, and `DropCount`: Process attribution and packet
-  metadata decoded from PcapNG Enhanced Packet Block (EPB) options.
-  Obsolete Packet Blocks supply `Flags` from their flags option and `DropCount`
-  from their fixed header. A drop count of `0xffff` in that header means the
-  count was unavailable and leaves `DropCount` at zero.
-
-Apple PcapNG captures store process IDs and names in Process Information Blocks,
-also called Darwin Process Event Blocks (DPEB). An EPB's Apple primary process
-option (`0x8001`) indexes the preceding process blocks in its own section,
-starting at zero. `PacketRecord` exposes the primary process when the index
-resolves. Apple uses process ID `0xffffffff` for a name without a PID. The
-reader sets `ProcessName` for these entries and leaves `HasProcessID` false.
-Effective process references, service classes, packet metadata
-flags, flow IDs, and trace tags use their own Apple options. The reader leaves
-the process fields unset when only the effective process is available.
-[Apple PcapNG definitions](https://github.com/apple-oss-distributions/libpcap/blob/aa560f1fd969af63ebfb182fa33373d1d2549de5/libpcap/pcap/pcap-ng.h#L315-L350)
-
-The reader also accepts a resolvable legacy go-pcap process reference
-(`0x8000`) when the native reference is absent. Earlier go-pcap writers put
-inline attribution in the Apple option range. The reader decodes those inline
-fields only for a section whose application is explicitly `go-pcap` and which
-has yet to declare a process block. An earlier file without that application
-marker may lose inline attribution on read.
+Use `PacketSeq` or `PacketSeqFromReaderAt` to iterate in file order and stop
+early. The iterator can yield complete records before a terminal error.
+`PacketPayload` borrows the frame bytes. `PacketPayloadFromReaderAt` returns
+owned bytes. Packet indices start at zero. In PcapNG, use each packet's
+resolved interface and link type.
 
 ## Decode L2–L4 frames and tunnels
 
-Call `DecodeFrame(payload, linkType)` on a packet payload slice. `DecodeFrame`
-parses link, tunnel, network, and transport headers into a value `Frame` struct
-without heap allocations:
+Pass the frame bytes and their link type to `DecodeFrame`. Use its layer
+spans and offsets to locate fields in the original frame. The decoder can
+trace supported VLAN, MPLS, GRE, VXLAN, Geneve, and IP-in-IP encapsulation.
+An inner packet visible in a frame may be outside a capture scan's flow
+scope. Protected wireless and encrypted ESP payloads remain opaque.
+[Framing fixtures](../testdata/framing/README.md)
 
-- Supported link types: `LinkTypeEthernet` (with up to 4 nested 802.1Q / 802.1ad
-  VLAN tags), `LinkTypeLinuxSLL`, `LinkTypeLinuxSLL2`, `LinkTypeNull` (BSD
-  loopback), `LinkTypeRaw`, `LinkTypeIPv4`, `LinkTypeIPv6`,
-  `LinkTypeIEEE80211` (105), `LinkTypeIEEE80211RadioTap` (127), and
-  `LinkTypeApplePktap` (149). Apple PKTAP decoding uses the little-endian
-  version 1 packet header and reports offsets relative to the original frame.
-- PPP captures can use `LinkTypePPP` (9), `LinkTypePPPHDLC` (50),
-  `LinkTypePPPPPPD` (166), or `LinkTypePPPWithDir` (204). The decoder peels
-  one- and two-byte PPP protocol fields for IPv4 and IPv6.
-- `LinkTypePPPEther` (51) starts at the PPPoE session header and bounds decoding
-  by the session payload length. The decoder reads a two-byte protocol field.
-- `LinkTypePFLOG` (117) uses the rounded header length to reach the inner
-  IPv4 or IPv6 datagram.
-- `LinkTypeNFLOG` (239) walks up to 256 aligned attributes and decodes IPv4 or
-  IPv6 from the packet payload attribute. Exactly one TLV byte order must
-  validate across the captured frame. Ambiguous or malformed TLVs set
-  `Anomalies.TruncatedLayer`. ReaderAt scans use the entire NFLOG packet to
-  validate the list within the normal scan budget.
-- Supported tunnel encapsulations: `MPLS` (`0x8847` / `0x8848`, up to 8 labels),
-  `PPPoE` Session (`0x8864` over IPv4 or IPv6), `GRE` (`IPProto 47` over IPv4,
-  IPv6, or Transparent Ethernet Bridging), `VXLAN` (`UDP 4789`), and `Geneve`
-  (`UDP 6081`).
-- `DecodeFrame` follows IP-in-IP (IP protocols 4 and 41) within the enclosing
-  datagram length and `MaxFrameLayers`. Each `LayerIPIP` marks the encapsulated
-  IP header. Capture-level flow summaries, exports, and protocol scans use the
-  enclosing IP addresses and protocol to preserve flow indices and Community IDs.
-- Use `frame.ICMPEmbeddedPacket(payload)` with the original frame bytes to
-  read the invoking packet from ICMPv4 errors of types 3, 4, 11 and 12 and
-  ICMPv6 errors of types 1, 2 and 3. The result contains the quoted IP addresses
-  and protocol. `HasPorts` tells you whether the quote contains both TCP or
-  UDP ports. The outer ICMP packet retains its endpoints and flow identity.
-
-Use `capture.ICMPFlowErrors(data)` or
-`capture.ICMPFlowErrorsFromReaderAt(reader)` to count captured ICMP errors
-that quote observed TCP or UDP flows. The summaries are grouped by quoted
-direction, ICMP type, and code. Each group includes its capture-wide flow
-index and first and last error packet indices and timestamps in capture
-order. Quotes with ports can match a transport observation later in the
-file. A match identifies the flow. Keep packet and application-request
-attribution separate, since a quote may contain only the transport header.
-
-The scan skips fragmented outer errors and quotes without transport ports.
-The group limit is `MaxICMPFlowErrorGroups`. ReaderAt uses its normal
-per-call read budget. Errors return no groups.
-
-Use `capture.TCPZeroWindows(data)` or `capture.TCPZeroWindowsFromReaderAt(reader)`
-to count captured advertisements of a zero TCP receive window. Each
-`TCPZeroWindowSummary` names the advertising endpoint and its peer, the
-flow index, and the zero-based indices and timestamps of the first and last
-matching packets. Rows follow the order of their first matching packet.
-
-A packet must have a complete TCP header and advertise a zero window with
-ACK set and SYN, FIN, and RST clear. The scan skips IP fragments. It counts
-repeated advertisements and can combine several connections that reuse a
-five-tuple. Use a capture from one observation point to interpret these
-observations. They do not establish how long a receive window stayed closed.
-The scan uses `MaxFlows`, with at most two rows per flow, and returns no
-results on error. ReaderAt uses the normal per-call read budget.
-  For ReaderAt captures, get the frame bytes with `PacketPayloadFromReaderAt`.
-- Supported network headers: `IPv4` (with fragment detection), `IPv6` (with
-  bounded extension-header traversal for Hop-by-Hop, Routing, Fragment,
-  Destination Options, and Authentication headers), and `ARP`.
-- Supported transport headers: `TCP` (extracting ports, sequence/acknowledgment
-  numbers, flags, window size, and raw TCP option range for `JA4T`), `UDP`,
-  `ICMPv4`, `ICMPv6`, Encapsulating Security Payload (ESP, IP protocol 50),
-  and Internet Key Exchange version 2 (IKEv2) over UDP 500 or 4500.
-- `Frame.PayloadOffset` and `Frame.PayloadLength` identify the innermost
-  transport payload slice (`payload[frame.PayloadOffset : frame.PayloadOffset+frame.PayloadLength]`).
-
-On a monitor-mode capture, `LayerRadiotap` gives the Radiotap header span.
-`LayerIEEE80211` gives the MAC header span for Data frames and the Frame
-Control span for other frames. For an unprotected, unfragmented Data frame
-with a standard LLC/SNAP header, the decoder continues at the embedded
-EtherType. This supports four-address frames, QoS, HT Control on QoS frames,
-and the Radiotap data-padding flag. Protected frames, fragments, and
-aggregated MAC service data units (A-MSDUs) stay opaque. For IP
-and neighbor observations on an access point or controller mirror, capture
-after decapsulation and use the Ethernet link type.
-
-`LayerESP` spans the 8-byte SPI and sequence number header in IPv4 or IPv6.
-The payload span starts at the protected body. ESP flows have no transport
-ports. IKEv2 uses the existing UDP endpoints. On port 4500,
-`LayerIKEv2` requires the four-byte Non-ESP Marker. It spans the 28-byte
-IKEv2 header and the payload span starts after it. UDP-encapsulated ESP and
-NAT keepalives retain their UDP payload spans. The decoder does not
-authenticate or decrypt IPsec traffic.
-
-The [reference frames](../testdata/framing/README.md) include a Radiotap
-header longer than the default ReaderAt prefix. See the
-[Radiotap flags](https://www.radiotap.org/fields/Flags.html),
-[ESP framing](https://www.rfc-editor.org/rfc/rfc4303#section-2), and
-[IKEv2 message format](https://www.rfc-editor.org/rfc/rfc7296#section-3.1).
-
-IPv6 reassembly discards a datagram if fragments overlap, including identical
-bytes. A first fragment must contain the complete UDP or TCP header, including
-any preceding Authentication or Destination Options headers. DNS and QUIC
-resolve those headers using fragment zero's Next Header field. The completion
-packet supplies the flow index even when another fragment has a different
-Next Header value.
-Atomic IPv6 packets are decoded independently of pending fragment groups.
-
-The [fingerprint reference fixtures](../testdata/foxio/README.md) identify the
-FoxIO revisions and inputs used for compatibility tests.
+Use `ICMPFlowErrors` to count errors quoting known flows and `TCPZeroWindows`
+to count observed zero-window advertisements. Their packet indices locate
+the observation, which may cover an entire flow.
 
 ### Verify packet checksums
 
-Use `VerifyIPv4HeaderChecksum` on a complete IPv4 header, including its
-options. For TCP and UDP, use `VerifyTCPChecksum` or `VerifyUDPChecksum` with
-the IP pseudo-header addresses and the complete transport header and payload.
-Skip transport verification on capture prefixes and on fragments until
-reassembly supplies the complete transport bytes. UDP verification follows
-the UDP length field and supports ordinary, non-jumbo datagrams.
-
-A valid transport checksum returns `(true, false)`. A zero field or a
-matching offload seed can return `(false, true)`. This reports a possible
-transmit offload or, for zero-checksum IPv4 UDP, an omitted checksum.
-A checksum mismatch or malformed helper input can return `(false, false)`.
-
-Use `DecodeFrameWithChecksums` when you have the frame bytes and want
-`FrameChecksumAnomalies` alongside the decoded frame. The check uses the
-innermost decoded IP header.
-It reports an observed IPv4 header mismatch in `InvalidIPChecksum`, and a
-complete TCP or UDP checksum mismatch in `InvalidL4Checksum`. Truncated
-frames leave these flags clear. Transport verification skips fragmented
-datagrams, possible offload values, and source or routing options that can
-change the pseudo-header addresses. IPv4 UDP may omit its checksum.
-
-When calling `ReassembleTCP` directly, copy `InvalidL4Checksum` into
-`TCPSegmentInput.InvalidChecksum` for TCP payloads you inspected. If
-copies overlap, the first copy without a reported mismatch supplies the
-overlapping bytes. When every copy is flagged, capture order decides.
-Differing bytes still set `OverlapConflict`, and the reassembler retains
-ranges supported by a single segment. Unchecked inputs use capture order.
+Use `DecodeFrameWithChecksums` for checksum observations on a decoded frame.
+Validate only complete headers or transport data with the required context.
+Capture truncation and checksum offload can affect the result.
 
 ## Observe ARP and IPv6 neighbors
 
-Use `Capture.Neighbors` or `Capture.NeighborsFromReaderAt` to read local-link
-messages as observed on the wire, in packet order. Match each observation to
-controller logs by capture interface and timestamp. Repeated observations on
-different interfaces retain their own packet indices.
-
-For Ethernet/IPv4 ARP, inspect `Operation` for a request or reply. A probe
-carries an unspecified sender IP address. The record preserves both protocol
-addresses and both six-byte hardware fields, including all-zero fields.
-For IPv6 Neighbor Discovery, a Solicitation can supply a source link-layer
-address, and an Advertisement can supply a target link-layer address.
-Missing options yield nil hardware addresses. An Advertisement also reports
-the Router, Solicited and Override flags.
-
-Both scanners accept up to four VLAN tags and inspect the outer network
-protocol. They use a 96-byte frame prefix and extend it only for candidate
-IPv6 datagrams with at most 4096 bytes of IPv6 payload. They share the 64 MiB
-read budget and a 4096-record limit. ARP requires Ethernet hardware, IPv4
-protocol and the corresponding address lengths. IPv6 checks include hop
-limit 255, ICMPv6 code zero, a valid captured checksum, a unicast target,
-duplicate-address-detection rules and bounded eight-byte-unit options.
-Packets with a Fragment header or missing bytes are skipped. The scanner
-uses the first applicable Ethernet link-layer option and checks all option
-lengths. Captures taken before transmit checksum offload can omit a valid
-checksum and therefore omit that observation.
+Use `Neighbors` or `NeighborsFromReaderAt` for ARP and IPv6 Neighbor
+Discovery records. Each row identifies a packet and its observation scope.
+ARP probes and IPv6 duplicate address detection can occur before an address
+is assigned.
 
 ### Find changes in observed neighbor bindings
 
-Use `Capture.NeighborBindingChanges` or
-`Capture.NeighborBindingChangesFromReaderAt` to find where successive
-observations associate the same IP address with different hardware addresses.
-ARP requests and replies contribute the sender address pair. An IPv6 Neighbor
-Solicitation contributes its source IP and source link-layer option. A
-Neighbor Advertisement contributes its target IP and target link-layer option,
-including when its packet source differs from its target. The scan requires a
-unicast IP address and a nonzero unicast media access control (MAC) address.
-It skips duplicate address detection probes and packets without the relevant
-link-layer option.
-
-The scanners track Ethernet and Linux cooked v2 packets by capture interface,
-link type, ordered VLAN IDs, and the interface index in the cooked v2 header.
-They skip cooked v2 packets with an unknown interface index. Untagged packets
-and packets with VLAN ID 0 use separate scopes. Each accepted observation
-becomes the baseline, including repeated hardware addresses. A change reports
-both packet indices and timestamps, and results follow file order even when
-timestamps go backward. Use `Previous` and `Current` to inspect the operations
-and the Solicited and Override flags. Use deployment information to assess
-ownership and compare changes with events such as failover or reassignment.
-
-The existing neighbor scan limits apply. The scan retains at most one prior
-observation per scoped address and returns no partial changes if the scan
-exceeds the read budget or the 4096-observation limit.
+Use `NeighborBindingChanges` to compare successive address-to-link-layer
+assertions within an observation scope. A change records two observations.
+Use the interface and packet indices to investigate why the binding changed.
 
 ## DHCPv4 address assignments
 
-Use `Capture.DHCPv4` or `Capture.DHCPv4FromReaderAt` to read Discover,
-Offer, Request, ACK and NAK messages in capture order. Each observation
-includes its packet index, timestamp and capture interface. To find an
-acknowledged allocation, select ACK records with a valid `YourAddr`. A Request
-can carry option 50 (`RequestedAddr`) or the client's existing address
-(`ClientAddr`) during renewal. `NextServerAddr` identifies the BOOTP next
-server. DHCP option 54 supplies `ServerIdentifier`. A later observation can
-associate the same address with another client.
-
-The scan accepts complete, unfragmented IPv4 UDP messages on client/server
-ports 68/67, including relay-to-server and server-to-relay datagrams on 67/67.
-It verifies the BOOTP request/reply operation, hardware address bounds, magic
-cookie and option boundaries. Missing hardware addresses and client identifiers
-are nil. Client identifiers are opaque bytes. `HasLease` and `HasHostname`
-distinguish absent options from an advertised zero duration or empty hostname.
-
-Each datagram can contain up to 4096 bytes and 128 non-padding options across
-all fields. The parser skips padding, requires an End marker in every option
-field and ignores bytes after End. Option 52 can select the file field, the
-server-name field, or both, in that order. For repeated options the first
-value wins. The parser validates subsequent lengths and does not concatenate
-split values. Hostnames and client identifiers each retain at most 255 bytes.
-Malformed and oversized messages are skipped.
-
-The scan returns `ErrDHCPv4Limit` above 4096 observations or 64 MiB of candidate
-datagrams. ReaderAt also applies the shared 64 MiB read budget to framing,
-prefixes and candidate payloads. Ordinary UDP traffic only requires header
-inspection. The default flow scan runs independently of DHCP.
+Use `DHCPv4` or `DHCPv4FromReaderAt` for lease negotiation on the standard
+DHCPv4 ports. A Discover initiates discovery, an Offer proposes an address,
+and an ACK records the server's response. Use the transaction ID and packet
+indices to correlate messages.
 
 ## Aggregate 5-tuple flows
 
-Call `capture.Flows(data)` to aggregate IPv4 and IPv6 packets into deterministic
-bidirectional flows ordered by their first appearance in the capture. The first
-packet observed for a 5-tuple defines the client (`SrcAddr`, `SrcPort`) to
-server (`DstAddr`, `DstPort`) direction; replies in the reverse direction
-increment `ServerPackets` and `ServerBytes`. For TCP flows, `Flows` records:
-
-- `ClientJA4T` and `ServerJA4TS` from the first client `SYN` and server `SYN-ACK`.
-- `SYNTimestamp` and `SYNACKTimestamp` hold the first observed timestamp option
-  for each handshake flag combination, in capture order. This also works when
-  the capture starts with a SYN-ACK. Check `Present` before reading the raw
-  `TSval` and `TSecr` values. Either value can be zero. A missing option, a
-  duplicate timestamp, or a malformed TLV boundary leaves that packet out of
-  consideration, so a retransmission can supply the first valid observation.
-  Both flow readers use the same selection. For example:
-
-  ```go
-  if ts := flow.SYNACKTimestamp; ts.Present {
-      fmt.Printf("server TSval=%d TSecr=%d\n", ts.TSval, ts.TSecr)
-  }
-  ```
-
-- `ServerJA4L` (`<half_syn_synack_rtt_us>_<server_ttl>`) and `ClientJA4L`
-  (`<half_synack_ack_rtt_us>_<client_ttl>`) from the 3-way handshake timestamps
-  and IP `TTL` / `HopLimit`. Both values come from the first matching 3-way
-  handshake completed in capture order. The SYN sender defines the client
-  for these samples. If no handshake completes, `ServerJA4L` uses the first
-  matching SYN and SYN-ACK pair. Matching retransmissions keep the first
-  timestamp, and a matching reset clears the pending opening. Both flow readers
-  use the same selection. With `SeparateTCPInterfaces` enabled, packets must
-  match on the same interface. The scan limits pending interface-specific
-  handshakes to `MaxFlows`.
-- First-seen process attribution (`ProcessID`, `UserID`, `ProcessName`,
-  `ProcessArgs`, and `ContainerID`). The first packet with attribution supplies
-  these fields. Later packets can fill missing fields when they carry the same
-  known PID. A name-only observation keeps its PID unknown.
-
-Call `flow.CommunityID(seed)` on a summary from `Flows` or `FlowsFromReaderAt`
-to correlate IPv4 or IPv6 TCP and UDP traffic with other tools. Both directions
-produce the same ID. Match the seed across tools (the default is zero).
-The method computes the ID only when called and returns an empty string for
-unsupported protocols, invalid or mixed-family addresses, or a summary with
-`PortsUnavailable` set. A decoded port value of zero is valid.
+Use `Flows` or `FlowsFromReaderAt` for bidirectional IPv4 and IPv6 summaries.
+The first observed direction sets the source. For TCP or UDP, `CommunityID`
+joins the tuple to compatible sensor records. Use the same seed and check
+whether the ports were observable.
 
 ## Trace a client connection and a TLS proxy
 
-If DNS succeeds but a connection fails, capture both directions at the
-client-facing interface before NAT.
-When the service uses a TLS-terminating proxy, also
-capture the proxy's client-facing and origin-facing interfaces. Preserve the
-interface names and use synchronized capture clocks.
-
-1. In the [client fixture](../testdata/deployments/client.pcapng), call `DNS` to
-   find the answer `trace.example → 198.51.100.80`. Follow the response's
-   `PacketIndex` to check its capture timestamp. `Flows` shows the TCP tuple
-   `192.0.2.14:50000 → 198.51.100.80:443`. The first connection has visible
-   ClientHello and ServerHello messages, followed by a TCP reset. A later SYN
-   and distinct initial sequence numbers show the tuple being reused.
-   `ExtractFlowPCAPNG` for flow 1 exports both attempts because the flow key is
-   the bidirectional 5-tuple. The export preserves the later packet's captured
-   length of 58 bytes and original length of 76 bytes.
-2. In the [proxy fixture](../testdata/deployments/proxy.pcapng), call `TLS`
-   and match each `FlowIndex` with its `Flows` entry. The client-facing
-   ClientHello offers `app.example` and `h2`. The origin-facing ClientHello
-   offers `origin.example` and `http/1.1`. The second ClientHello comes from
-   the proxy's upstream socket. Each leg has its own ServerHello and TLS
-   session. The visible ALPN values are client offers. The certificate
-   chains, server-selected ALPN, and application bytes in TLS 1.3 require the
-   corresponding TLS secrets when those encrypted records are available.
-   Use the proxy request log to associate a front-end request with an
-   upstream TCP session, especially when the proxy pools connections.
-3. To associate a pre-NAT IP with a device at the time of the capture, check
-   a contemporaneous Dynamic Host Configuration Protocol (DHCP) ACK or lease
-   log. In the [IoT fixture](../testdata/deployments/iot.pcapng), `DHCPv4`
-   reports a Discover and an Offer with `YourAddr` set to `203.0.113.42`.
-   The Offer gives a candidate assignment. Use timestamped interface and lease
-   records to identify the client. After NAT, use the gateway's translation
-   log to associate the translated tuple with the original client.
-
-The [reference decoder commands and packet numbers](../testdata/deployments/README.md)
-let you repeat these checks on the synthetic fixtures.
+Correlate DNS records, flows, and TLS hellos across the client and proxy
+captures. A proxy can create a separate upstream connection with different
+endpoints and handshake settings. Compare each leg's original packets.
+[Deployment fixtures and decoder results](../testdata/deployments/README.md#independent-decoder)
 
 ## Reassemble TCP streams
 
-Call `capture.Streams(data)` to reassemble ordered directional TCP byte streams
-(`Client` and `Server`) for every TCP flow in the capture, or call
-`ReassembleTCP(segments)` directly on a slice of `TCPSegmentInput`.
-Overlapping segments use capture order unless the caller provides
-[checksum evidence](#verify-packet-checksums). Differing bytes at the same
-sequence offset set `StreamAnomalies.OverlapConflict`.
-
-`Streams` starts a new connection when an opening SYN follows a midstream
-capture or changes the opening sequence number or sending endpoint. A matching
-SYN retransmission stays in its connection. Each connection uses its first
-observed packet to define the client direction. Connections that reuse a
-five-tuple share the same `FlowIndex` and directional segment and byte limits.
-Without a new opening SYN, tuple reuse can be indistinguishable from a gap.
-
-By default, TCP reassembly combines observations across capture interfaces.
-This lets you recover a connection when its packets were captured on different
-interfaces. When the PcapNG interfaces observe independent networks, set
-`capture.SeparateTCPInterfaces` before calling a stream-based analyzer. It
-tracks connections by the capture-wide `PacketRecord.InterfaceID` as well as
-by the five-tuple. The flow index and packet totals still cover the entire
-capture. All connections on that tuple share the directional segment and byte
-limits.
-
-For example, if `capture` was parsed from `data`, recover HTTP/1 requests and
-responses separately for each interface.
-
-```go
-capture.SeparateTCPInterfaces = true
-records, err := capture.HTTP(data)
-```
-
-Set the same field on a capture from `NewFromReaderAt` before calling
-`HTTPRequestsFromReaderAt` to get packet-attributed requests. Look up each
-observation's `PacketIndex` in the packet records to identify its interface.
+Use `Streams` for capture-level TCP connections or `ReassembleTCP` for
+segments you already collected. Read gap, overlap, and truncation flags
+before interpreting the bytes. Batch reassembly can concatenate available
+ranges across a gap. Protocol scanners that require a contiguous prefix stop at
+the gap. A new opening SYN can separate connections that share a flow index.
 
 ### Select an observation scope on one interface
 
-A single mirror may carry several VLANs or VXLAN overlay networks with
-overlapping addresses. Interface-scoped TCP and UDP fragment options group
-by PcapNG interface, so they still share reassembly state on that mirror.
-When its encapsulation supplies a boundary in both directions, select
-packets for one network before reassembling its TCP or UDP traffic.
-
-Use `DecodeFrame` on each packet with that packet's link type. Match the
-ordered VLAN IDs for a known tag stack. For VXLAN, find the `LayerVXLAN`
-span, check that it covers eight captured bytes, and read the three-byte
-VXLAN Network Identifier at offsets four through six in that span. The
-mirror configuration determines which fields and tunnel endpoints define
-a unique scope. A VNI can repeat in independent overlay domains. Select
-both directions and each fragment by the same scope. If the expected
-headers are unavailable or truncated, leave the observation unresolved.
-[VXLAN header layout](https://www.rfc-editor.org/rfc/rfc7348.html#section-5)
-
-The [runnable Go example](../example_tenant_scope_test.go) filters a
-bounded, single-interface Ethernet fixture by full VLAN stack or VNI and
-copies its original packet bytes into one PcapNG subset per scope. It
-keeps a map from the subset's packet indices to the source packet indices.
-It recovers the HTTP request and response plus the fragmented DNS question
-for each scope. For larger inputs, bound both the source scan and the
-staged output. [Fixture and independent decode](../testdata/framing/tenant-scope.md)
-
-Flow indices in each subset follow that subset's packet order. Keep those
-indices with the subset and translate packet locators before referencing the
-original capture. Community ID still describes the bidirectional tuple and
-can be identical across scopes. For connection-level evidence, retain the
-observed scope and capture-local packet references along with that tuple
-join. [Flow summaries](#aggregate-5-tuple-flows)
+Set `Capture.SeparateTCPInterfaces` or `Capture.SeparateIPFragmentInterfaces`
+before analysis when interface IDs distinguish observations you need to keep
+apart. These options affect TCP opening and supported UDP fragment grouping.
+Flow indices remain capture-wide. Inspect layer spans for VLAN or tunnel
+tenant boundaries that interface IDs alone cannot represent.
+[Tenant fixture](../testdata/framing/tenant-scope.md)
 
 ### Identify an application protocol from a prefix
 
-Pass the start of one directional TCP stream or one UDP payload to
-`ClassifyL7(payload, ipProto, srcPort, dstPort)` to choose a decoder to try.
-It recognizes TCP signatures for HTTP/1, the HTTP/2 client preface, an SSH
-identification line, TLS ClientHello or ServerHello, session-framed SMB2 or
-encrypted SMB3, and RDP connection negotiation. On UDP it recognizes QUIC v1
-and v2 long headers with the fixed bit set.
-
-DNS uses port 53 on TCP and ports 53, 5353, or 5355 on UDP, with enough bytes
-for the header. Kerberos uses port 88 and a recognized application tag. Both
-check the record length field on TCP. The classifier tries the other protocol
-signatures before using these port hints. A result is a candidate for further
-parsing. `L7Unknown` can also mean the identifying bytes are incomplete or the
-capture starts after the protocol opening.
+Use `ClassifyL7` to choose a parser. Treat a match as a hint. The parser
+validates the message.
 
 ### Identify fragmented TCP coverage
 
-Capture-level TCP analyzers skip segments carried in IPv4 or IPv6 fragments.
-Complete protocol records from unfragmented TCP can still appear. To identify
-this coverage limit, iterate packet references and inspect `Frame.Anomalies.IPFragment`,
-`IPProtocol`, and the fragment offset and ID. Treat a fragmented packet with
-an IPv6 extension after the Fragment header as unresolved transport until
-you have enough bytes to decode the extension chain. Bound the packet work
-in your caller when inspecting a large capture.
-
-The [fragmented TCP example](../example_framing_test.go) reports the packet
-indices where this capture contains TCP fragments, then returns TLS hellos
-from the competing unfragmented flows on either input path. A nonempty
-fragment list is a reason to leave questions about the affected traffic
-unresolved. The frame decoder exposes no TCP ports on these fragments.
-
-`DefragmentIP` can reconstruct datagram bytes after the caller groups
-fragments. The capture-level fragment collectors currently dispatch DNS and
-QUIC over UDP. Applying them to TCP would also require preserving the
-observed opening and attributing any recovered segment to all contributing
-original packets. [Independent reference](../testdata/framing/README.md#fragmented-tcp)
+Batch TCP stream collection skips IP-fragmented TCP. Inspect the fragment
+fields with `DecodeFrame`. If you manage fragment sets yourself,
+`DefragmentIP` can reconstruct IP datagrams before transport parsing.
+[IPv4 and IPv6 fixture](../testdata/framing/README.md#fragmented-tcp)
 
 ## Parse DNS messages and tunneling metrics
 
-Call `ParseDNS(payload)` on a single DNS message or `capture.DNS(data)` to
-extract DNS queries and responses over UDP (ports 53, 5353, 5355) and TCP (port
-53 length-prefixed). Compression pointers must point strictly backward and may
-jump at most `MaxDNSCompressionJumps` times. Use `capture.HasDNSQuery(data, qname)`
-to test whether a capture queries a domain without allocating `DNSRecord` slices.
-
-A TCP segment can end halfway through a DNS message or contain multiple
-messages. The scanner orders each direction by TCP sequence number and reads
-each message using its two-byte length prefix. If a gap breaks framing, it
-stops decoding that direction. For a split message, `PacketIndex` and
-`TimestampNs` identify the packet supplying the first prefix byte. This lets
-you locate the message in the original capture even when the final bytes
-arrived later. Slice and ReaderAt scans return records in packet-index order.
-
-DNS record flow indices use the order returned by `capture.Flows(data)`. For
-fragmented UDP messages, the record uses the fragment flow index and the
-reassembled UDP ports. The packet index and timestamp identify the fragment
-that completed the message.
-
-If PcapNG interfaces observe independent networks, set
-`capture.SeparateIPFragmentInterfaces = true` before calling `DNS`,
-`DNSFromReaderAt`, or `HasDNSQuery`. The setting also applies to IP fragment
-grouping for QUIC Initial scans, including those used by `KeyedQUIC`.
-By default a datagram can be assembled from fragments captured on different
-interfaces. Both settings use the same flow indices and scan-wide fragment limit.
-
-[DNS over TCP (RFC 7766)](https://www.rfc-editor.org/rfc/rfc7766)
+Use `ParseDNS` on one DNS message. `DNS` and `DNSFromReaderAt` scan UDP
+DNS, mDNS and LLMNR, and length-framed TCP DNS. For TCP, the packet
+index identifies the first length-prefix byte. For fragmented UDP, it
+identifies the packet that completed the datagram. Use `DNSSourceStats`
+for bounded query and label statistics. Check message anomalies before
+interpreting partial answers.
 
 ### Diagnose DNS transactions
 
-Run the [DNS transaction example](../examples/dns-transactions/main.go) from
-the repository root. It scans a seekable capture using `DNSTransactionsFromReaderAt`.
-Frame numbers start at one so you can jump to them in Wireshark.
+Use `DNSTransactions` or its ReaderAt variant for ordinary unicast DNS.
+Pairing uses the observed transport scope and message fields. Rows distinguish
+paired exchanges, one-sided traffic, and ambiguous retries. A paired row
+can provide latency when the timestamps support it. Try the diagnostic from
+the repository root.
 
 ```sh
 go run ./examples/dns-transactions testdata/deployments/dns-transactions.pcap
 ```
 
-The DNS transaction and keyed HTTP/1 export commands also accept a `.gz`
-file, a named pipe, or `-` for standard input. Pipe and standard input can
-carry either raw or gzip-compressed capture bytes. The commands stage up to
-128 MiB of uncompressed input before analysis and reject incomplete staged
-captures.
-
-Pass `-icmp` to the DNS transaction command to include counts and frame
-references for ICMP errors that quote an observed DNS flow. The ICMP rows
-are flow-level observations and follow the DNS report.
-
-Pass `-tcp-zero-window` to see which endpoint advertised a zero receive
-window on unicast TCP port 53 flows. The command reports counts and first and
-last frame numbers even if the capture contains no complete DNS message for
-that flow. These rows describe the flow independently of individual DNS
-transactions.
-
-| Frames in the synthetic capture | Observation |
-| --- | --- |
-| 1 → 2 | A successful lookup took 8 ms at the capture point. |
-| 3 → 4 | The resolver replied NXDOMAIN (header RCODE 3) after 5 ms. |
-| 5 → 8 and 6 → 7 | Two TCP queries were outstanding. The first took 1.2 s, the second 6 ms. The replies arrived in reverse order. |
-| 9, 10 and 11 | Two identical UDP questions preceded one reply. Both queries and the reply are marked ambiguous, without elapsed time. |
-| 12 | A SERVFAIL reply (header RCODE 2) was observed without its query. |
-| 13 | The capture ended with an outstanding query. Packet loss, a one-sided capture, and ending the capture too early can all leave a query unanswered in the report. |
-
-Use `DNSTransactions` or `DNSTransactionsFromReaderAt` to pair standard,
-single-question unicast lookups on port 53. Each PcapNG interface supplies an
-independent observation point, including for IP fragments and TCP openings.
-UDP pairs use directional endpoints, transaction ID and the question's name,
-type and class. TCP pairs also require the same observed connection opening.
-Names preserve label boundaries and compare ASCII letters case-insensitively.
-A five-tuple reused without a visible new opening can be indistinguishable
-from one TCP connection.
-
-`DNSPaired` rows retain both original DNS records. An unpaired observation
-has a single record and reports a missing query, missing reply, ambiguity or
-unsupported input. Overlapping identical questions leave the key ambiguous
-for that UDP observation point or TCP opening for the rest of the scan.
-Zone transfers, unusual question shapes, and structurally anomalous messages
-produce unsupported rows. Multicast and discovery traffic are skipped.
-For TCP, frame numbers identify the packet containing the first length-prefix
-byte. Elapsed time includes everything
-between the two observations, including network transit. Missing, zero or
-backward timestamps leave it unknown. Inspect the original packets for the
-TC flag, EDNS extended response codes, and any evidence outside this pairing.
-
 ### Read DNS over TLS
 
-For DNS-over-TLS on TCP/853, use `capture.DNSOverTLS(data, extraKeyLog)` or
-`capture.DNSOverTLSFromReaderAt(r, extraKeyLog)`. Both use the existing TLS
-1.2 and TLS 1.3 decryptors with embedded or caller-supplied NSS key logs.
-Only complete length-prefixed messages from authenticated plaintext are
-passed to `ParseDNS`. Inspect `Message.Anomalies` for DNS section truncation.
-A known TCP gap excludes that direction. Missing or incorrect keys can yield
-an empty result. Each record identifies the flow and directional endpoints.
-[DNS over TLS (RFC 7858)](https://www.rfc-editor.org/rfc/rfc7858#section-3.3)
-
-For example, given a capture opened with `NewFromReaderAt` and its original
-reader `r`, print the DNS questions recovered with embedded keys:
-
-```go
-records, err := capture.DNSOverTLSFromReaderAt(r, nil)
-if err != nil {
-	return err
-}
-for _, record := range records {
-	for _, question := range record.Message.Questions {
-		fmt.Println(record.FlowIndex, record.SrcAddr, record.DstAddr, question.Name)
-	}
-}
-```
-
-For SVCB and HTTPS records, inspect `rr.ServiceBinding` for the priority,
-ordered ALPN identifiers, optional port, and presence of a nonempty ECH
-configuration. `rr.Target` is the advertised name (empty for the DNS root).
-Priority zero denotes an alias and its parameters are ignored. The parser
-accepts uncompressed targets and strictly increasing parameter keys. Unknown
-keys are skipped. A malformed parameter length or ordering sets
-`InvalidRDataLength` and leaves the binding nil. More than 32 ALPN identifiers
-returns `ErrDNSLimit`. The original RDATA remains available via `DataOffset`
-and `DataLength`. For an OPT record, read `rr.EDNSUDPPayloadSize()` and
-`rr.EDNSDOBit()` for the advertised payload size and DNSSEC OK flag.
-
-To evaluate DNS tunneling or high-entropy subdomain indicators, call
-`DNSLabelEntropy(qname)` on a domain name or `capture.DNSDomainStats(data)` to
-aggregate query counts, unique subdomain fan-out, `NXDOMAIN` counts, maximum
-label length, subdomain Shannon entropy, TXT answer payload volume, and a
-composite `TunnelScore` ($[0.0, 1.0]$) per group. The apex heuristic uses the final two
-labels by default. For selected two-label suffixes, it includes one more
-label. For example, `a.example.co.uk` groups under
-`example.co.uk` and `b.other.co.uk` under `other.co.uk`. The built-in table
-covers a subset of public suffixes and has no wildcard or exception rules.
-
-`Capture.DNSSourceStats` groups observations by client address. Queries use
-their source and unicast responses use their destination. Multicast responses
-are skipped. The capture-wide DGA score combines NXDOMAIN ratio, distinct
-NXDOMAIN apex count and maximum query entropy once a client has at least five
-NXDOMAIN responses across three apexes. The ratio divides NXDOMAIN responses
-by the larger of the observed query and response counts. The score is
-independent of capture duration.
+Use `DNSOverTLS` or `DNSOverTLSFromReaderAt` for TCP/853 when traffic keys
+authenticate TLS records carrying complete length-framed messages. Rows
+identify the flow and sending direction.
 
 ## Parse TLS handshakes and JA4+ fingerprints
 
-Call `ParseTLSRecords(stream)` on a TCP payload or reassembled stream, or call
-`capture.TLS(data)` (or `capture.TLSWithKeyLog(data, extraKeyLog)`) to
-reassemble TCP flows and decode TLS 1.2 and TLS 1.3 `ClientHello`, `ServerHello`,
-and `Certificate` handshake messages. Capture scans, including the TLS records
-returned by `Web` and `WebWithWebSockets`, parse each direction only through
-its first known TCP sequence gap. They keep complete messages before the gap.
-
-- A hello may span one-byte records. The parser joins the fragments across
-  complete, non-closing plaintext warning alerts. Fatal alerts and
-  `close_notify` end collection. If a handshake needs a 129th record,
-  `ParseTLSRecords` returns an error matching `ErrTLSLimit`. Capture scans
-  omit that direction and can still return a hello from the opposite direction.
-- `TLSClientHello.JA4` reports the 36-character FoxIO JA4 fingerprint (filtering
-  RFC 8701 GREASE values, sorting cipher suites and non-SNI/non-ALPN extensions,
-  and preserving signature scheme wire order).
-- `TLSServerHello.JA4S` reports the FoxIO JA4S fingerprint over the server's
-  selected version, cipher suite, ALPN, and wire-order extension list.
-- `ClientHello.SupportedGroups` lists advertised groups. `KeyShareGroups`
-  lists groups with an offered key share. Both retain up to `MaxTLSExtensions`
-  non-GREASE IDs in wire order. A malformed key-share vector contributes no
-  IDs. The parser skips the public-key bytes.
-- `ClientHello.HasECH` reports a nonempty encrypted_client_hello extension.
-  This observation includes GREASE ECH offers. The extension ID also appears
-  in `Extensions` when its payload is empty. See how to
-  [interpret server names with ECH](#interpret-server-names-with-ech).
-- `ServerHello.SelectedGroup` gives the group from a structurally valid
-  server key share (zero when unavailable). If `IsHelloRetryRequest` is true,
-  the group is the one requested for the next ClientHello. For example,
-  `!sh.IsHelloRetryRequest && sh.SelectedGroup == pcap.TLSGroupX25519MLKEM768`
-  identifies an observed ServerHello selecting that hybrid group.
-- Both hellos expose the bounded, copied `SessionID`, `HasSessionTicket`,
-  and `HasPSK`. For TLS 1.2, `hs.IsResumed` indicates a nonempty session ID
-  echoed by the server with no certificate in the parsed handshake. Missing
-  capture data can affect this inference. For TLS 1.3 it indicates a server
-  PSK selection, which can also use an externally provisioned key. A client
-  offer alone is insufficient. After a HelloRetryRequest the parser checks
-  the next ServerHello for selection and retains the first hello for JA4S.
-  For example, `hs.ClientHello.HasPSK && !hs.IsResumed` identifies a captured
-  offer without observed acceptance.
-- To inspect mutual TLS, read `HasCertificateRequest` for the server's request
-  and `ClientCertificates` for the chain the client presented. Each side has
-  its own `MaxTLSCertificates` limit. For TLS 1.3, the client and server
-  handshake secrets unlock their respective directions independently. A
-  missing client chain can reflect an empty reply, missing packets, or a
-  missing secret. A presented certificate alone does not establish that the
-  server accepted it. For example:
-
-  ```go
-  for _, cert := range record.Handshake.ClientCertificates {
-      fmt.Println(record.FlowIndex, cert.JA4X, cert.DNSNames)
-  }
-  ```
-
-- Each certificate in the chain exposes DNS SANs in `DNSNames` and IPv4/IPv6
-  SANs in `IPAddresses` as `netip.Addr` values. For example,
-  `record.Handshake.Certificates[0].IPAddresses` gives the leaf's addresses
-  when the chain is present. Each list is nil when absent and preserves the
-  first 64 entries in certificate order, including duplicates. If either
-  list exceeds the limit, `SANsTruncated` is true for that certificate.
-  `RawDER` retains the complete certificate. Cleartext and decrypted client and server
-  certificates follow the same rules for slice and ReaderAt scans.
-- Supply a known capture packet timestamp to
-  `cert.ValidityAt(time.Unix(0, pkt.TimestampNs))` to check that certificate's
-  inclusive validity window. If the timestamp is unavailable (for example,
-  in a PcapNG Simple Packet Block), pass `time.Time{}` for `TLSValidityUnknown`.
-  You can check each server or client certificate independently.
-- Use `match, known := record.Handshake.ServerNameMatch()` to compare the observed
-  ClientHello DNS name with the server leaf's DNS SANs. Matching follows Go's
-  X.509 case and wildcard rules. A missing or invalid DNS name, an IP
-  literal, missing leaf or DNS SANs, or invalid certificate DER gives an unknown
-  result. A match in the retained DNS names is conclusive. A miss is unknown
-  if further DNS names might have been omitted. Both helpers describe the
-  captured evidence independently of chain trust and revocation policy.
-- `TLSCertificate.JA4X` (and standalone `JA4XFromDER` / `JA4XFromCert`) reports
-  the FoxIO JA4X fingerprint over the certificate's raw ASN.1 issuer RDNs,
-  subject RDNs, and X.509 extension OIDs. When a PcapNG `DSB` block or
-  `extraKeyLog` contains `SERVER_HANDSHAKE_TRAFFIC_SECRET`, `TLS` and
-  `TLSWithKeyLog` automatically decrypt the TLS 1.3 encrypted server
-  `Certificate` handshake message and populate `Certificates` and `JA4X`.
-- `TLSAnomalies` reports `SNIIPLiteral`, `EmptySNI`, `DuplicateExtension`,
-  `ALPNTransportMismatch`, `SelfSignedCertificate`, `InvalidCertificateDER`, and
-  `TruncatedRecord`.
+Use `ParseTLSRecords` for a directional stream or `TLS` for a capture.
+Use `TLSWithKeyLog` for protected handshake fields when you have keys.
+The observed records can include hellos, certificates, and fingerprints.
+[Automatic fingerprint computation](fingerprints.md)
 
 ### Interpret server names with ECH
 
-When you observe an Encrypted Client Hello (ECH) extension, retain
-`ClientHello.HasECH` and the observed server name in `ClientHello.SNI`.
-An actual ECH offer can carry the public name in `ClientHelloOuter` and
-the private server name in encrypted `ClientHelloInner`. A GREASE offer
-can have the same extension shape while carrying the server name directly
-in the visible ClientHello. Extension presence alone leaves ECH acceptance
-unknown. [ECH and GREASE in RFC 9849](https://www.rfc-editor.org/rfc/rfc9849.html#section-6.2)
-
-Record both results of `ServerNameMatch()`. The same comparison applies with
-or without an ECH extension. A known agreement or disagreement concerns the
-observed name and the available leaf certificate. The private service name
-remains unknown from those observations. See [the runnable Go example](../example_test.go).
-
-TLS handshake and application traffic keys protect TLS records. ECH uses
-separate encryption for the inner ClientHello. When ECH is accepted,
-RFC 9850 indexes TLS 1.3 traffic secrets by the inner ClientHello random.
-go-pcap looks up traffic keys by the observed ClientHello random and leaves
-the inner hello opaque. A key log can contain traffic keys without making
-them usable by that lookup. [TLS and ECH key-log labels in RFC 9850](https://www.rfc-editor.org/rfc/rfc9850.html#section-2.1)
+With Encrypted ClientHello (ECH), the visible name can be the public outer
+name. The private name is unavailable. `ServerNameMatch` distinguishes a
+known comparison from unavailable evidence. Check its second return value
+before using a mismatch.
 
 ### Locate a hello or certificate chain in the original packets
 
-Call `capture.TLSHandshakeEvidence(data, extraKeyLog)` or
-`capture.TLSHandshakeEvidenceFromReaderAt(r, extraKeyLog)` to locate the
-ClientHello, ServerHello, or Certificate message whose fields the TLS parser
-selected. Both methods accept embedded and caller-supplied key logs. Each row
-contains the ordinary TLS observation and its zero-based opening packet. Two
-openings can share a flow index and Community ID. The opening packet can be a
-SYN, a midstream packet, or the start of a proxy negotiation.
-
-Each field's `PacketIndices` is the sorted set of packets supplying its
-message bytes. For a plaintext message this includes its contributing TLS
-record headers. For a protected certificate chain the set covers every
-authenticated ciphertext record containing part of the Certificate message,
-including headers and tags. A selected packet or record can also carry other
-messages. A missing field has an empty set. Packet order reflects capture
-order, so a reordered segment can precede the packet containing the first
-byte of a hello. After a HelloRetryRequest, the ServerHello evidence locates
-the first hello retained in the TLS observation. A later hello can supply
-the resumption decision.
-
-Attribution charges up to 65,536 record inspections and 262,144 packet-span
-intersections across the capture. Plaintext scanning and keyed recovery both
-charge their record inspections. A read or limit error discards all rows.
-The ReaderAt method shares the regular read budget across TCP payload and
-length reads. [Runnable example](../example_test.go)
+Use `TLSHandshakeEvidence` or `TLSHandshakeEvidenceFromReaderAt`. Each
+record identifies the TCP opening and retains field-specific packet indices.
+Protected fields refer to whole authenticated TLS records. Inspect directional
+coverage for incomplete or unavailable observations.
+[Runnable examples](../example_test.go)
 
 ## Decrypt QUIC Initial packets
 
-Call `DecryptQUICInitial(datagrams)` on a slice of UDP payloads or call
-`capture.QUIC(data)` to decrypt QUIC v1 (RFC 9001) and QUIC v2 (RFC 9369)
-Initial packets using `crypto/hkdf` and `crypto/aes`, remove header protection,
-reassemble `CRYPTO` frames across UDP packets, and parse the inner TLS 1.3
-`ClientHello` (`q13...` JA4 fingerprint). Use `capture.HasQUICJA4(data, ja4)`
-and `capture.HasQUICSNI(data, sni)` for direct matching. Initial keys can be
-derived from the version-specific salt and the client’s destination connection
-ID. Application traffic uses separate keys. The Initial parser exposes the
-handshake metadata even when application payloads remain opaque.
-[QUIC v1 Initial secrets](https://www.rfc-editor.org/rfc/rfc9001#section-5.2) ·
-[QUIC v2 changes](https://www.rfc-editor.org/rfc/rfc9369#section-3.3)
-
-Pass one UDP payload per slice element to `DecryptQUICInitial`. A datagram can
-hold multiple QUIC packets. The function accepts up to 64 datagrams and up to
-65,527 bytes per payload, the maximum 16-bit UDP length minus the eight-byte
-header. Together these limits allow up to 4,193,728 input bytes per call.
-Exceeding either limit returns `ErrQUICLimit`. Within an Initial packet, the parser skips ACK frames with up to 256 additional ranges, including
-any ECN counters, to reach subsequent CRYPTO frames.
-
-`QUIC` and `QUICFromReaderAt` return distinct Initial exchanges on the same
-UDP tuple in first-observed order. They group Initials across a client port
-change when the same endpoint IPs and server port have a unique matching
-nonempty connection ID. Each record uses the flow index of its first observed
-Initial packet in `capture.Flows(data)`. The record retains the original ports,
-including UDP ports recovered from fragments. A matching Retry can supply a new
-destination ID for a subsequent client Initial. Read `record.Handshake.HasRetry`
-or `record.Handshake.HasVersionNegotiation` on each record to check which server
-responses appeared in the capture. These flags describe packet observations.
-Retry integrity tags are not verified.
-When authentication is needed to resolve a server-first packet or a changed
-server connection ID, unsuccessful checks count toward the exchange's budget
-for resolving ambiguous packets.
+Use `DecryptQUICInitial` on UDP datagrams or `QUIC` on a capture. QUIC v1
+and v2 Initial keys are derived from public inputs. Initials expose client
+offers and JA4 when enough bytes are present. Authenticated Handshake or
+application data requires its own traffic keys.
 
 ### Authenticate QUIC 1-RTT packets with capture keys
 
-Use `NewQUIC1RTTDecoder` for one sending direction in QUIC v1 or v2 with
-`TLS_AES_128_GCM_SHA256` or `TLS_AES_256_GCM_SHA384`. Use the version and
-cipher suite from the observed Initial exchange. Look up
-`Handshake.ClientHello.Random` in `Capture.TLSKeyLog(extraKeyLog)` and pass
-the sender's `ClientTrafficSecret0` or `ServerTrafficSecret0`. Create a decoder
-for each direction you want to read. Each decoder covers the first
-application key generation. Use `NewQUIC1RTTKeyTracker` for one sending
-direction when you need to follow authenticated key updates. The tracker
-returns an application key generation with each authenticated packet and
-keeps the immediately preceding key for reordered packets.
-
-Pass a complete short-header packet to `Open` with its full destination
-connection ID and the expected packet number for that sender. A short-header
-packet consumes the remainder of its UDP datagram. Supply zero if you start
-at the beginning of the sender's application packet number space. After a
-success, keep the larger of the previous expected number and the returned
-number plus one, so reordered packets leave the number monotonic. A capture
-gap can make the truncated packet number ambiguous if the actual number
-falls outside the reconstruction window.
-
-`Open` returns the authenticated packet number and owned frame bytes for
-one packet, up to 65,527 bytes of wire input. The caller associates packets
-with a connection and interprets the returned frames. A failed call returns
-no frame bytes. [Packet protection](https://www.rfc-editor.org/rfc/rfc9001.html#section-5)
-· [Packet number reconstruction](https://www.rfc-editor.org/rfc/rfc9000.html#appendix-A.3)
-
-Run `go test -run '^ExampleQUIC1RTTDecoder_Open$' .` to exercise the
-[key-log example](../quic_1rtt_test.go).
+Use `NewQUIC1RTTDecoder` for generation zero or `NewQUIC1RTTKeyTracker` to
+follow updates. Create one decoder or tracker per sending direction. Use
+the version, cipher suite, directional application secret, and packet number
+context from the same connection. [Cipher coverage](offline-crypto.md)
 
 ### Reassemble authenticated QUIC streams
 
-Pass authenticated payloads from `QUIC1RTTDecoder.Open` to
-`ReassembleQUIC1RTTStreams`. Use one call per connection and sender.
-The same numeric stream ID can carry separate bytes in each direction.
-Keep each packet's frame payload in a separate slice element. Packet order
-can vary.
-
-Each result contains the contiguous prefix starting at stream offset zero.
-`Gap` indicates that an observed offset or final size extends beyond the
-prefix. `Complete` requires a FIN at the end of the prefix. An observed
-`Reset` prevents completion even when the prefix reaches the final size.
-Repeated bytes contribute once. Conflicting bytes or final sizes cause an
-error, including when the conflict occurs beyond a gap.
-
-The function parses STREAM and RESET_STREAM frames and skips the layouts of
-other base QUIC frames and DATAGRAM frames. An unknown frame type or
-malformed layout returns `ErrInvalidQUIC` with no streams. Directional
-limits are 256 packets, 8 MiB of frame payloads, 16,384 STREAM or RESET_STREAM
-frames, and 1,024 stream IDs. Stream offsets plus data length and final sizes
-are limited to 4 MiB per stream. ACK frames can carry up to 256 additional
-ranges. Exceeding a limit returns `ErrQUICLimit` with no streams.
-[QUIC final size](https://www.rfc-editor.org/rfc/rfc9000.html#section-4.5) ·
-[QUIC frame layouts](https://www.rfc-editor.org/rfc/rfc9000.html#section-19) ·
-[DATAGRAM frame layout](https://www.rfc-editor.org/rfc/rfc9221.html#section-4)
-
-Run `go test -run '^ExampleReassembleQUIC1RTTStreams$' .` to check the
-[out-of-order packet example](../quic_stream_test.go).
+Call `ReassembleQUIC1RTTStreams` for one connection and direction.
+Results contain the contiguous prefix and report clean FIN, gap, or reset.
+Conflicting bytes and inconsistent final sizes invalidate the reconstruction.
 
 ### Associate keyed QUIC packets with capture connections
 
-Use `capture.KeyedQUIC(data, extraKeyLog)` or
-`capture.KeyedQUICFromReaderAt(reader, extraKeyLog)` on a capture that includes
-the client and server Initials. Provide NSS key-log bytes, or pass `nil` to
-use a PcapNG TLS Decryption Secrets Block. The scan uses the ClientHello
-random to select the keys, the ServerHello to select the cipher suite, and
-Initial source connection IDs to identify candidate destinations.
-
-Each result keeps the Initial exchange's flow index and lists authenticated
-packets in capture order by sender. The zero-based packet index identifies the
-UDP datagram. The UDP offset locates the short header after any coalesced
-long headers. Take the `Payload` fields from one sender when calling
-`ReassembleQUIC1RTTStreams`.
-
-Association covers complete UDP datagrams for QUIC v1/v2 with the decoder's
-AES-GCM traffic keys. An authenticated `NEW_CONNECTION_ID` makes
-the issued ID eligible for subsequent packets in the opposite direction.
-`RETIRE_CONNECTION_ID` removes that ID for packets with the same or higher
-sender packet number. An older packet observed afterward can still authenticate.
-`Retire Prior To` deactivates earlier sequence numbers. An explicit retirement
-supplies the sender's packet-number boundary for reordered traffic.
-
-Nonempty IDs can follow a client port change on the same IP pair and server
-port. An empty ID requires the original tuple and cannot acquire replacement
-IDs. The scan skips packets whose issuance has yet to be observed, packets
-outside the available key generation or number window, and packets that
-authenticate for multiple candidates. Conflicting assignments of a CID,
-sequence number or reset token stop future associations in that direction.
-The scan retains at most 16 active and 64 historical IDs per direction and
-16,384 learned sequence numbers across all connections. One packet can carry
-up to 64 ID operations. All original and rotated IDs share the authentication
-attempt and byte budgets.
-
-A uniquely authenticated transition advances key generation in that
-direction and retains the immediately previous keys for delayed packets.
-Missing an entire generation or delaying a packet by more than one
-generation can leave it opaque. Each authenticated packet reports
-`KeyGeneration`. A transition above 32 authenticated updates returns
-`ErrQUICLimit`.
-[RFC 9001 key updates](https://www.rfc-editor.org/rfc/rfc9001.html#section-6) ·
-[Independent endpoint test](../testdata/quic-key-updates.md)
-
-ReaderAt metadata and payload reads share the same 64 MiB budget across both
-passes. The scan limits authentication to 16,384 attempts and 64 MiB of
-attempted packet bytes. It retains up to 16 MiB of plaintext across all
-results and uses the stream reassembly packet and byte limits per direction.
-A limit or read error discards the result.
-[Connection ID handling](https://www.rfc-editor.org/rfc/rfc9000.html#section-5.1) ·
-[Coalescing](https://www.rfc-editor.org/rfc/rfc9000.html#section-12.2) ·
-[Runnable example](../keyed_quic_test.go)
+Use `KeyedQUIC` or `KeyedQUICFromReaderAt` when Initials and application keys
+are available. Each authenticated packet retains its capture packet index,
+UDP offset, and key generation. Only uniquely authenticated associations
+contribute evidence. The scan tracks bounded connection-ID rotation within
+the observed path scope and up to 32 key updates per direction. It can
+decode reordered packets from the immediately preceding generation. Missing
+issuance or generation history can keep later packets opaque.
+[Rotation and key-update fixture](../testdata/quic-key-updates.md)
 
 ### Observe the server-selected QUIC ALPN
 
-Call `capture.KeyedQUICWithALPN(data, extraKeyLog)` or
-`capture.KeyedQUICWithALPNFromReaderAt(reader, extraKeyLog)`. The server
-handshake traffic secret authenticates Handshake packets using their own packet
-number space. The first complete EncryptedExtensions message at CRYPTO offset
-zero supplies `record.ALPN.Protocol`. Its sorted, zero-based `PacketIndices`
-identify the original UDP datagrams contributing those message bytes. Identical
-retransmissions use the first captured copy. A gap or conflict inside the
-message leaves ALPN unobserved.
-
-The scan returns a row for an observed selection even when it has only
-handshake keys. Application keys can recover 1-RTT packets for the same row.
-A nil `ALPN` on an application row means the selection is unknown. Authentication
-attempts, attempted packet bytes and retained bytes share the keyed scan limits.
-At most 16,384 nonempty Handshake CRYPTO fragments are retained across the scan.
-[QUIC encryption levels](https://www.rfc-editor.org/rfc/rfc9001.html#section-4.1.3) ·
-[Server EncryptedExtensions](https://www.rfc-editor.org/rfc/rfc8446.html#section-4.3.1) ·
-[Endpoint and packet-ownership tests](../quic_alpn_test.go)
+Use `KeyedQUICWithALPN` or its ReaderAt variant. Server Handshake keys can
+authenticate EncryptedExtensions and identify the selected Application-Layer
+Protocol Negotiation (ALPN) value and its packet indices. An application row
+can have nil `ALPN`. Client offers establish no server selection.
 
 ### Delimit HTTP/3 frames
 
-Use `ParseHTTP3Stream` on each directional `QUICStream` from a connection
-known to have negotiated HTTP/3. An authenticated `ALPN.Protocol == "h3"` from
-`KeyedQUICWithALPN` or an endpoint's negotiated-protocol log supplies that
-selection. The Initial ClientHello exposes the client's offers.
-
-The parser classifies request, control, push, and QPACK streams. On
-frame-bearing streams, each result locates the frame header and payload
-within `QUICStream.Data`. Use these offsets to read DATA bytes or preserve
-the wire range of a compressed HEADERS field section. The parser checks
-frame placement by stream kind and first-position SETTINGS. Unknown
-frame types retain their delimited ranges. QPACK and unknown unidirectional
-stream types are identified by their prologues and their bytes remain opaque.
-
-`Incomplete` reports a missing clean FIN, gap, or reset. `Truncated`
-identifies a partial prologue or frame and preserves any preceding complete
-frames. A clean FIN within a prologue or frame, or an invalid frame placement,
-returns `ErrInvalidHTTP3` and a zero result. Limits are 1,024 frames and
-4 MiB of stream input or declared frame payload. Exceeding either limit
-returns `ErrHTTP3Limit` and a zero result.
-[HTTP/3 framing](https://www.rfc-editor.org/rfc/rfc9114.html#section-7) ·
-[Runnable example](../http3_test.go)
+Use `ParseHTTP3Stream` on a directional stream from a confirmed HTTP/3
+connection. It reports frame ranges in the original stream and can retain
+complete frames preceding a truncated suffix.
 
 ### Decode HTTP/3 QPACK field sections
 
-Use `DecodeQPACKSections` once per sender of a known HTTP/3 connection.
-Pass the sender's QPACK encoder stream, including its type, and the maximum
-table capacity advertised by the peer's SETTINGS. The initial capacity is
-zero. A missing SETTINGS capture can leave the negotiated maximum unknown.
-Static sections with a zero Required Insert Count can be decoded independently
-using an empty encoder and zero capacity.
-
-Build one `QPACKSectionInput` for each complete compressed field section.
-For HEADERS, use the frame's payload offset and bytes. For PUSH_PROMISE,
-skip the QUIC variable-length Push ID and advance the offset accordingly.
-Supply sections in observed arrival order. Set each `EncoderOffset` to the
-length of the contiguous encoder-stream prefix at that point, counting the
-stream type. Encoder instructions can arrive after the referencing section.
-In long captures, the encoded insert count wraps. Correct reconstruction
-requires the observed encoder progress when the section arrived.
-
-Each result preserves the input stream ID, offset and compressed length.
-For a decoded dynamic section, the output `EncoderOffset` ends the encoder
-prefix in effect at decoding. It can extend beyond the section's arrival and
-include table updates used by other sections.
-`QPACKDecoded` supplies ordered, duplicate-preserving name/value pairs.
-`QPACKBlocked` identifies missing inserts, including an encoder prefix
-that ends at a gap. `QPACKMalformed` covers a malformed section, an evicted
-reference or an inconsistent Required Insert Count. `QPACKLimited` covers
-a section, field, output or blocked-queue limit. Only decoded sections
-expose header strings. A malformed encoder instruction returns
-`ErrInvalidHTTP3`. A complete instruction before a gap remains usable.
-
-One directional call accepts 8 MiB of total input, a 4 MiB encoder stream,
-16,384 sections and 16,384 encoder instructions. The dynamic table retains
-up to 64 KiB, including the 32-byte cost per entry (at most 2,048 entries).
-Up to 64 blocked sections totaling 256 KiB can wait for inserts. Each is
-retried once when its required count is reached. The compressed section,
-field count, per-string size and total decoded field limits match the HTTP/2
-limits. Decoded work is charged even if a later field invalidates a section.
-Results cover compression. HTTP field semantics and packet attribution
-belong to the consuming stream or transaction analysis.
-[RFC 9204](https://www.rfc-editor.org/rfc/rfc9204.html) ·
-[Runnable example](../example_test.go) ·
-[RFC and aioquic capture cases](../qpack_test.go)
+Use `DecodeQPACKSections` once per sender. Supply its QPACK encoder stream,
+negotiated table limit, and compressed field sections. Results distinguish
+decoded, blocked, malformed, and limited sections. A decoded section retains
+field order and the encoder range it depends on.
 
 ### Recover keyed HTTP/3 request streams
 
-Call `capture.KeyedHTTP3Transactions(data, extraKeyLog)` or
-`capture.KeyedHTTP3TransactionsFromReaderAt(r, extraKeyLog)`. The scan
-requires an authenticated server-selected `h3` and at least one authenticated
-1-RTT packet carrying request-stream evidence. Supply matching keys through
-an embedded or caller-supplied key log. `ConnectionIndex` addresses the
-keyed ALPN scan for the same capture and key set. `StreamID` identifies a
-client-initiated bidirectional stream within that connection. A request-only
-or response-only stream produces a row. Push streams and push promises
-are outside this transaction projection.
-
-Inspect each direction's ordered sections for initial headers, informational
-responses and trailers. A blocked, malformed or limited field section keeps
-its QPACK state and source range. An undecodable section can make the roles
-of later sections uncertain. Missing peer SETTINGS leaves a nonzero Required
-Insert Count unresolved. The decoder infers encoder progress from capture
-order and the first contiguous prefix. Network reordering between the
-observation point and endpoint can change the endpoint's arrival order.
-
-`BodyState` uses the entity decoding and content-length checks shared with
-HTTP/2. CONNECT requests and their successful responses have empty HTTP
-entities. Their DATA still contributes to the directional packet indices,
-including on extended CONNECT streams. A later server HEADERS or PUSH_PROMISE
-on an established tunnel marks the response invalid. A rejected CONNECT response can
-carry an ordinary entity. For a 2xx response with DATA and no observed
-request method, the entity is unknown because it could be tunnel traffic.
-An HTTP or HTTPS request needs a nonempty `:authority` or `host`. If both
-appear, their values must agree. Malformed fields remain available in their
-decoded QPACK section and the request is marked invalid.
-[CONNECT in HTTP/3](https://www.rfc-editor.org/rfc/rfc9114.html#section-4.4)
-
-`EndStream` requires a clean final size. A gap or reset can leave a
-partial body, including a prefix that ends within a DATA frame. A missing
-FIN can also leave a partial body with neither flag set. Malformed HTTP
-framing marks the affected direction invalid. The scan admits 65,536
-framed HTTP/3 records and 262,144 QPACK context range inspections in total.
-Message, packet-reference, decoded-header and entity-body output share
-the HTTP transaction scan limits. A scan error discards all rows.
-
-Directional `PacketIndices` include every observed STREAM or RESET_STREAM
-packet for the selected stream direction, including repeats and bytes beyond
-a gap. `SharedPackets` means a datagram also carried another QUIC frame or
-coalesced long header. `QPACKPacketIndices` identifies encoder and peer
-SETTINGS packets that intersect a decoded dynamic section's supporting
-prefixes. These packets can also support other streams. `ALPNPacketIndices`
-supplies the authenticated EncryptedExtensions context separately.
-
-In the aioquic fixture, selecting frame 2 (ALPN), frame 10 (request) and
-frame 12 (response) and reopening with external keys recovers no transaction.
-Adding the independently identified client Initial in frame 1 recovers both
-bodies and status 200. The same four ciphertext frames without keys produce
-no transaction. Replaying another connection can require different Initial,
-packet-number and QPACK history. The API exposes packet selection for these
-observations. [Reopening test](../http3_transactions_test.go) ·
-[Runnable Go example](../example_test.go)
+Use `KeyedHTTP3Transactions` or its ReaderAt variant. Authenticated `h3`
+ALPN gates decoding. Each row identifies a connection and a request stream
+with directional headers, body state, completion, and original packet
+indices. Packets can also support other streams or shared QPACK context.
+After successful CONNECT, DATA belongs to the tunnel. For independent
+replay, keep the source capture and keys. A transaction's packet selection
+can omit handshake and packet-number history required to reopen it.
 
 ### Read DNS over QUIC
 
-Use `Capture.DoQTransactions` or `Capture.DoQTransactionsFromReaderAt`
-for DNS-over-QUIC exchanges. The scan requires the server's authenticated
-`doq` selection and pairs the directions on a client-initiated bidirectional
-stream. It returns an explicit state for absent, incomplete, reset, malformed,
-unsupported and resource-limited messages. A completed message has one
-length-prefixed DNS message with ID zero and a clean direction end. The
-first scope covers ordinary lookups. AXFR and IXFR need separate
-multi-message framing. Request and reply packet indices refer to the
-original QUIC capture.
-
-Plain UDP/TCP DNS uses addresses and DNS message fields for association.
-DoT uses authenticated TLS records and DNS length framing. The HTTP/2 DoH
-helper obtains DNS from an HTTP field section and body. DoQ identifies an
-exchange through its QUIC stream and the server's selected application
-protocol. DoH/3 would require HTTP/3 transaction and body semantics.
-
-The [resolver example](../doq_example_test.go) decodes two independent
-lookups whose responses finish in reverse order. [Endpoint and decoder
-reference](../testdata/doq-exchanges.md) ·
-[DoQ stream and message rules](https://www.rfc-editor.org/rfc/rfc9250.html#section-4.2)
+Use `DoQTransactions` or its ReaderAt variant. Authenticated `doq` ALPN
+gates pairing by client-initiated bidirectional stream. Each complete
+direction carries one DNS message with ID zero and clean FIN. Partial or
+reset streams and unsupported transfers retain directional evidence and
+an explicit state. [Resolver example](../doq_example_test.go) ·
+[Reference trace](../testdata/doq-exchanges.md)
 
 ## Decrypt TLS 1.2 and TLS 1.3 streams offline
 
-Call `capture.DecryptedTLSStreams(data, extraKeyLog)` to decrypt TLS 1.2
-(`CLIENT_RANDOM` master secrets with supported AES-GCM and AES-CBC suites)
-and TLS 1.3 (`CLIENT_TRAFFIC_SECRET_0` / `SERVER_TRAFFIC_SECRET_0` with
-`TLS_AES_128_GCM_SHA256` and `TLS_AES_256_GCM_SHA384`) application streams using
-secrets embedded in PcapNG Decryption Secrets Blocks (`DSB`) or supplied in
-`extraKeyLog` (`SSLKEYLOGFILE` format).
-
-See the [offline cipher coverage matrix](offline-crypto.md) for the exact
-TLS and QUIC suites and ways to distinguish unavailable plaintext.
-
-TLS 1.2 AES-CBC decryption supports MAC-then-encrypt and encrypt-then-MAC.
-Capture analysis uses the ServerHello extension to select the record layout.
-The directional `DecryptTLS12Records` function selects the layout from the
-first authenticated record. A failed CBC record stops that direction and
-returns the application bytes authenticated so far. See the
-[CBC fixture suite list](../testdata/tls/README.md).
-
-When the key log includes `CLIENT_EARLY_TRAFFIC_SECRET`, the client stream
-includes authenticated 0-RTT application bytes followed by recovered 1-RTT
-bytes in wire order. Both epochs share the directional output limit. These
-bytes show what the client sent. Determining whether the server accepted early
-data requires inspecting the handshake. The keyed example capture uses the
-published records and secrets from [RFC 8448 section 4](https://www.rfc-editor.org/rfc/rfc8448#section-4).
-
-For example, if the client sends a TLS 1.3 `KeyUpdate` during an HTTP request,
-the client traffic secret for generation zero lets the parser recover request
-bytes both before and after the update. The server keeps its current traffic
-secret until it sends its own authenticated update. After 32 updates in one
-direction, the next update ends decryption for that direction and the parser
-returns the plaintext recovered so far. [TLS 1.3 traffic key updates](https://www.rfc-editor.org/rfc/rfc8446#section-7.2)
+Use `DecryptedTLSStreams` with the capture and an NSS key log or embedded
+secrets. Recovery depends on supported suites, handshake context, and
+a contiguous, authenticated record history for each direction.
+[Cipher and generation coverage](offline-crypto.md)
 
 ### Select HTTP/1 transactions inside TLS
 
-Call `KeyedHTTP1Transactions` with the capture bytes or
-`KeyedHTTP1TransactionsFromReaderAt` with the indexed reader. Supply an NSS key
-log as the second argument, or pass `nil` to use only the embedded PcapNG TLS
-Decryption Secrets Blocks. The scan accepts the suites supported by the
-offline TLS 1.2 and 1.3 decryptors. TLS 1.2 uses the `CLIENT_RANDOM` master
-secret. TLS 1.3 uses directional application traffic secrets, optional handshake
-secrets, and optional client early traffic secrets. Both key sources together
-can supply up to `MaxDecryptionSecretBytes` bytes and `MaxTLSKeyLogEntries`
-client randoms. The caller owns all returned headers, bodies, and record and
-packet lists. Results retain no secrets.
-
-Each row has complete authenticated request headers. An incomplete request
-header produces no row. A request or paired response with complete headers can
-carry a partial body. Check `BodyState` and `BodyLimitExceeded` before using
-entity bytes. An authenticated `close_notify` can complete a close-delimited
-response. A TCP FIN alone leaves that body partial. A final response requires
-complete authenticated headers, a confirmed TCP opening, consistent packet
-acknowledgements, and unambiguous request order. Informational responses
-preceding that final response contribute to its record evidence. When pairing
-is unseen or ambiguous, the row includes only request evidence.
-
-`ClientCoverage` and `ServerCoverage` report the length of the recovered
-directional application stream, skipped protected records before its start,
-and an incomplete tail. A gap, authentication failure, incomplete record, or
-TLS work limit stops that direction at its authenticated prefix. Subsequent
-records cannot repair the interrupted entity. Without an early-data offer,
-TLS 1.3 application keys can establish sequence zero after opaque handshake
-records. When a client offers early data, the scan retains authenticated
-requests and leaves response association ambiguous because acceptance is
-unknown. Early and regular application data are parsed separately so that a
-partial early request cannot consume regular-epoch bytes. With no matching keys or no authenticated request headers the result
-is empty. An empty result cannot distinguish those cases.
-
-The rows follow capture opening order, then request order within the opening.
-The capture-local ID includes the opening's first packet, the client TLS
-record's directional TCP byte offset, and the request's plaintext offset
-inside that record. The same record can contain several request lines.
-`RequestPlaintextOffset` and `ResponsePlaintextOffset` count bytes in the
-recovered application streams. Each record reference covers the entire TLS
-record, including its five-byte header, and lists its original zero-based
-packets. Individual plaintext bytes have no TCP payload offset. The HTTP
-evidence uses -1 for capture locations and zero for timestamps. To look up a
-ciphertext packet's timestamp, use its index in `Capture.Packets` or
-`PacketsFromReaderAt`. The [runnable consumer examples](../keyed_http1_example_test.go)
-show this lookup and select a complete response from the keyed fixture.
-
-The TLS walk shares the TCP stream limits, 65,536 inspected TLS records, and
-262,144 packet span intersections across the capture. ReaderAt reads share
-`MaxReaderAtScanBytes`. HTTP decoding uses the same request, response, header,
-body, and message limits as cleartext transaction selection. Returned record
-and packet references share a further 262,144-entry budget. A record used by
-two transactions charges its references twice. Exceeding an aggregate HTTP
-limit returns `ErrHTTPLimit` and no rows.
+Use `KeyedHTTP1Transactions` or its ReaderAt variant. Rows identify the TCP
+opening, paired messages, authenticated TLS record ranges, and original
+ciphertext packets. Check pairing, body state, and directional coverage.
 
 ### Explain keyed HTTP/1 coverage
 
-Use `Capture.AnalyzeKeyedHTTP1` or `Capture.AnalyzeKeyedHTTP1FromReaderAt`
-when you need both transaction rows and the coverage of identified TLS
-openings. Each direction reports plaintext byte count, an earlier opaque
-range if observed, and the reason recovery stopped. An opening with visible
-client and server hellos can have zero rows when its traffic keys are
-unavailable. A scan that cannot identify both hellos leaves that opening's
-coverage unknown.
-
-Use the original opening packet and capture-wide flow index to locate the
-connection. Directional wire offsets include any proxy prefix. The end of
-captured input and an authenticated close notify are separate observations.
-An unsuccessful authentication establishes a record boundary without
-establishing which key or input bytes were wrong. Transaction pairing and
-body completeness still govern observations about an individual exchange.
-Capture-wide truncation and unsupported link counts are available separately.
-A terminal scan error discards the result and preserves the error for
-`errors.Is`.
-
-The [external Go example](../keyed_http1_coverage_example_test.go) locates the
-packets behind a complete response, shows a defined match and non-match,
-and reports unknown when an observed TLS opening lacks its keys.
+Use `AnalyzeKeyedHTTP1` or its ReaderAt variant for an explanation when
+transaction coverage is incomplete. Consult the reported TLS stopping point
+and HTTP state before interpreting a missing request or body.
 
 ### Export an HTTP/1 exchange as ciphertext
 
-Pass a row's `ID` to `ExtractKeyedHTTP1TransactionPCAPNG` or
-`ExtractKeyedHTTP1TransactionPCAPNGFromReaderAt`. Use the same source bytes,
-TCP interface-separation setting and TLS keys used for selection. The
-exporter reads embedded TLS key logs and accepts extra NSS key log bytes.
-An invalid ID or a request that the supplied keys cannot recover returns
-`ErrOutOfBounds` before the first write. ReaderAt selection, TLS framing and
-copying share `MaxReaderAtScanBytes`. A read-limit or writer error can leave
-partial output. Discard the output on error.
-
-The packet-only PcapNG keeps the original timestamps, lengths, captured
-bytes, interface properties used for dissection, and frame check sequence
-information. It omits all secrets, comments and process metadata. Supply the
-matching secrets separately when reopening the export. Packet numbering can
-change, so enumerate its keyed transactions to obtain a new capture-local ID.
-
-For a confirmed response, the export covers the client and server TCP
-prefixes through the selected messages' last TLS records. It includes TCP
-opening packets, applicable controls, handshakes, earlier TLS key epochs
-and earlier HTTP exchanges required for ordered pairing. Capture order is
-preserved even when an earlier record arrived after the selected response.
-A whole packet can carry later records or other messages. For a request
-without a confirmed response, the export can retain its entire opening
-to preserve conflicting or incomplete reverse evidence. Unrelated
-connections and other openings on the same tuple are excluded.
-
-For a partial body, the exporter can include its direction's remaining
-traffic to preserve a gap, truncation or authentication failure. A TCP or TLS
-limit reached by the selected opening alone can require the entire opening. If a
-source-wide TLS limit cut the body or prevented response pairing, an original
-packet containing part of the next TLS record can demonstrate the incomplete
-tail. If the required whole packets would expose a complete record beyond the
-limit, or cannot preserve the incomplete tail, the exporter returns
-`ErrReassemblyLimit` before writing. It also checks the TCP reassembly byte
-limit when a packet was cut by both reassembly and capture truncation.
-
-The [selection example](../examples/keyed-http1-export/main.go) uses a
-ReaderAt and embedded keys to write the first confirmed exchange whose
-request target matches the argument. Run it on the synthetic TLS 1.3 fixture:
-
-```sh
-go run ./examples/keyed-http1-export testdata/keyed-http1-export.pcapng /second > selected.pcapng
-```
-
-The same [gzip and pipe inputs](#diagnose-dns-transactions) work for this
-command.
-
-The [offline verification](../testdata/tls-provenance.md#packet-only-export-across-a-tls-13-keyupdate)
-shows how to reopen that file with a separate key log.
+Pass the transaction ID, original input, and matching keys to
+`ExtractKeyedHTTP1TransactionPCAPNG` or its ReaderAt variant. Reopening the
+packet-only output requires separate secrets. Write to a temporary destination
+if you need to discard partial output on error.
+[Runnable export tool](../examples/keyed-http1-export/main.go) ·
+[Replay fixture](../testdata/tls-provenance.md)
 
 ### Read DNS messages from decrypted HTTP/2
 
-Call `capture.HTTP2(data)` and select records with `IsDecrypted`. For each
-stream in `record.Summary.Streams`, call `block.DNSOverHTTPS(stream.Data)`
-for each header block. The method reads the `dns` URI parameter on GET
-requests and the `application/dns-message` body of POST requests and 2xx
-responses that allow a body. It accepts an uncoded body of up to 65,535 bytes
-and limits GET request targets to `MaxHTTPHeaderLineBytes`.
-
-Check the match flag and error before using the DNS message. Inspect
-`DNSMessage.Anomalies` for partial DNS sections. Use the flow index and
-HTTP/2 stream ID to pair requests with responses. [RFC 8484](https://www.rfc-editor.org/rfc/rfc8484#section-4)
+Use `HTTP2` to recover decrypted headers and DATA for the stream. Apply
+`HTTP2HeaderBlock.DNSOverHTTPS` to the corresponding headers and body.
+Check DNS anomalies after decoding. For DoQ, use the separate
+[QUIC stream binding](#read-dns-over-quic).
 
 ### Choose TLS and QUIC key sources
 
-Pass a capture snapshot and optional key-log bytes to a keyed scan. Use a
-private value copy of the snapshot to select which sources that call can use.
-
-| Mode | Capture used for the call | Extra key-log bytes |
-| --- | --- | --- |
-| Passive without traffic secrets | Value copy with `Secrets = nil` | `nil` |
-| Embedded secrets | Original capture | `nil` |
-| External secrets | Value copy with `Secrets = nil` | External key log |
-| Combined | Original capture | External key log |
-
-```go
-externalOnly := *capture
-externalOnly.Secrets = nil
-rows, err := externalOnly.KeyedHTTP1TransactionsFromReaderAt(source, externalKeyLog)
-```
-
-Use the same immutable source bytes or seekable source for each view. Set the
-field on the copy before starting its scan. Leave the original snapshot, its
-shared slices, and the key bytes read-only during concurrent calls. Passive
-QUIC Initial analysis is still available through public Initial keys.
-
-`TLSKeyLog` reads supported embedded blocks in capture order, then the
-external key log. The last accepted line for the same client random and label
-wins. A missing label leaves that secret unavailable. Record the selected mode
-with any finding. When an isolated scan authenticates the selected evidence,
-report that source as sufficient. Both sources can independently suffice.
-In combined mode, authentication can also require keys from both sources. Keep key bytes,
-key-log entries and capture-wide secret blocks out of diagnostic output.
-
-Packet-only flow and transaction exports omit embedded secrets. To decrypt on
-reopen, provide authorized key-log bytes separately. [Capture exports](#write-captures)
+Pass explicit NSS key log bytes to keyed scans or supply an input with a
+supported PcapNG Decryption Secrets Block. For an external-only scan, make
+a value copy of the capture and set its `Secrets` to nil. For an embedded-only
+scan, pass nil for the extra key log. With both sources enabled, the last
+accepted line for a client random and label wins, and the external log is
+processed last. Keep key material private. Packet-only exports omit secrets.
+[Input and ownership rules](compatibility.md#inputs-and-payloads)
 
 ## Inspect explicit proxy tunnels
 
-TLS, HTTP, HTTP/2, SSH, SMB, and RDP capture methods inspect the payload after
-one successful HTTP CONNECT or no-authentication SOCKS5 CONNECT exchange.
-`DecryptedTLSStreams` uses the inner TLS records with the supplied key log.
-The flow index and addresses identify the captured client and proxy. `HTTP`
-returns the outer CONNECT request, interim responses, and successful 2xx response as header-only records
-before any inner HTTP messages. Body offsets refer to the original stream.
-
-Use `UnwrapProxyStream(stream.Client.Data, stream.Server.Data)` on a reassembled
-request and response to get the inner byte slices, proxy type, requested host,
-and port. The host comes from the proxy request and can differ from the inner
-TLS server name. Both slices borrow the original stream buffers. HTTP headers
-must end within 4,096 bytes per direction, including any interim responses. SOCKS5 accepts up to 16 offered methods and
-IPv4, IPv6, or domain targets. On an incomplete or rejected exchange the helper
-returns both input slices and `false`.
+Use `UnwrapProxyStream` on known client and server directions to locate
+inner bytes after a supported CONNECT or SOCKS exchange. The returned views
+borrow the supplied streams. Attribute TLS on each observed proxy leg to
+its own endpoints and keys.
 
 ### Select HTTP/2 transactions inside TLS
 
-Call `KeyedHTTP2Transactions` with capture bytes, or
-`KeyedHTTP2TransactionsFromReaderAt` with the indexed reader. Pass NSS key log
-bytes as the second argument or pass `nil` to use embedded PcapNG keys. Both
-methods use the [key inputs and TLS coverage](#select-http1-transactions-inside-tls)
-of keyed HTTP/1 and the [header, body, and stream semantics](#select-a-prior-knowledge-cleartext-http2-transaction)
-of cleartext HTTP/2. The caller owns the results.
-
-Selection requires an authenticated client preface, initial SETTINGS, and
-complete request HEADERS. ALPN negotiation alone yields no rows. The server
-needs its own initial SETTINGS to supply a response. Pairing checks the TCP
-opening, stream ID, and acknowledgements of the TLS record that completes the
-opening request header block. Each direction maintains its own HPACK state.
-A gap or authentication failure stops that direction at its recovered prefix.
-`ClientCoverage` and `ServerCoverage` report skipped protected prefixes and
-incomplete tails. A previous final status can remain confirmed while its body
-is partial. A stream reset is separate from a completed body.
-
-Early and regular TLS 1.3 application data each need their own observed preface
-for independent decoding across the uncertain early-data boundary. An early
-data offer leaves response association ambiguous. Supported authenticated
-traffic key updates within the regular application stream preserve HTTP/2
-state.
-
-The capture-local ID contains the TCP opening's first packet index, the
-client TLS record's wire offset, the HEADERS frame's plaintext offset in that
-record, and the stream ID. Rows follow opening order and client plaintext
-order. Use the following fields to inspect the evidence.
-
-| Field | Meaning |
-| --- | --- |
-| `RequestPlaintextOffset`, `ResponsePlaintextOffset` | Start of the initial request or final response HEADERS in recovered directional plaintext. An absent final response has offset -1. |
-| `RequestRanges`, `ResponseRanges` | Half-open plaintext byte ranges covering the selected HEADERS, CONTINUATION, DATA and reset frames, including padding, trailers and informational responses. Adjacent selected frames share a range. |
-| `RequestRecords`, `ResponseRecords` | Whole TLS records in directional wire order. A record can carry frames for multiple streams. A frame can span multiple records. |
-| `PacketIndices` | Sorted distinct original capture packets supplying the selected TLS records. Use these indices for timestamps. The HTTP message evidence has packet coordinates -1 and timestamp zero. |
-| `SharedRecords`, `SharedPackets` | `SharedRecords` indicates additional plaintext outside this row's selected frames in a contributing record. `SharedPackets` indicates that another returned transaction uses a listed packet. A packet may also contain control traffic or an unselected stream when this flag is false. |
-
-Body offsets count logical decoded entity bytes. TLS records give the finest
-available mapping to ciphertext. Header, body, TLS record and ReaderAt
-budgets apply across the scan. The per-direction frame cap applies to each
-independently parsed early or regular application stream. Up to
-262,144 retained ranges, record references and packet references share a
-capture-wide budget. A record used by two streams counts for each stream.
-An aggregate HTTP limit returns `ErrHTTPLimit` and discards the result.
-
-Run `go test -run '^ExampleCapture_KeyedHTTP2Transactions$' .` to select an
-exchange from the [keyed fixture](../testdata/tls-provenance.md#http2-over-tls).
+Use `KeyedHTTP2Transactions` or its ReaderAt variant with NSS key log
+material. Rows distinguish HTTP/2 stream IDs and identify frame ranges,
+authenticated TLS records, and original packets. Check directional coverage
+and shared HPACK context.
 
 ### Export a keyed HTTP/2 exchange as ciphertext
 
-Select a row with `KeyedHTTP2Transactions` or
-`KeyedHTTP2TransactionsFromReaderAt`. Pass its `ID` and the same input and
-key log to `ExtractKeyedHTTP2TransactionPCAPNG` or its ReaderAt counterpart.
-Use nil for the key log when the source holds the keys.
-
-```go
-rows, err := capture.KeyedHTTP2Transactions(data, keyLog)
-if err != nil {
-	return err
-}
-for _, row := range rows {
-	if row.Request.Path == "/two" {
-		return capture.ExtractKeyedHTTP2TransactionPCAPNG(data, keyLog, output, row.ID)
-	}
-}
-return pcap.ErrOutOfBounds
-```
-
-The output contains original packets from the selected TCP opening. A complete
-exchange includes the TCP and TLS opening and the records through the selected
-frames in each direction. Those records carry earlier HPACK updates, even when
-another HTTP/2 stream supplied them. Whole packets and shared TLS records can
-also disclose concurrent traffic. A partial, reset or anomalous exchange can
-require the entire opening to preserve the original evidence. Inspect the
-export before sharing it.
-
-The packet-only PcapNG omits decryption secrets. Supply the keys separately
-when reopening and select the transaction using its new capture-local ID.
-An invalid or unavailable ID returns `ErrOutOfBounds` before writing. When
-whole packets cannot preserve a source reassembly cutoff, the export returns
-`ErrReassemblyLimit`. The ReaderAt variant shares the read budget across
-selection and copying. Run the example with
-`go test -run '^ExampleCapture_ExtractKeyedHTTP2TransactionPCAPNG$' .`.
+Pass the transaction ID, original input, and matching keys to
+`ExtractKeyedHTTP2TransactionPCAPNG` or its ReaderAt variant. The selected
+packets can include TLS and HPACK history shared with other requests.
+Reopen the packet-only capture with separate keys.
+[Replay example](../testdata/tls-provenance.md#export-a-keyed-http2-exchange)
 
 ## Parse HTTP messages and carve payloads
 
-| Question | Capture API |
-| --- | --- |
-| Which packet started each request? | `HTTPRequests` for cleartext HTTP/1 and HTTP/2. [Request timeline](#locate-individual-http-requests-in-a-capture) |
-| What headers and entity bytes belong to this request? | `HTTP1RequestEvidence` for cleartext HTTP/1, including body completeness. [Request evidence](#inspect-cleartext-http1-request-evidence) |
-| Which TLS records carry a multiplexed HTTP/2 exchange? | Use `KeyedHTTP2Transactions` for streams, logical frame ranges and original ciphertext packets. [Keyed HTTP/2 selection](#select-http2-transactions-inside-tls) |
-| Which authenticated HTTP/1 exchanges can I select with TLS keys? | Use `KeyedHTTP1Transactions` to inspect requests, paired responses, TLS records and original ciphertext packets. [Keyed transaction selection](#select-http1-transactions-inside-tls) |
-| Which response belongs to this request, and which packets carry the exchange? | Use `HTTP1Transactions` to select a cleartext HTTP/1 exchange, then export it to PcapNG. [Transaction selection](#select-and-export-a-cleartext-http1-transaction) |
-| What did the client and server exchange? | `HTTP` for HTTP/1 requests, responses, JA4H and carved bodies. `HTTP2` for frames and stream headers. Both support cleartext and keyed TLS. |
-| Do I need TLS and both HTTP versions? | `Web` shares reassembly and decryption across all three results. |
+Use `ParseHTTPRequest` and `ParseHTTPResponse` for individual HTTP/1
+messages. Use `HTTP` for capture records or `Web` to share work with TLS
+and HTTP/2 analysis. Inspect framing anomalies and body completeness before
+interpreting a body. The HTTP/1 parser can remove chunk framing and decode
+a single supported gzip or deflate coding within its output limits.
+Offsets and consumed byte counts refer to the original stream.
 
-For an individual HTTP/1 stream, call `ParseHTTPRequest` or `ParseHTTPResponse`.
-
-Inspect `Anomalies` for conflicting numeric lengths, simultaneous transfer
-encoding and content length, folded headers, and incomplete bodies. Folded
-lines count toward the header limit and are unfolded into their preceding
-field. A final `chunked` transfer coding determines the wire boundary even
-when a length is present. Without transfer coding, equal lengths are accepted.
-For conflicting or invalid lengths on a body-bearing message, the parser
-returns the headers, omits the body, and consumes the remaining input in that
-direction. An incomplete chunk stream also consumes the remaining input and
-retains the bounded body prefix. Bodyless response statuses end at the headers.
-
-On cleartext connections, `HTTP` stops each direction at its first known TCP
-gap and retains any complete headers and available body prefix before it. It
-identifies request and response directions from complete start lines. When
-both sides are available, it pairs requests and final responses in order.
-On partial captures, a TCP acknowledgement can identify a response to a
-request that preceded the captured requests. When acknowledgements are
-unavailable, an earlier response with a complete `Content-Length` body and a
-later response packet can establish that boundary. Otherwise the parser uses the observed HTTP
-message order. A response to HEAD ends at the headers even if it advertises
-a content length. Interim responses leave the request pending. The
-standalone `ParseHTTPResponse` function has no request-method context.
-
-For a single `gzip`, `x-gzip`, or `deflate` content coding, the parser removes
-chunk framing before decoding the content. Deflate supports zlib streams and raw
-DEFLATE streams without a zlib header. `ContentEncoding` carries the header
-value, and `IsDecompressed` reports whether `Body` contains decoded bytes.
-Unsupported or stacked codings leave the carved body as-is. A decoding failure
-keeps the carved body and sets `Anomalies.InvalidContentEncoding`. If decoded
-output exceeds 4 MiB, `Body` contains the first 4 MiB and
-`Anomalies.DecompressionLimitExceeded` is true.
-
-`BodyLength` is the length of the returned body. `BodyOffset` and the parser's
-consumed byte count refer to the original stream, so use the consumed count
-to locate the next pipelined message.
-
-A call to `capture.HTTP(data)` shares a 64 MiB decoding budget across all
-cleartext and decrypted directions. The budget counts bytes produced before a
-decoding failure and charges up to 4 MiB per message. On budget exhaustion,
-the call returns an error wrapping `ErrHTTPLimit` and no records.
-
-`Web` returns TLS, HTTP/1 and HTTP/2 records in the same order and with the
-same limits as the standalone methods, including outer CONNECT records and
-cleartext before decrypted HTTP traffic. An analysis error returns an empty result.
-
-For HTTP/2 (`h2c` cleartext or decrypted TLS `h2`), call
-`ParseHTTP2Frames(stream)` or `capture.HTTP2(data)` to parse the 24-byte HTTP/2
-client preface, `SETTINGS` parameter pairs and `SettingsFingerprint`
-(`id:val;id:val`), `WINDOW_UPDATE` increments, and reassembled per-stream `DATA`
-frame payloads (handling padded `DATA` frames under `MaxHTTPBodyBytes`).
-
-For cleartext HTTP/2, `HTTP2` and `Web` identify the client by its preface.
-If neither side supplies one, the first observed direction supplies the client
-role. TLS establishes the roles for decrypted traffic.
-
-For each stream ID, `HeaderBlocks` retains complete header blocks in order,
-including interim responses and trailers. Inspect `Method`, `Authority`,
-`Path`, and `Status` in their respective direction. HPACK context is shared by
-concurrent stream IDs within a direction. A partial or invalid block sets
-`HeadersIncomplete` and suppresses subsequent header decoding in that
-direction. DATA and already completed blocks remain available. When TCP
-reassembly reports a sequence gap, the scanner suppresses all header blocks
-and the client fingerprint for that direction. A missing frame may have changed
-the HPACK table even when later frame boundaries appear intact.
-
-The decoder accepts up to 4 KiB of dynamic table state and 64 KiB per compressed
-block. Each block costs 128 bytes, plus 32 bytes per field and the length of its
-name and value. These charges count against a 4 MiB
-budget shared across a capture scan. Exceeding these limits returns
-`ErrHTTPLimit`. A client preface and decoded request produce the four-part
-`AkamaiFingerprint` from SETTINGS, connection window increment, initial
-PRIORITY frames and pseudo-header order. Use cleartext or decrypted bytes for
-the observed proxy leg. [HPACK format and examples](https://www.rfc-editor.org/rfc/rfc7541)
+Use `ParseHTTP2Frames` or `HTTP2` for HTTP/2 settings, frames, headers,
+and bounded DATA. HPACK state is directional and shared across streams.
+A gap can prevent header decoding. Already framed DATA and observable
+headers have separate coverage.
 
 ### Locate individual HTTP requests in a capture
 
-`HTTPRequests` and `HTTPRequestsFromReaderAt` return the method, authority,
-path, endpoints, flow index, packet index and timestamp. The supplying packet
-contains the first byte of the HTTP/1 request line or the initial HTTP/2 HEADERS
-frame, even if CONTINUATION frames follow. HTTP/2 requires a client preface and
-supplies a stream ID. HTTP/1 uses stream ID zero.
-
-Rows follow packet order even when timestamps move backward or are unavailable
-(zero). Requests starting in the same packet share its index and time.
-Retransmissions produce one observation. Wireshark frame numbers start at one.
-
-Both methods scan cleartext, including the plaintext leg of a proxy. They stop
-at the first known TCP gap and after an HTTP/1 CONNECT. A midstream capture
-needs a recognizable request at the start of the observed prefix.
-`MaxTotalStreamBytes` includes retransmitted input, and `MaxHTTPMessagesPerScan`
-bounds the output. HTTP decoding and ReaderAt read limits also apply. An error
-discards the result.
+Use `HTTPRequests` or its ReaderAt variant for a cleartext HTTP/1 or HTTP/2
+timeline. Use request evidence or transaction APIs when you also need
+headers, body state, or full packet membership.
 
 ### Select a prior-knowledge cleartext HTTP/2 transaction
 
-Call `HTTP2Transactions` or `HTTP2TransactionsFromReaderAt` to select requests
-on a TCP connection that starts with the HTTP/2 client preface and initial
-SETTINGS. HTTP/1 upgrades to h2c, TLS and server push are outside this view.
-The methods honor `SeparateTCPInterfaces`. Reuse of a five-tuple starts a
-new opening when the collector observes a new SYN.
-
-Each row's `ID()` combines the zero-based capture packet index, TCP payload
-offset of the initial HEADERS frame, and stream ID. Rows follow capture
-packet and offset order. `Request.TimestampNs` comes from the first byte's
-packet even if another packet completes the frame or header block. Headers,
-including pseudo-headers, contain HPACK-decoded fields in order with
-duplicates. `Informational` holds 1xx blocks. Each message keeps its trailers
-separate from the initial fields.
-
-A final response requires the server's initial SETTINGS, a matching stream ID
-in the same opening, consistent TCP evidence, and acknowledgements consistent
-with receipt of the complete request header block. `Pairing` distinguishes a
-confirmed final status, an unseen response and an ambiguous association.
-A request remains selectable after RST_STREAM. `Reset` records the reset.
-A gap or loss of HPACK state stops that direction at the contiguous prefix.
-Conflicting TCP overlap prevents response pairing.
-
-`Body` holds content from complete DATA frames, with padding removed and
-supported content coding decoded. An index into `Body` counts logical entity
-bytes from zero. Use the transaction ID and packet indices for capture
-positions. Inspect `BodyState` for complete (including empty), partial,
-unknown or unsupported content. `BodyLimitExceeded` distinguishes a capped
-prefix. `EndStream` reports a captured END_STREAM on DATA, initial headers or
-trailers. HEAD, 204 and 304 responses can establish an empty entity at the
-final headers. You can modify a returned body independently of other messages
-and the input capture. This also applies when several messages draw from the
-same decrypted TLS record. [Keyed HTTP/2 selection](#select-http2-transactions-inside-tls)
-
-`PacketIndices` lists the sorted distinct packet indices supplying selected
-frames in either direction, including informational headers, continuations
-and an observed reset. An identical retransmission contributes only if it
-supplies previously missing bytes. `SharedPackets` reports additional TCP
-payload in a contributing packet. The list can omit the preface, SETTINGS
-and earlier HPACK table updates needed to decode those frames independently.
-The caller owns the results.
-
-Each opening tracks at most `MaxHTTP2FramesPerStream` frames per direction
-(1,024), bounding concurrent streams. The scan admits up to
-`MaxHTTPMessagesPerScan` transactions (16,384), `MaxHTTP2DecodedHeaderBytes`
-of decoded header storage (4 MiB), and `MaxPackets` distinct transaction/packet
-references. It retains up to `MaxHTTPBodyBytes` (4 MiB) per body and
-`MaxTotalStreamBytes` (64 MiB) of bodies per scan. Content decoding shares
-`MaxHTTPDecodedBodyBytesPerScan`. Exceeding an HTTP scan limit returns
-`ErrHTTPLimit` and no rows. TCP collection and ReaderAt scan limits also
-apply. ReaderAt charges all packet reads to one `MaxReaderAtScanBytes` budget.
-
-Run the selection example from the repository root.
-
-```sh
-go test -run '^ExampleCapture_HTTP2Transactions$' .
-```
+Use `HTTP2Transactions` or its ReaderAt variant for prior-knowledge HTTP/2.
+The client preface establishes direction. Each row preserves stream
+identity, directional headers and DATA, packet indices, and shared context.
 
 ### Export a cleartext HTTP/2 transaction
 
-Pass the selected row's `ID()` to `ExtractHTTP2TransactionPCAPNG` or
-`ExtractHTTP2TransactionPCAPNGFromReaderAt` with the unchanged source.
-For an exchange that ends cleanly in both directions, the export includes
-the opening SYNs and the contiguous TCP prefix in each direction through
-the selected packets. These prefixes contain the preface, SETTINGS and
-HPACK history, including table entries created on other streams. A single
-packet can also carry several streams. `SharedPackets` describes sharing
-within the contributing packets. Additional context packets can contain
-other streams even when `SharedPackets` is false.
-
-To preserve incomplete, reset or anomalous evidence, the export can include
-all observed payload and opening, close and reset packets from the selected
-TCP opening. Later frames on that opening can therefore appear in the subset.
-The packet-only writer preserves the original packet bytes, capture order,
-timestamps, lengths and interface/FCS semantics. It omits source comments
-and decryption secrets.
-
-Open the subset with `New` or `NewFromReaderAt` and find the target by its
-stream ID within the single exported opening. The request endpoints, timestamp
-and TCP payload offset also survive. Capture packet ordinals and flow indices
-can change. Use the reopened row's ID for subsequent selection in the subset.
-
-An absent or invalid ID returns `ErrOutOfBounds` before the first write.
-TCP openings on the same tuple share a reassembly limit. When isolating the
-opening changes a truncated prefix, the exporter checks the selected row
-again. It can also try the whole packets supplying the original prefix if
-the cutoff falls between packets. If neither selection reproduces the
-evidence, it returns `ErrReassemblyLimit` before the first write. The ReaderAt method
-shares one `MaxReaderAtScanBytes` budget across selection, framing and copying.
-A read or write failure during output can leave a partial PcapNG file.
-
-Run the example that exports stream 3 and reads its response from the subset.
-
-```sh
-go test -run '^ExampleCapture_ExtractHTTP2TransactionPCAPNG$' .
-```
+Pass the transaction ID and the original input to
+`ExtractHTTP2TransactionPCAPNG` or its ReaderAt variant. The subset can
+include the client preface, frame boundaries, and HPACK history required
+to reopen it. [Replay fixture](../testdata/deployments/README.md#reopen-the-stream-3-export)
 
 ### Select and export a cleartext HTTP/1 transaction
 
-Use `HTTP1Transactions` or `HTTP1TransactionsFromReaderAt` to list requests.
-Select a row by its raw request target, authority, or other evidence. Pass
-`tx.ID()` to `ExtractHTTP1TransactionPCAPNG` or its `FromReaderAt` variant,
-using the same capture and unchanged source. The ID identifies the request's
-first byte by original packet index and offset within its TCP payload. Opening
-the exported file assigns new packet indices.
-
-A confirmed response requires the opening SYN and matching SYN-ACK, contiguous
-HTTP framing in both directions through the exchange, and consistent TCP
-acknowledgements. The scanner pairs pipelined requests in order. An interim
-response such as `100 Continue` keeps its request pending. A response to
-`HEAD`, or one with status 204 or 304, ends at its headers. Examine `Pairing`
-when `Response` is nil. `HTTP1ResponseUnseen` means no final response was
-observed for this request. `HTTP1ResponseAmbiguous` means the reverse stream
-contains bytes the scanner could not associate reliably. A midstream capture
-can therefore yield a request and no confirmed response.
-
-Request and response locations point to the first byte of their respective
-start lines. Packet indices describe the wire bytes used for reconstruction.
-For gzip or chunked content, inspect `BodyState` before using the decoded
-body. Decoded entity offsets cannot address the source capture. A
-close-delimited response needs an observed TCP FIN at the end of its body to
-establish completeness.
-
-Check these fields before sharing an export.
-
-- `SharedPackets` means a contributing packet carries TCP payload outside the
-  selected message ranges. Export preserves the entire original frame.
-- `ExportIncludesPriorMessages` means the selection includes earlier HTTP
-  data to preserve request boundaries or reproduce the response pairing.
-  For example, reconstructing the second pipelined exchange can require the
-  first exchange. `PacketIndices` lists the packets supporting the selected
-  exchange. The exported file also carries any required context.
-
-The exported PcapNG retains original endpoints and payloads and omits
-capture-wide names and decryption secrets. If the response is ambiguous,
-export preserves the request side. Reopening that file cannot establish the
-response that was missing in the original.
-
-The [runnable selection example](../example_test.go) exports an exchange on a
-reused TCP tuple. The [reference capture](../testdata/deployments/README.md)
-also includes a pipelined request, an interim response, and a capture gap.
+Use `HTTP1Transactions` or its ReaderAt variant and check `Pairing`.
+Responses to HEAD and bodyless statuses end at the headers. Pass the row's
+ID and original input to `ExtractHTTP1TransactionPCAPNG` or its ReaderAt
+variant. Shared packets can carry adjacent messages.
 
 ### Inspect cleartext HTTP/1 request evidence
 
-`HTTP1RequestEvidence` and `HTTP1RequestEvidenceFromReaderAt` return cleartext
-HTTP/1 requests with complete headers. Within a capture, identify each start by
-`(PacketIndex, PacketPayloadOffset)`, ordered by packet and then by byte offset
-in its TCP payload. For split or overlapping requests, attribution follows the
-first captured copy of the start byte. `FlowIndex` matches `Flows` across tuple
-reuse. The row includes directional endpoints and the starting packet’s timestamp.
-[Runnable example](../http_evidence_test.go)
-
-`Target` preserves the request target from the start line. `Authority` uses
-the authority component of a valid absolute-form target, the CONNECT target,
-or the first `Host` field value with surrounding spaces and tabs removed.
-Header names and values preserve wire bytes on either side of the colon,
-excluding the final CRLF. Values include any folded continuation. Header
-order and duplicates are preserved. `Headers` excludes chunk trailers.
-
-`Body` contains entity bytes after removing chunk framing and decoding a
-single `gzip`, `x-gzip`, or `deflate` content coding. No content coding and
-`identity` both use the entity bytes directly. Inspect `BodyState` before
-using the bytes.
-
-| State | Meaning |
-| --- | --- |
-| `HTTPBodyComplete` | The full entity is present. An empty complete body contains zero bytes. |
-| `HTTPBodyPartial` | Only a prefix is available, possibly empty. A missing chunk terminator or compressed footer can also leave a partial body. |
-| `HTTPBodyUnknown` | Malformed framing or invalid compressed content prevents recovery of reliable entity bytes. |
-| `HTTPBodyUnsupported` | An unsupported or stacked transfer or content coding prevents entity decoding. |
-
-Use `Anomalies` to inspect HTTP framing and decoding. `BodyLimitExceeded`
-indicates that a per-message body limit cut the entity. `TCPAnomalies` applies
-to the whole reassembled direction. A request can have a complete body even
-when a later part of that direction has a gap or hits a reassembly limit.
-The parser stops at the first known TCP gap, an unknown next-message boundary,
-or a CONNECT or Upgrade request. Incomplete request headers produce no row.
-
-The caller owns the returned headers and body. Body length counts the
-retained bytes. Entity bytes may span packets or come from decompression, so
-the result provides packet attribution only for the request start. The scan
-caps request-line, wire-header, and body bytes at
-`MaxHTTP1RequestEvidenceBytesPerScan`, and bounds metadata by
-`MaxHTTPHeaders` and `MaxHTTPMessagesPerScan`. The existing TCP reassembly,
-HTTP decoding, and ReaderAt read budgets apply. Errors discard all evidence.
+Use `HTTP1RequestEvidence` or its ReaderAt variant for the raw target,
+ordered headers, and bounded entity bytes. Check `BodyState` before treating
+bytes as the full entity. Packet index and TCP payload offset locate the
+request start. The result owns its headers and body.
 
 ### Extract WebSocket messages
 
-Call `capture.WebSockets(data)` for HTTP/1.1 upgrades in cleartext or in
-supported TLS streams with an embedded key log. Each record identifies the
-flow, sending endpoint, direction, and whether TLS decryption supplied the
-bytes. Results contain cleartext streams first, then decrypted streams. For
-each stream, client messages precede server messages. Within each direction,
-messages appear when their final frame arrives. A ping can therefore precede
-the fragmented text message it interrupted.
-
-Call `capture.WebWithWebSockets(data)` when you need both the web records
-and WebSocket messages. It shares TCP reassembly and TLS application-data
-decryption, preserves each protocol’s record order and limits, and discards
-both results if a scan fails.
-
-The scanner follows HTTP message boundaries through preceding exchanges
-and informational responses. With a one-sided capture it can use a WebSocket
-upgrade request or a 101 response naming WebSocket. Each direction needs its
-own visible HTTP boundary. A captured rejection produces no messages for
-that exchange. Negotiation detection does not authenticate the handshake.
-
-For bytes already positioned at a frame boundary, use
-`ParseWebSocketFrames(stream)`. Payloads are owned copies. Client frames are
-unmasked, continuations are joined, and close, ping and pong keep their
-opcodes. A gap suppresses the affected capture direction. Invalid frames,
-including extension frames with reserved bits (such as compressed messages),
-stop decoding that direction. Earlier complete messages remain available.
-The standalone parser reports an error for malformed or truncated input.
-
-The limits are 1,024 frames per direction, 4 MiB per message, 16,384 output
-records per capture, and 64 MiB of processed frame payload per call. A frame
-that declares an oversized payload is rejected before allocation. A capture
-scan that exceeds a WebSocket limit returns `ErrWebSocketLimit` and no records.
-HTTP/2 extended CONNECT and WebSocket extension decoding are outside this API.
-[RFC 6455 framing and examples](https://www.rfc-editor.org/rfc/rfc6455#section-5)
+Use `WebSockets` for supported HTTP/1.1 upgrades or `WebWithWebSockets`
+for combined web observations. For already framed bytes, use
+`ParseWebSocketFrames`. It can return complete messages before a framing
+error. Capture gaps and unsupported extensions can prevent later decoding.
 
 ## Parse SSH handshakes and HASSH
 
-Call `ParseSSHHandshake(clientStream, serverStream)` or `capture.SSH(data)` to
-extract SSH version banners, `SSH_MSG_KEXINIT` algorithm lists, `HASSH` /
-`HASSHServer` MD5 fingerprints, and FoxIO `JA4SSH` session fingerprints.
-The capture scan stops parsing each direction at its first known TCP
-sequence gap. JA4SSH uses the observed packets for the session.
+Use `ParseSSHHandshake` or `SSH` for observed identification strings and
+KEXINIT fields. HASSH, HASSHServer, and JA4SSH depend on which fields are
+available. The capture record identifies the flow.
+[Fingerprint inventory](fingerprints.md)
 
 ## Parse SMB2, NTLMSSP, Kerberos v5, and RDP messages
 
-Call `ParseSMB2Message(buf)`, `ParseNTLMSSP(token)`, or `capture.SMB(data)` to
-extract SMB2/3 `NEGOTIATE` and `SESSION_SETUP` metadata (dialect revision,
-signing flags, message/session IDs) and embedded NTLMSSP Type 1, Type 2, and
-Type 3 tokens (server challenge, target/domain/user/workstation strings, and
-NetBIOS/DNS computer and domain names from target info attribute-value pairs).
-NTLM extraction examines the declared security buffer. Capture walks can skip
-NetBIOS keep-alives, SMB1 negotiation, and complete oversized data frames to
-reach later SMB2 commands on the same connection. The scan stops each
-direction at its first known TCP sequence gap.
-
-For a `TREE_CONNECT` request, `Message.ShareName` gives the full UNC path.
-For a `CREATE` request, `Message.FileName` gives the wire name, including a
-named pipe such as `srvsvc` on an IPC share. An empty CREATE name opens the
-share root. Synchronous headers expose `TreeID`. To associate a CREATE with
-a share, match the TREE_CONNECT request to its response by message ID, then
-use the response tree ID within the same session and connection.
-
-Both names are length-delimited UTF-16LE. The direct parser returns
-`ErrInvalidSMB` for incomplete frames or invalid name spans and `ErrSMBLimit`
-for names exceeding 4,096 input bytes. It returns the first command from a
-compound packet. Capture scans emit each readable compound command and skip
-malformed commands. When `Message.IsEncrypted` is true, `SessionID` and
-`OriginalMessageSize` are observations from the 52-byte SMB3 transform
-header. The ciphertext stays opaque.
+Use `SMB` or `ParseSMB2Message` for visible SMB2 and SMB3 fields, and
+`ParseNTLMSSP` for a located token. A transform header exposes its visible
+metadata. Encrypted SMB command bodies remain opaque.
 
 ### Find the original packets for an SMB command
 
-Call `capture.SMB2Evidence(data)` or
-`capture.SMB2EvidenceFromReaderAt(source)` to locate decoded SMB commands
-and visible transform headers. The result embeds the same SMB fields as
-`SMB` in the same opening and direction order. The first observed packet
-identifies the TCP opening. A new opening can reuse the same flow index
-and message ID. Set `SeparateTCPInterfaces` when interfaces observe
-independent networks.
-
-`PacketIndex` locates the packet supplying the first magic byte of the
-command. `StreamOffset` locates that byte in the recovered TCP direction
-before removing any proxy handshake. Use the source and destination
-endpoints with that offset to distinguish compound commands in one packet.
-The sorted `PacketIndices` list includes every packet supplying command
-bytes up to the next compound command or enclosing frame boundary. An
-unframed last command covers the remaining contiguous input. A repeated
-packet contributes only if it supplies new bytes. For a transform the
-range covers the 52-byte visible header. The ciphertext stays opaque.
-
-The evidence scan charges at most 262,144 packet span references and
-retains the usual SMB record and TCP reassembly limits. A scan or limit
-error discards results. The ReaderAt path reads TCP payloads on any port
-up to the 64 MiB read budget. [Runnable original-packet example](../example_smb_evidence_test.go) ·
-[Fixture and independent decode](../testdata/framing/smb-evidence.md)
+Use `SMB2Evidence` or its ReaderAt variant for the TCP opening, direction,
+stream range, and contributing original packets. The stream range refers to
+the command within that opening. [SMB reference](../testdata/framing/smb-evidence.md)
 
 ### Read Kerberos and RDP negotiation fields
 
-Call `ParseKRB5(buf)` or `capture.Kerberos(data)` to decode ASN.1 DER Kerberos
-v5 `AS-REQ`, `AS-REP`, `TGS-REQ`, `TGS-REP`, and `KRB-ERROR` messages over UDP
-and TCP port 88, including client/service principal names, realm, requested
-encryption types, and the encryption types on replies. Use `HasRC4HMAC` to
-find messages mentioning encryption type 23 when auditing legacy crypto.
-For a `KRB-ERROR` message, `ErrorCode` contains the protocol error code.
-`ClientRealm` and `ClientNames` contain the optional client identity fields.
-For example, an error for `alice@CLIENT.EXAMPLE` from `SERVICE.EXAMPLE` can
-report `ClientNames` as `["alice"]`, `ClientRealm` as `CLIENT.EXAMPLE`, and
-`Realm` as `SERVICE.EXAMPLE`.
-On TCP, the scanner reassembles each port-88 direction and attributes the
-message to the packet containing the first byte of its four-byte record mark.
-[Kerberos over TCP (RFC 4120)](https://www.rfc-editor.org/rfc/rfc4120#section-7.2.2)
-
-Call `ParseRDPNegotiation(buf)` or `capture.RDP(data)` to decode TPKT / X.224
-Connection Request and Connection Confirm PDUs, `Cookie: mstshash=...` tokens,
-and `RDP_NEG_REQ` / `RDP_NEG_RSP` security protocol flags (`RDPProtoTLS`,
-`RDPProtoCredSSP`, `RDPProtoHybridEx`). The capture scan stops parsing each
-direction at its first known TCP sequence gap.
+Use `Kerberos` or `ParseKRB5` for visible Kerberos messages and error fields.
+The capture record identifies the UDP packet or TCP length-prefix packet.
+Use `RDP` for negotiation observations such as requested or selected
+protocols. The RDP record identifies a flow.
 
 ## Parse LDAP requests
 
-Pass one complete LDAPv3 `LDAPMessage` to `ParseLDAP`. Bind requests return
-the version, bind DN, authentication type, and SASL mechanism where present.
-Search requests return the base DN, scope, escaped RFC 4515 filter, and
-attribute selectors in wire order. The parser discards authentication
-credentials and skips the optional controls envelope.
-
-The parser accepts definite BER lengths with up to four length octets,
-including non-minimal encodings. `ErrInvalidLDAP` covers malformed or
-unsupported input. `ErrLDAPLimit` covers the request size, filter limits,
-and selector count. The returned metadata owns its strings and slices.
-
-Use `Capture.LDAP` or `Capture.LDAPFromReaderAt` for cleartext requests on
-TCP port 389 and complete UDP Search requests in LDAPMessage framing on
-port 389. Both return capture-wide flow indices and sort by packet order.
-For TCP, the record identifies the packet that supplied the message's first
-byte. The parser follows complete BER message boundaries within a contiguous
-direction, stops at a gap or incomplete envelope, and skips unsupported
-messages. The ReaderAt scan reads unrelated packets only through the headers
-and any prefix already fetched by the frame walker.
-
-Use `Capture.KeyedLDAP` or `Capture.KeyedLDAPFromReaderAt` for LDAPS on
-TCP port 636. Pass `nil` for the extra key log to use the capture's
-PcapNG decryption secrets. Each request comes from authenticated TLS 1.2
-or TLS 1.3 application bytes in the client direction.
-
-```go
-requests, err := capture.KeyedLDAP(data, nil)
-```
-
-The plaintext offset identifies the request within the recovered direction.
-`Records` and `PacketIndices` identify the ciphertext records and packets
-that contributed to it. A TLS record can contain parts of several requests.
-The scan applies the LDAP output limits and the shared TLS provenance
-budget. Missing keys yield no request. Coverage reports gaps, invalid
-records, and other cases where the recovered direction has an opaque prefix
-or incomplete tail.
+Use `LDAP` or its ReaderAt variant for supported cleartext Bind and Search
+messages. `KeyedLDAP` and its ReaderAt variant inspect LDAPS on TCP/636 with
+traffic keys. Cleartext packet locators identify the message start. Keyed
+locators cover authenticated TLS records.
 
 ## Parse DCE/RPC fragments
 
-Pass bytes starting at a connection-oriented DCE/RPC 5.0 fragment to
-`ParseDCERPC`. It accepts Request, Response, Bind, Bind Ack, and Alter Context
-PDUs in either byte order. `FragmentLength` identifies the end of the first
-complete fragment when the input contains more bytes.
-
-Requests report the presentation context ID and operation number. Bind and
-Alter Context offers report the context ID, canonical interface UUID, and
-major and minor versions in wire order. The result owns its context list
-and UUID strings. RPC stub data and authentication tokens stay opaque.
-`ErrInvalidDCERPC` covers malformed or unsupported fragments.
-`ErrDCERPCLimit` covers context and result lists beyond `MaxDCERPCContexts`.
-
-Use `Capture.DCERPC` or `Capture.DCERPCFromReaderAt` to scan a capture.
-The scanner considers all TCP ports, including dynamically selected server
-ports. It checks each contiguous direction from its first available byte
-and advances by declared fragment lengths. It skips complete fragments of
-unsupported types and stops at a gap or invalid common header. Results use
-capture-wide flow indices and follow the order of the packets supplying the
-first byte of each fragment. The existing stream and ReaderAt read limits
-apply to the TCP scan.
-
-On TCP ports 139 and 445, the scanner also reads cleartext SMB2 named-pipe
-transfers. A successful pipe-share tree connect identifies subsequent
-WRITE requests and READ responses on that tree. Asynchronous READ responses
-use the corresponding observed request. An `FSCTL_PIPE_TRANSCEIVE` IOCTL
-identifies its own pipe transfer. Each declared command buffer supplies
-complete fragments starting at the first buffer byte. `SMB2Command` is 8
-for READ, 9 for WRITE, 11 for IOCTL, and zero for direct TCP. The SMB2
-packet and tracking bounds are `MaxSMB2PacketBytes` and
-`MaxSMBRecordsPerScan`. Exceeding the tracking bound returns
-`ErrDCERPCLimit`.
+Use `ParseDCERPC` for a located connection-oriented fragment or `DCERPC`
+for capture evidence, including supported cleartext SMB pipe buffers.
+The record locates the fragment start in the original packet or pipe context.
+Inspect bind and transfer syntax information before interpreting a request.
 
 ## Compute C2 beacon and flow statistics
 
-Use `Capture.BeaconsWithOptions` with `GroupBy3Tuple` to group flow starts
-by protocol, source address, destination address and destination port. Each
-distinct five-tuple supplies one sample, so a change of source port can
-contribute to the same group. Port 53 on either endpoint is excluded unless
-`IncludeDNSPort` is set. Median intervals below one second suppress the
-periodicity and beacon scores by default. Set `MinIntervalNs` to adjust this
-threshold or use a negative value to disable it.
-
-Call `ComputeBeaconStats(timestampsNs, payloadBytes, clientBytes, serverBytes)`
-or `capture.Beacons(data)` to calculate median inter-arrival intervals, median
-absolute deviation (MAD), jitter ratios, Bowley quartile skewness periodicity
-scores, payload size uniformity, Producer-Consumer Ratio (PCR), and composite
-`BeaconScore` values in $[0.0, 1.0]$.
+Use `BeaconsWithOptions` for periodic flow-start summaries or
+`ComputeBeaconStats` for observations you already collected. Choose the
+grouping and thresholds in the caller. Periodicity describes the capture
+and needs deployment context to support a detection.
 
 ## Write captures
 
-Use `NewPCAPWriter(w, linkType, snapLen)` for single-interface classic PCAP.
-Pass Unix nanoseconds and the complete packet to `WritePacket`. The writer
-stores up to `snapLen` bytes and preserves the original length. Timestamps must
-fit unsigned 32-bit Unix seconds. A zero snaplen selects `DefaultLiveSnapLen`.
-When copying an already-truncated packet, call
-`WritePacketWithOriginalLen(pkt.TimestampNs, payload, pkt.OriginalLen)` to
-retain its wire length even if the destination snaplen truncates it further.
+Use `NewPCAPWriter` for one link type or `NewPCAPNGWriter` for
+multiple interfaces. To keep the wire length when copying a clipped packet,
+use `WritePacketWithOriginalLen`.
 
-Use `NewPCAPNGWriter(w, opts)` to stream PcapNG `SHB`, `IDB` (nanosecond
-resolution), `NRB` (`WriteNameResolution`), `ISB` (`WriteInterfaceStats`),
-`DSB` (`WriteDecryptionSecrets`), and `EPB` (`WritePacket`) blocks to any
-`io.Writer`. Interface 0 is ready immediately. Set `LinkTypeSet: true`
-to select `LinkTypeNull` explicitly on interface 0 for any interface name. Call
-`AddInterface` for each additional interface and use its returned ID in
-`PacketRecord` and `InterfaceStatistics`. Each interface has its own link type
-and snaplen. After an output error, start a new capture stream.
-
-When a process ID or name is present, `WritePacket` emits the Apple process
-index and shares a process block across packets with the same attribution.
-Process ID `0xffffffff` is reserved for a name-only entry. Passing that ID
-with `HasProcessID` set returns `ErrInvalidPacket`. A new entry that would
-exceed `MaxProcessEvents` returns `ErrOptionLimit`. The writer stores the
-thread ID, user ID, command line, and container ID in go-pcap packet comments.
-
-To export one bidirectional flow, pass its zero-based `Flows` index, the original
-capture bytes, and an `io.Writer`. Both exporters write PcapNG, retain selected
-packets in capture order, and leave the writer untouched for a missing flow
-(`ErrOutOfBounds`).
-
-| Method | PcapNG metadata in the output |
+| Export | Output |
 | --- | --- |
-| `ExtractFlowPCAPNG` | Source sections, selected interfaces, original packet block types, timestamp encoding and packet options. Capture-wide names, process definitions and decryption secrets can describe other flows. |
-| `ExtractFlowPacketsPCAPNG` | Only sections, interfaces and fields required to interpret the selected packets, including timestamp resolution, offset and declared frame check sequence length. Simple Packet Blocks stay timestamp-free. Comments, process data, names and secrets are omitted. Original packet bytes, endpoints, application data, captured lengths and wire lengths remain. |
+| `ExtractFlowPCAPNG` | Selected packets and source metadata, which can include names, process information, and secrets |
+| `ExtractFlowPacketsPCAPNG` | Selected original packets and the metadata needed to interpret them |
 
-For seekable input, call `ExtractFlowPCAPNGFromReaderAt` or
-`ExtractFlowPacketsPCAPNGFromReaderAt` with the same source. Both select flows
-using frame prefixes, skip unrelated packet bodies and copy in chunks of up to
-32 KiB. All reads, including metadata and repeated reads, share
-`MaxReaderAtScanBytes`. Discard partial output after a read, write, or budget
-error. [Packet-only sharing example](../README.md#share-packets-from-one-flow)
+Packet-only output still contains original endpoints and payloads. Both
+exports have ReaderAt variants. Discard partial output after an error.
+[Packet-only example](../README.md#share-packets-from-one-flow)
 
 ## Capture live interface traffic
 
-Use `OpenLive(ifaceName, opts)` to capture live packets from an OS network
-interface using standard-library `syscall` descriptors (`/dev/bpf*` on macOS,
-`AF_PACKET` on Linux, `SIO_RCVALL` raw sockets on Windows) without `cgo` or
-`libpcap`. Use `BPFFilterTCPPort`, `BPFFilterUDPPort`, `BPFFilterIPProtocol`,
-and `BPFFilterIPv4Host` to construct classic BPF filter programs, or `EvalBPF`
-to evaluate a classic BPF program in memory.
+Use `LiveDevices` to locate an interface and `OpenLive` to capture.
+The available backends use AF_PACKET on Linux, BPF on macOS, and raw IPv4
+sockets on Windows. Capture privileges depend on the backend. Copy packet
+bytes that must survive a later read.
 
 ### Compile a live capture filter
 
-Use `CompileBPFFilter(expression, device.LinkType)` for numeric port
-selections on untagged IPv4 Ethernet. Pass the result as
-`LiveOptions.BPFFilter` or evaluate it with `EvalBPF`.
-
-| Expression | Matches source or destination port |
-| --- | --- |
-| `ip and port N` | TCP, UDP and SCTP |
-| `ip and tcp port N` | TCP |
-| `ip and udp port N` | UDP |
-
-Use lower-case keywords and a decimal port from 0 through 65535 without
-leading zeros. The expression can use up to 128 bytes, including ASCII
-spaces, tabs or line breaks. An empty or whitespace-only expression accepts
-all packets, regardless of datalink. Other expressions return
-`ErrUnsupportedBPFFilterExpression`. A non-empty filter on a non-Ethernet
-datalink returns `ErrUnsupportedDataLink`.
-
-The compiler follows the IPv4 header length when reading ports. A first
-fragment can match if the selected port field is present. Later fragments,
-VLAN-tagged frames, and IPv6 packets are outside these filters.
-
-Run the [live capture example](../examples/live-capture/main.go) on a
-supported Ethernet interface with capture permissions. It writes PcapNG to
-standard output. Replace `eth0` with your interface name.
-
-```sh
-go run ./examples/live-capture -i eth0 -c 20 'ip and port 53' > dns.pcapng
-go run ./examples/dns-transactions dns.pcapng
-```
+Use `CompileBPFFilter` with the device's link type. Numeric expressions
+`ip and port N`, `ip and tcp port N`, and `ip and udp port N` apply to
+untagged IPv4 Ethernet. An empty expression accepts all link types.
+[Live capture example](../examples/live-capture/main.go)
 
 ### Discover interfaces
 
-Call `LiveDevices()` to discover interface names, indexes, MTUs and flags
-before opening a capture. The list is sorted by index. Use `HasLinkType`
-to check whether the backend resolved a supported datalink. Linux resolves
-it without capture privileges. macOS returns the names even when BPF access
-is unavailable. Windows reports the IPv4 framing of its capture socket.
-On Linux, one rtnetlink link listing supplies the device metadata and
-hardware type. `OpenLive` resolves the interface index and hardware type
-from the same kind of kernel record.
-
-On Linux, `OpenLive` accepts Ethernet, loopback and Metricom interfaces and
-reports `LinkTypeEthernet` for those devices. Linux presents loopback packets with a synthetic
-Ethernet header. Other interface hardware types return an error wrapping
-`ErrUnsupportedDataLink`. `Promiscuous` requests membership for the capture socket
-until it closes. `OriginalLen` retains the wire length when the socket filter or
-`SnapLen` shortens a packet. `TimestampNs` comes from the kernel when it
-captures the packet and uses nanosecond resolution. The receive ring holds at
-least two blocks sized to fit the requested snapshot, so its allocation can
-exceed `BufferSize`. With no explicit `BufferSize`, Linux sizes the ring for
-up to 32 blocks and budgets 4 MiB for the ring and snapshot buffer, unless the
-snapshot length requires more. The kernel publishes partially filled blocks on
-a timer, so sparse traffic can fill the available blocks before it uses their
-full byte capacity. `Immediate` selects a one-millisecond interval, and a
-positive `Timeout` still bounds how long `ReadPacket` waits.
-
-On macOS, `TimestampNs` comes from the kernel BPF packet header and has
-microsecond resolution. `OpenLive` translates the interface's native BPF
-datalink type to the corresponding capture-file `LinkType`, including native
-`DLT_RAW` (12) to `LinkTypeRaw` (101). It returns an error if the kernel cannot
-report a datalink type or the library has no mapping for it.
-
-On Windows, `TimestampNs` uses the userspace wall clock when `ReadPacket`
-accepts the packet. A positive `Timeout` applies to each `ReadPacket` call,
-including time spent waiting for a filter match.
+Use `LiveDevices` and check `HasLinkType` before relying on a device's link
+type. macOS can list devices without BPF access. Linux reports supported
+Ethernet framing, including synthetic Ethernet for loopback.
 
 ### Framing, direction, and interface mode
 
-Use `live.LinkType()` to decode packets or choose a link type for a capture
-writer. `OpenLive` uses the interface's existing wireless mode and the
-backend's default packet direction. `LiveOptions` configures the snapshot length,
-buffering, timeout, immediate delivery, promiscuous mode, and classic BPF
-filter.
-
-| Platform | Framing returned by go-pcap | Kernel capabilities |
-| --- | --- | --- |
-| Linux | Ethernet for the supported interface hardware types. | Packet sockets can suppress outgoing copies with `PACKET_IGNORE_OUTGOING`. The wireless subsystem manages monitor interfaces. [Linux packet sockets][linux-packet-direction] · [Linux wireless modes][linux-wireless-modes] |
-| macOS | The capture-file link type mapped from the interface's native BPF datalink. | BPF can list and select datalinks offered by the interface and control whether to include sent packets. [Apple BPF ioctls][apple-bpf-ioctls] |
-| Windows | IPv4 from a raw socket. | `SIO_RCVALL` delivers IP datagrams for the bound interface. go-pcap enables it when you request promiscuous mode. [Winsock raw capture][winsock-rcvall] |
-
-[linux-packet-direction]: https://github.com/torvalds/linux/blob/adc218676eef25575469234709c2d87185ca223a/net/packet/af_packet.c#L4072-L4085
-[linux-wireless-modes]: https://wireless.docs.kernel.org/en/latest/en/users/documentation/modes.html#monitor-mode
-[apple-bpf-ioctls]: https://github.com/apple-oss-distributions/xnu/blob/ac9718fb1af618d5ce8678d0dc6e8a58f252216f/bsd/net/bpf.h#L194-L196
-[winsock-rcvall]: https://learn.microsoft.com/en-us/windows/win32/winsock/sio-rcvall#remarks
+Use `LiveCapture.LinkType` for decoding and writing packets. The backend
+uses the interface's current mode and default packet direction. The kernel
+supplies timestamps on Linux and macOS. The Windows backend timestamps in
+userspace.
 
 ### Live packet counters
 
-Call `live.Stats()` before closing the handle to check kernel packet loss:
-
-```go
-stats, err := live.Stats()
-if err != nil {
-    return err
-}
-fmt.Printf("received=%d dropped=%d\n", stats.PacketsReceived, stats.PacketsDropped)
-```
-
-Linux and macOS report per-handle totals since opening. You can poll while
-reading packets. Each kernel counter is 32 bits, so poll before it advances by
-2³² packets. The received count follows the backend's filter accounting. The
-drop count measures capture-buffer loss. Windows and other backends without
-counters return `ErrLiveCaptureUnsupported`.
+Use `LiveCapture.Stats` before closing the handle. Linux and macOS
+return per-handle counters. Poll before a kernel counter can wrap at 2³².
+Windows returns `ErrLiveCaptureUnsupported` for counters.

@@ -1,22 +1,16 @@
 # Independent reference for tagged workflows
 
-The TLS and enterprise captures use documentation addresses and an
-Ethernet client observation point. The
-[generator](generate_qualified.py) obtains TLS records from two local
-Python 3.13.18 TLS memory endpoints backed by OpenSSL 3.5.9. It uses
-OpenSSL 4.1.0 to generate a temporary fixture certificate with DNS SAN
-`match.example`. The non-TLS packets use fixed, synthetic protocol fields.
-The repository license covers the captures and generator.
+[generate_qualified.py](generate_qualified.py) creates synthetic Ethernet
+captures. TLS uses Python 3.13.18 memory endpoints with OpenSSL 3.5.9 and
+a temporary `match.example` certificate from OpenSSL 4.1.0. TLS randoms
+and certificate bytes can differ when regenerated.
 
 ```sh
 PYTHONDONTWRITEBYTECODE=1 python3 testdata/deployments/generate_qualified.py
 ```
 
-The byte counts and frame ordinals below refer to the checked-in captures.
-New TLS randoms and certificates can change bytes on regeneration. Reference
-commands use TShark 4.6.10 (commit `eac916f07299`) from the repository root
-with name resolution disabled. Frames start at one. Library packet indices
-start at zero.
+Run TShark 4.6.10 (`eac916f07299`) from the repository root. Frame numbers
+are one-based. Go packet indices start at zero.
 
 ## TLS configuration
 
@@ -71,12 +65,9 @@ seekable scan reads 4,745 bytes in 148 calls for LDAP and 7,810 bytes in
 
 ## DNS and HTTP
 
-The existing [DNS reference](README.md#dns-transaction-fixture) records
-paired answers, ambiguous retries and elapsed times. The
-[HTTP/1 reference](README.md#http1-transaction-fixture) records the match
-between requests and response bytes. The two references identify where an
-independent decoder associates frames differently after a TCP gap or
-ambiguous retry.
+See the [DNS retry](README.md#dns-transaction-fixture) and
+[HTTP/1 gap](README.md#http1-transaction-fixture) controls for cases where
+the independent decoder pairs frames differently.
 
 ## Recheck the existing keyed QUIC captures
 

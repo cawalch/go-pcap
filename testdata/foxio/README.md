@@ -1,9 +1,7 @@
 # FoxIO fingerprint reference fixtures
 
-The tests compare literal fingerprint strings with FoxIO's Wireshark plugin and
-Zeek BTest outputs at commit `7388fa0dd43f43ba63eabf36b0867b4920f2ca52`.
-The expected strings come from the committed upstream baselines. The test
-inputs were extracted offline with Python dpkt 1.9.8. [Upstream revision](https://github.com/FoxIO-LLC/ja4/tree/7388fa0dd43f43ba63eabf36b0867b4920f2ca52)
+The Go tests compare with FoxIO's pinned Wireshark and Zeek baselines.
+Python dpkt 1.9.8 extracted the offline inputs. [Upstream revision](https://github.com/FoxIO-LLC/ja4/tree/7388fa0dd43f43ba63eabf36b0867b4920f2ca52)
 
 | Fingerprint | Capture under upstream `pcap/` | Input and expected-output source |
 | --- | --- | --- |
@@ -22,9 +20,7 @@ See the upstream [capture directory](https://github.com/FoxIO-LLC/ja4/tree/7388f
 [JA4 license](https://github.com/FoxIO-LLC/ja4/blob/main/LICENSE-JA4), and
 [JA4+ license](https://github.com/FoxIO-LLC/ja4/blob/main/LICENSE).
 
-The sibling RFC fixtures contain the published protected client and server
-Initial datagrams. The JA4 and JA4S literals in the QUIC tests use the cipher
-and extension lists from the published plaintexts and SHA-256 truncated to
-12 hex characters. They can be checked independently of the Go decoder.
+The RFC QUIC tests use the published Initial datagrams. The expected JA4
+and JA4S strings hash the published cipher and extension lists.
 [RFC 9001 Appendix A](https://www.rfc-editor.org/rfc/rfc9001#appendix-A) and
 [RFC 9369 Appendix A](https://www.rfc-editor.org/rfc/rfc9369#appendix-A)
