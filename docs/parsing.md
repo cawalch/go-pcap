@@ -1204,6 +1204,29 @@ packet-number and QPACK history. The API exposes packet selection for these
 observations. [Reopening test](../http3_transactions_test.go) ·
 [Runnable Go example](../example_test.go)
 
+### Read DNS over QUIC
+
+Use `Capture.DoQTransactions` or `Capture.DoQTransactionsFromReaderAt`
+for DNS-over-QUIC exchanges. The scan requires the server's authenticated
+`doq` selection and pairs the directions on a client-initiated bidirectional
+stream. It returns an explicit state for absent, incomplete, reset, malformed,
+unsupported and resource-limited messages. A completed message has one
+length-prefixed DNS message with ID zero and a clean direction end. The
+first scope covers ordinary lookups. AXFR and IXFR need separate
+multi-message framing. Request and reply packet indices refer to the
+original QUIC capture.
+
+Plain UDP/TCP DNS uses addresses and DNS message fields for association.
+DoT uses authenticated TLS records and DNS length framing. The HTTP/2 DoH
+helper obtains DNS from an HTTP field section and body. DoQ identifies an
+exchange through its QUIC stream and the server's selected application
+protocol. DoH/3 would require HTTP/3 transaction and body semantics.
+
+The [resolver example](../doq_example_test.go) decodes two independent
+lookups whose responses finish in reverse order. [Endpoint and decoder
+reference](../testdata/doq-exchanges.md) ·
+[DoQ stream and message rules](https://www.rfc-editor.org/rfc/rfc9250.html#section-4.2)
+
 ## Decrypt TLS 1.2 and TLS 1.3 streams offline
 
 Call `capture.DecryptedTLSStreams(data, extraKeyLog)` to decrypt TLS 1.2

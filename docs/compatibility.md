@@ -64,6 +64,7 @@ strings may change. Check the operation’s result policy before using output
 from a failed call.
 
 | Operation | What the caller receives |
+| --- | --- |
 | Container open | A valid header followed by an incomplete trailing record can produce a usable snapshot. Check `InputTruncated()` and `DeclaredExtent()` to distinguish this from a complete capture. |
 | Compressed signatures | A leading Zstandard data frame or XZ stream signature returns `ErrUnsupportedZstd` or `ErrUnsupportedXZ` with a nil capture. Both errors also match `ErrNotPCAP` and `ErrInvalidMagic`. |
 | Link-type coverage | `UnsupportedLinkTypePackets` and `UnsupportedLinkTypePacketsFromReaderAt` report complete records on unsupported interfaces. The ReaderAt metadata pass is bounded by `MaxReaderAtScanBytes`. Packet iteration still exposes those records, and frame-based scans can return empty or partial results. |
