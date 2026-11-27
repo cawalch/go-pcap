@@ -41,11 +41,11 @@ func TestDoQTransactions(t *testing.T) {
 			t.Fatalf("unexpected stream %d: %+v", i, row)
 		}
 		retained += len(row.Query.DNS.Questions[0].Name) + len(row.Reply.DNS.Questions[0].Name)
-		retained += row.Reply.DNS.Answers[0].Address.BitLen() / 8
+		retained += len(row.Reply.DNS.Answers[0].Name) + row.Reply.DNS.Answers[0].Address.BitLen()/8
 		retained += (len(row.Query.PacketIndices) + len(row.Reply.PacketIndices)) * (strconv.IntSize / 8)
 	}
 
-	if retained != 52+4*(strconv.IntSize/8) {
+	if retained != 74+4*(strconv.IntSize/8) {
 		t.Fatalf("retained field content = %d bytes", retained)
 	}
 	t.Logf("retained DNS name, address and packet index content: %d bytes", retained)

@@ -28,8 +28,8 @@ with the same decoded DNS fields and original packet references. The rows
 retain decoded messages and packet indices. Authenticated QUIC frame and
 stream bytes are transient during the scan.
 
-The two results retain 84 bytes of query and reply question names, IPv4
-answer data, and packet indices on a 64-bit Go runtime, or 68 bytes on a
+The two results retain 106 bytes of DNS question and answer owner names, IPv4
+answer data, and packet indices on a 64-bit Go runtime, or 90 bytes on a
 32-bit runtime. This counts logical field content and excludes Go container
 overhead, result metadata and transient decoder memory. Both input paths
 return identical content.
