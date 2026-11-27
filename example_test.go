@@ -463,6 +463,37 @@ func ExampleCapture_ExtractHTTP1TransactionPCAPNG() {
 	// Output: GET /reused: 200 "reused"
 }
 
+func ExampleHTTP1Transaction_ResponseArtifact() {
+	data, err := os.ReadFile("testdata/deployments/http1-transactions.pcapng")
+	if err != nil {
+		log.Fatal(err)
+	}
+	c, err := pcap.New(data)
+	if err != nil {
+		log.Fatal(err)
+	}
+	rows, err := c.HTTP1Transactions(data)
+	if err != nil {
+		log.Fatal(err)
+	}
+	for _, tx := range rows {
+		artifact := tx.ResponseArtifact()
+		switch tx.Request.Target {
+		case "/upload":
+			if artifact.Coverage == pcap.HTTP1ArtifactComplete {
+				fmt.Printf("%s: %q (%d bytes), response packet %d\n", tx.Request.Target, artifact.Body, len(artifact.Body), artifact.ResponsePacketIndex)
+			}
+		case "/after-gap":
+			if artifact.Coverage == pcap.HTTP1ArtifactUnavailable {
+				fmt.Printf("%s: unavailable, request packet %d\n", tx.Request.Target, artifact.ID.PacketIndex)
+			}
+		}
+	}
+	// Output:
+	// /upload: "upload accepted\n" (16 bytes), response packet 9
+	// /after-gap: unavailable, request packet 18
+}
+
 func ExampleParseHTTP2Frames_headers() {
 	// Indexed GET, http and / fields from the HPACK static table.
 	data := append(bytes.Clone(pcap.HTTP2ClientPreface), 0, 0, 3, 1, 4, 0, 0, 0, 1, 0x82, 0x86, 0x84)

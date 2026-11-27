@@ -4,8 +4,10 @@ import (
 	"cmp"
 	"errors"
 	"io"
+	"net/http"
 	"slices"
 	"sort"
+	"strings"
 )
 
 // HTTP1Pairing describes the evidence for a final response to one request.
@@ -55,6 +57,92 @@ type HTTP1Transaction struct {
 	// ExportIncludesPriorMessages reports that exporting this exchange also includes
 	// earlier HTTP traffic needed to reconstruct the request or response.
 	ExportIncludesPriorMessages bool
+}
+
+// HTTP1ArtifactCoverage describes the available scan input for an HTTP/1
+// response representation.
+type HTTP1ArtifactCoverage uint8
+
+const (
+	// HTTP1ArtifactUnavailable indicates there is no observable scan input.
+	HTTP1ArtifactUnavailable HTTP1ArtifactCoverage = iota
+	// HTTP1ArtifactPartial indicates a retained prefix or range. A scan of
+	// these bytes covers only the available portion of the representation.
+	HTTP1ArtifactPartial
+	// HTTP1ArtifactComplete indicates a complete decoded representation,
+	// including one with zero bytes.
+	HTTP1ArtifactComplete
+)
+
+// HTTP1ResponseArtifact contains the bounded, decoded scan input from a
+// cleartext HTTP/1 transaction. ID identifies the request in the original
+// capture. Coverage describes the representation. BodyState describes HTTP
+// entity decoding even when the response semantics supply no entity.
+type HTTP1ResponseArtifact struct {
+	ID        HTTP1TransactionID
+	Coverage  HTTP1ArtifactCoverage
+	BodyState HTTPBodyState
+	// Body contains the available decoded bytes. len(Body) is the available
+	// length, which can be less than the full representation length. Scan
+	// offsets count from the first retained byte, including for ranges.
+	Body []byte
+	// ResponsePacketIndex and ResponsePacketPayloadOffset locate the first
+	// status-line byte in the original capture. Both are zero-based and
+	// both are -1 when no final response is confirmed.
+	ResponsePacketIndex, ResponsePacketPayloadOffset int
+	// ExchangePacketIndices lists the original packets supplying the known
+	// exchange, as in [HTTP1Transaction.PacketIndices]. SharedPackets reports
+	// that a selected packet also carries bytes outside that exchange.
+	// These references do not map decoded offsets to wire offsets.
+	ExchangePacketIndices []int
+	SharedPackets         bool
+}
+
+// ResponseArtifact selects scan input from an existing transaction. It uses
+// the bytes retained by the transaction scan under its existing limits and
+// performs no packet reads. Body and ExchangePacketIndices alias the slices
+// owned by the transaction for both byte-slice and ReaderAt scans. Copy them
+// before modifying them independently of the transaction. Responses with no
+// entity by HTTP semantics have unavailable coverage. A 206 response or a
+// response with Content-Range has at most partial artifact coverage, even
+// when its decoded entity is complete.
+func (t HTTP1Transaction) ResponseArtifact() HTTP1ResponseArtifact {
+	a := HTTP1ResponseArtifact{
+		ID:                          t.ID(),
+		ResponsePacketIndex:         -1,
+		ResponsePacketPayloadOffset: -1,
+		ExchangePacketIndices:       t.PacketIndices,
+		SharedPackets:               t.SharedPackets,
+	}
+	r := t.Response
+	if t.Pairing != HTTP1ResponseConfirmed || r == nil {
+		return a
+	}
+	a.ResponsePacketIndex, a.ResponsePacketPayloadOffset = r.PacketIndex, r.PacketPayloadOffset
+	a.BodyState = r.BodyState
+	if httpResponseHasNoBody(t.Request.Method, r.StatusCode) || r.StatusCode == http.StatusResetContent {
+		return a
+	}
+	var coverage HTTP1ArtifactCoverage
+	switch r.BodyState {
+	case HTTPBodyComplete:
+		coverage = HTTP1ArtifactComplete
+		if r.StatusCode == http.StatusPartialContent || slices.ContainsFunc(r.Headers, func(h HTTPHeader) bool {
+			return strings.EqualFold(h.Name, "Content-Range")
+		}) {
+			coverage = HTTP1ArtifactPartial
+		}
+	case HTTPBodyPartial:
+		coverage = HTTP1ArtifactPartial
+	default:
+		return a
+	}
+	if coverage == HTTP1ArtifactPartial && len(r.Body) == 0 {
+		return a
+	}
+	a.Coverage = coverage
+	a.Body = r.Body
+	return a
 }
 
 // HTTP1Transactions returns cleartext TCP requests in packet and payload-offset
