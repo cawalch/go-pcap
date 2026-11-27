@@ -1245,18 +1245,12 @@ func tlsRecordsFromStreams(streams []TCPStream, meta []streamMetadata, keyLog *T
 
 		if merged.HasClientHello && merged.HasServerHello && merged.ServerHello.NegotiatedVersion == TLSVersion13 && keyLog != nil {
 			if entry, ok := keyLog.Entries[merged.ClientHello.Random]; ok {
-				if source := reader.source(sData); source != nil && len(entry.ServerHandshakeSecret) > 0 {
-					if err := source.ciphertext(); err != nil {
-						return nil, err
-					}
+				if err := merged.readTLS13CertificateFlight(sData, entry.ServerHandshakeSecret, false, serverTrace, reader.source(sData)); err != nil {
+					return nil, err
 				}
-				if source := reader.source(cData); source != nil && len(entry.ClientHandshakeSecret) > 0 {
-					if err := source.ciphertext(); err != nil {
-						return nil, err
-					}
+				if err := merged.readTLS13CertificateFlight(cData, entry.ClientHandshakeSecret, true, clientTrace, reader.source(cData)); err != nil {
+					return nil, err
 				}
-				merged.readTLS13CertificateFlight(sData, entry.ServerHandshakeSecret, false, serverTrace)
-				merged.readTLS13CertificateFlight(cData, entry.ClientHandshakeSecret, true, clientTrace)
 			}
 		}
 
@@ -1287,9 +1281,9 @@ func tlsRecordsFromStreams(streams []TCPStream, meta []streamMetadata, keyLog *T
 	return records, nil
 }
 
-func (out *TLSHandshake) readTLS13CertificateFlight(stream, secret []byte, client bool, trace *tlsHandshakeTrace) {
+func (out *TLSHandshake) readTLS13CertificateFlight(stream, secret []byte, client bool, trace *tlsHandshakeTrace, source *tlsRecordSource) error {
 	if len(secret) == 0 {
-		return
+		return nil
 	}
 	chain := &out.Certificates
 	if client {
@@ -1298,9 +1292,12 @@ func (out *TLSHandshake) readTLS13CertificateFlight(stream, secret []byte, clien
 	if trace != nil {
 		trace.fragments = trace.fragments[:0]
 	}
-	hsData, _, err := decryptTLS13Records(stream, out.ServerHello.CipherSuite, secret, nil, nil, nil, trace)
+	hsData, _, err := decryptTLS13Records(stream, out.ServerHello.CipherSuite, secret, nil, nil, nil, trace, source)
 	if err != nil {
-		return
+		if source != nil {
+			return source.err
+		}
+		return nil
 	}
 	offset := 0
 	for offset+4 <= len(hsData) {
@@ -1323,11 +1320,12 @@ func (out *TLSHandshake) readTLS13CertificateFlight(stream, secret []byte, clien
 						trace.certificates = trace.locate(offset-4-msgLen, offset, true)
 					}
 					*chain = certs
-					return
+					return nil
 				}
 			}
 		}
 	}
+	return nil
 }
 
 // parseTLSCertificateWithTLS13Context parses a TLS 1.3 Certificate handshake

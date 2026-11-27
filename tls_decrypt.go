@@ -220,10 +220,10 @@ func DecryptTLS13Records(
 	handshakeSecret []byte,
 	appSecret []byte,
 ) (handshakePlain []byte, appPlain []byte, err error) {
-	return decryptTLS13Records(stream, cipherSuite, handshakeSecret, appSecret, nil, nil, nil)
+	return decryptTLS13Records(stream, cipherSuite, handshakeSecret, appSecret, nil, nil, nil, nil)
 }
 
-func decryptTLS13Records(stream []byte, cipherSuite uint16, handshakeSecret, appSecret, earlySecret []byte, provenance *tlsRecordMapper, trace *tlsHandshakeTrace) (handshakePlain, appPlain []byte, err error) {
+func decryptTLS13Records(stream []byte, cipherSuite uint16, handshakeSecret, appSecret, earlySecret []byte, provenance *tlsRecordMapper, trace *tlsHandshakeTrace, source *tlsRecordSource) (handshakePlain, appPlain []byte, err error) {
 	offset := 0
 	if provenance != nil {
 		defer func() {
@@ -271,9 +271,15 @@ func decryptTLS13Records(stream []byte, cipherSuite uint16, handshakeSecret, app
 	seenAppEpoch := false
 	var hsBuf, appBuf bytes.Buffer
 	var hsFull, appFull bool
+	var handshakeEnd int
 
 	for len(stream)-offset >= 5 {
 		start := offset
+		if source != nil {
+			if err := source.fillProtected(start, start+5); err != nil {
+				return nil, nil, err
+			}
+		}
 		if trace != nil && !trace.inspect() {
 			return nil, nil, ErrTLSLimit
 		}
@@ -303,6 +309,12 @@ func decryptTLS13Records(stream []byte, cipherSuite uint16, handshakeSecret, app
 				break
 			}
 			continue
+		}
+
+		if source != nil {
+			if err := source.fillProtected(start+5, offset); err != nil {
+				return nil, nil, err
+			}
 		}
 
 		// Each epoch starts at sequence zero. Advance a counter only after authentication.
@@ -395,6 +407,23 @@ func decryptTLS13Records(stream []byte, cipherSuite uint16, handshakeSecret, app
 				} else {
 					hsBuf.Write(innerContent[:rem])
 					hsFull = true
+				}
+			}
+			if source != nil {
+				// A complete Finished authenticated with the handshake key
+				// ends this direction's handshake epoch. Later application
+				// records need a different key and cannot add certificates.
+				data := hsBuf.Bytes()
+				for len(data)-handshakeEnd >= 4 {
+					h := data[handshakeEnd:]
+					n := int(h[1])<<16 | int(h[2])<<8 | int(h[3])
+					if n > len(h)-4 {
+						break
+					}
+					if h[0] == 20 {
+						return data, nil, nil
+					}
+					handshakeEnd += 4 + n
 				}
 			}
 			if inAppPhase && postHandshake.endsWithKeyUpdate(innerContent) {
@@ -784,8 +813,8 @@ func decryptTLSStream(st TCPStream, keyLog *TLSKeyLog, mappers *[2]tlsRecordMapp
 	suite := hsServer.ServerHello.CipherSuite
 	var clientApp, serverApp []byte
 	if hsServer.ServerHello.NegotiatedVersion == TLSVersion13 || len(entry.ClientTrafficSecret0) > 0 || len(entry.ServerTrafficSecret0) > 0 {
-		_, clientApp, _ = decryptTLS13Records(cData, suite, entry.ClientHandshakeSecret, entry.ClientTrafficSecret0, entry.ClientEarlyTrafficSecret, client, nil)
-		_, serverApp, _ = decryptTLS13Records(sData, suite, entry.ServerHandshakeSecret, entry.ServerTrafficSecret0, nil, server, nil)
+		_, clientApp, _ = decryptTLS13Records(cData, suite, entry.ClientHandshakeSecret, entry.ClientTrafficSecret0, entry.ClientEarlyTrafficSecret, client, nil, nil)
+		_, serverApp, _ = decryptTLS13Records(sData, suite, entry.ServerHandshakeSecret, entry.ServerTrafficSecret0, nil, server, nil, nil)
 	} else if len(entry.MasterSecret) > 0 || mappers != nil {
 		mode := tls12CBCMACThenEncrypt
 		if slices.Contains(hsServer.ServerHello.Extensions, tlsExtEncryptThenMAC) {

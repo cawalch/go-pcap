@@ -67,8 +67,14 @@ func (r *tlsStreamReader) plan(segments []TCPSegmentInput, refs []tlsSegmentRead
 	if len(segments) == 0 || limit == 0 {
 		return nil, 0, nil
 	}
-	lengths := make([]int, len(segments))
-	offsets := make([]int64, len(segments))
+	var shortLengths [8]int
+	var shortOffsets [8]int64
+	lengths := shortLengths[:min(len(segments), len(shortLengths))]
+	offsets := shortOffsets[:len(lengths)]
+	if len(segments) > len(lengths) {
+		lengths = make([]int, len(segments))
+		offsets = make([]int64, len(segments))
+	}
 	for i := range segments {
 		lengths[i] = len(segments[i].Payload)
 	}
@@ -240,11 +246,23 @@ func (s *tlsRecordSource) fill(start, end int) error {
 	return s.err
 }
 
-func (s *tlsRecordSource) ciphertext() error {
+// fillProtected materializes a range for a matched handshake secret, including
+// ciphertext skipped by the earlier plaintext pass. Requests are monotonic.
+func (s *tlsRecordSource) fillProtected(start, end int) error {
+	for len(s.skipped) > 0 && start >= s.skipped[0][1] {
+		s.skipped = s.skipped[1:]
+	}
 	for _, span := range s.skipped {
-		if err := s.dir.read(s.reader, s.data[span[0]:span[1]], s.inner+span[0]); err != nil {
-			return err
+		lo, hi := max(start, span[0]), min(end, span[1])
+		if lo < hi {
+			if err := s.dir.read(s.reader, s.data[lo:hi], s.inner+lo); err != nil {
+				s.err = err
+				return err
+			}
+		}
+		if end <= span[1] {
+			break
 		}
 	}
-	return s.fill(s.through, len(s.data))
+	return s.fill(start, end)
 }

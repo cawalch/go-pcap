@@ -209,3 +209,28 @@ func TestTLSReaderAtPlanOverlapAndGap(t *testing.T) {
 		t.Fatalf("%q, %v", got, err)
 	}
 }
+
+func TestTLSFromReaderAtSkipsKeyedApplicationTail(t *testing.T) {
+	f := newKeyedFixture(t, TLSVersion13)
+	body := strings.Repeat("x", 16<<10)
+	for i := range 70 {
+		f.send(true, TCPFlagACK, f.seal(true, uint64(i), TLSRecordApplicationData, body))
+	}
+	raw := keyedCapture(t, f.keys, f.packets)
+	c, err := New(raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want, err := c.TLS(raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	r := &measuredReaderAt{Reader: bytes.NewReader(raw)}
+	got, err := c.TLSFromReaderAt(r)
+	if err != nil || len(got) != 1 || !reflect.DeepEqual(got, want) {
+		t.Fatalf("TLS rows differ after protected Finished: %v", err)
+	}
+	if r.bytesRead > 48<<10 {
+		t.Fatalf("read %d bytes from %d-byte capture after the handshake", r.bytesRead, len(raw))
+	}
+}
