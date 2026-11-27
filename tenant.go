@@ -63,12 +63,18 @@ func (c *Capture) SelectTenant(scope TenantScope) (*TenantCapture, error) {
 			!validTenantVLANs(vx.InnerVLANs, maxVXLANVLANs-len(scope.VLANs)) {
 			return nil, ErrInvalidTenantScope
 		}
+	}
+	return &TenantCapture{capture: c, scope: cloneTenantScope(scope)}, nil
+}
+
+func cloneTenantScope(scope TenantScope) TenantScope {
+	if vx := scope.VXLAN; vx != nil {
 		identity := *vx
 		identity.InnerVLANs = slices.Clone(vx.InnerVLANs)
 		scope.VXLAN = &identity
 	}
 	scope.VLANs = slices.Clone(scope.VLANs)
-	return &TenantCapture{capture: c, scope: scope}, nil
+	return scope
 }
 
 // Flows reports flows in this view using the original capture bytes.
@@ -97,7 +103,7 @@ func (t *TenantCapture) DNSFromReaderAt(r io.ReaderAt) ([]DNSRecord, error) {
 // view. Flow indices refer to the view and packet indices to the original
 // capture. The pairing and limits follow [Capture.DNSTransactions].
 func (t *TenantCapture) DNSTransactions(data []byte) ([]DNSTransaction, error) {
-	return scanDNSTransactions(ipFrameSource{capture: t.capture, data: data, scope: &t.scope})
+	return scanDNSTransactions(ipFrameSource{capture: t.capture, data: data, scope: &t.scope}, false)
 }
 
 // DNSTransactionsFromReaderAt is the bounded ReaderAt equivalent of
@@ -105,7 +111,7 @@ func (t *TenantCapture) DNSTransactions(data []byte) ([]DNSTransaction, error) {
 func (t *TenantCapture) DNSTransactionsFromReaderAt(r io.ReaderAt) ([]DNSTransaction, error) {
 	source := t.capture.dnsTransactionReaderAt(r)
 	source.scope = &t.scope
-	return scanDNSTransactions(source)
+	return scanDNSTransactions(source, false)
 }
 
 // TLSHandshakeEvidence identifies TLS hellos and certificates within this
@@ -125,7 +131,7 @@ func (t *TenantCapture) TLSHandshakeEvidenceFromReaderAt(r io.ReaderAt, extraKey
 
 // HTTP1Transactions reports cleartext HTTP/1 transactions within this view.
 func (t *TenantCapture) HTTP1Transactions(data []byte) ([]HTTP1Transaction, error) {
-	return scanHTTP1Transactions(ipFrameSource{capture: t.capture, data: data, scope: &t.scope}, nil)
+	return scanHTTP1Transactions(ipFrameSource{capture: t.capture, data: data, scope: &t.scope}, nil, nil)
 }
 
 // HTTP1TransactionsFromReaderAt is the bounded reader equivalent of
@@ -133,7 +139,7 @@ func (t *TenantCapture) HTTP1Transactions(data []byte) ([]HTTP1Transaction, erro
 func (t *TenantCapture) HTTP1TransactionsFromReaderAt(r io.ReaderAt) ([]HTTP1Transaction, error) {
 	source := t.capture.tcpReaderAt(r)
 	source.scope = &t.scope
-	return scanHTTP1Transactions(source, nil)
+	return scanHTTP1Transactions(source, nil, nil)
 }
 
 func validTenantVLANs(vlans []uint16, limit int) bool {

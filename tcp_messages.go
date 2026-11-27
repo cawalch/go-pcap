@@ -118,10 +118,13 @@ func (c *tcpMessageCollector) addSegment(pkt PacketRecord, frame Frame, flow int
 	return [2]int{active.directions[side], active.directions[1-side]}, nil
 }
 
-// Attribute each message to the packet supplying the first byte of its
-// length prefix. Stop at a gap because framing beyond it is unknown.
-func (c *tcpMessageCollector) walk(prefix, minSize, maxSize int, visit func(*tcpMessageDirection, messagePacket, []byte) error) error {
-	return c.walkContiguous(func(dir *tcpMessageDirection, data []byte, spans []packetSpan, _ StreamAnomalies) error {
+// Attribute each message to its first byte or to the packet that completes
+// it in capture order. Stop at a gap because framing beyond it is unknown.
+func (c *tcpMessageCollector) walk(prefix, minSize, maxSize int, completion bool, visit func(*tcpMessageDirection, messagePacket, []byte) error) error {
+	return c.walkContiguous(func(dir *tcpMessageDirection, data []byte, spans []packetSpan, anomalies StreamAnomalies) error {
+		if completion && anomalies.OverlapConflict {
+			return nil
+		}
 		spanIndex := 0
 		for off := 0; len(data)-off >= prefix; {
 			var length uint32
@@ -136,11 +139,20 @@ func (c *tcpMessageCollector) walk(prefix, minSize, maxSize int, visit func(*tcp
 			for off >= spans[spanIndex].end {
 				spanIndex++
 			}
-			start := off + prefix
-			if err := visit(dir, dir.packets[spans[spanIndex].segment], data[start:start+int(length)]); err != nil {
+			start, end := off+prefix, off+prefix+int(length)
+			pkt := dir.packets[spans[spanIndex].segment]
+			if completion {
+				for spans[spanIndex].end < end {
+					spanIndex++
+					if next := dir.packets[spans[spanIndex].segment]; next.index > pkt.index {
+						pkt = next
+					}
+				}
+			}
+			if err := visit(dir, pkt, data[start:end]); err != nil {
 				return err
 			}
-			off = start + int(length)
+			off = end
 		}
 		return nil
 	})

@@ -49,13 +49,13 @@ func (t DNSTransaction) Elapsed() (time.Duration, bool) {
 // Output follows the first record in each row. At most [MaxDNSMessagesPerScan]
 // decoded records contribute to the scan. A scan or limit error discards the result.
 func (c *Capture) DNSTransactions(data []byte) ([]DNSTransaction, error) {
-	return scanDNSTransactions(ipFrameSource{capture: c, data: data})
+	return scanDNSTransactions(ipFrameSource{capture: c, data: data}, false)
 }
 
 // DNSTransactionsFromReaderAt is the bounded ReaderAt equivalent of
 // [Capture.DNSTransactions]. All metadata and payload reads share [MaxReaderAtScanBytes].
 func (c *Capture) DNSTransactionsFromReaderAt(r io.ReaderAt) ([]DNSTransaction, error) {
-	return scanDNSTransactions(c.dnsTransactionReaderAt(r))
+	return scanDNSTransactions(c.dnsTransactionReaderAt(r), false)
 }
 
 func (c *Capture) dnsTransactionReaderAt(r io.ReaderAt) ipFrameSource {
@@ -81,7 +81,7 @@ type dnsTransactionObservation struct {
 	key    dnsTransactionKey
 }
 
-func scanDNSTransactions(source ipFrameSource) ([]DNSTransaction, error) {
+func scanDNSTransactions(source ipFrameSource, directAnswersOnly bool) ([]DNSTransaction, error) {
 	var observations []dnsTransactionObservation
 	record := func(pkt messagePacket, flow int, src, dst netip.AddrPort, wire []byte, iface uint32, opening int) error {
 		m, err := ParseDNS(wire)
@@ -98,12 +98,15 @@ func scanDNSTransactions(source ipFrameSource) ([]DNSTransaction, error) {
 		if len(observations) >= MaxDNSMessagesPerScan {
 			return ErrDNSLimit
 		}
+		key := dnsTransactionKey{client: client, resolver: resolver, iface: iface, opening: opening, id: m.TransactionID}
+		key.setQuestion(&m, wire)
+		if directAnswersOnly && m.IsResponse {
+			m.Answers = retainDirectDNSAnswers(&m, wire, key.name)
+		}
 		r := &DNSRecord{
 			PacketIndex: pkt.index, TimestampNs: pkt.timestamp, FlowIndex: flow,
 			SrcAddr: src.Addr(), DstAddr: dst.Addr(), SrcPort: src.Port(), DstPort: dst.Port(), Message: m,
 		}
-		key := dnsTransactionKey{client: client, resolver: resolver, iface: iface, opening: opening, id: m.TransactionID}
-		key.setQuestion(&m, wire)
 		observations = append(observations, dnsTransactionObservation{r, key})
 		return nil
 	}
@@ -151,7 +154,7 @@ func scanDNSTransactions(source ipFrameSource) ([]DNSTransaction, error) {
 	if err != nil {
 		return nil, err
 	}
-	err = tcp.walk(2, 12, 65535, func(dir *tcpMessageDirection, pkt messagePacket, wire []byte) error {
+	err = tcp.walk(2, 12, 65535, directAnswersOnly, func(dir *tcpMessageDirection, pkt messagePacket, wire []byte) error {
 		opening := dir.packets[0].index
 		if peer, ok := peerOpening[opening]; ok {
 			opening = peer

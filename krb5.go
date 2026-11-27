@@ -401,7 +401,7 @@ func (c *Capture) Kerberos(data []byte) ([]KRB5Record, error) {
 		return nil, err
 	}
 
-	err = tcp.walk(4, 8, MaxKRB5PacketBytes, func(dir *tcpMessageDirection, pkt messagePacket, data []byte) error {
+	err = tcp.walk(4, 8, MaxKRB5PacketBytes, false, func(dir *tcpMessageDirection, pkt messagePacket, data []byte) error {
 		msg, err := ParseKRB5(data)
 		if err != nil {
 			return nil

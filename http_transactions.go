@@ -153,13 +153,13 @@ func (t HTTP1Transaction) ResponseArtifact() HTTP1ResponseArtifact {
 // and shares the header/body and decoding budgets of [Capture.HTTP1RequestEvidence].
 // For larger captures, the scan checks opening prefixes before retaining payloads.
 func (c *Capture) HTTP1Transactions(data []byte) ([]HTTP1Transaction, error) {
-	return scanHTTP1Transactions(ipFrameSource{capture: c, data: data}, nil)
+	return scanHTTP1Transactions(ipFrameSource{capture: c, data: data}, nil, nil)
 }
 
 // HTTP1TransactionsFromReaderAt is the bounded ReaderAt equivalent of
 // [Capture.HTTP1Transactions]. All packet reads share [MaxReaderAtScanBytes].
 func (c *Capture) HTTP1TransactionsFromReaderAt(r io.ReaderAt) ([]HTTP1Transaction, error) {
-	return scanHTTP1Transactions(c.tcpReaderAt(r), nil)
+	return scanHTTP1Transactions(c.tcpReaderAt(r), nil, nil)
 }
 
 type http1Direction struct {
@@ -278,7 +278,7 @@ func collectHTTPTransactionDirections(source ipFrameSource, interfaces map[int]u
 	return dirs, nil
 }
 
-func scanHTTP1Transactions(source ipFrameSource, export *http1TransactionExportSelection) ([]HTTP1Transaction, error) {
+func scanHTTP1Transactions(source ipFrameSource, export *http1TransactionExportSelection, openings map[HTTP1TransactionID]int) ([]HTTP1Transaction, error) {
 	var interfaces map[int]uint32
 	if export != nil {
 		interfaces = export.interfaces
@@ -304,10 +304,19 @@ func scanHTTP1Transactions(source ipFrameSource, export *http1TransactionExportS
 		if client.peer != 0 {
 			server = &dirs[client.peer-1]
 		}
+		opening := -1
+		if openings != nil && !client.inconsistent && client.syn != 0 &&
+			client.dir.segments[client.syn-1].Flags&TCPFlagACK == 0 {
+			opening = client.dir.packets[client.syn-1].index
+		}
 		var requests []http1RequestRange
 		if err := walkHTTP1Evidence(client.dir, client.data, client.spans, client.anomalies, &budget, func(row HTTP1RequestEvidence, start, end int, known bool) {
 			requests = append(requests, http1RequestRange{start, end, known})
-			rows = append(rows, HTTP1Transaction{Request: row})
+			tx := HTTP1Transaction{Request: row}
+			rows = append(rows, tx)
+			if opening >= 0 && opening <= row.PacketIndex {
+				openings[tx.ID()] = opening
+			}
 		}); err != nil {
 			return nil, err
 		}
