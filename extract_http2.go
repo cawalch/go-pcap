@@ -178,7 +178,7 @@ func checkHTTP2ExportCutoff(source ipFrameSource, want *HTTP2Transaction, client
 			visible[d.dir.packets[span.segment].index] = true
 		}
 	}
-	prefix, err := collectHTTPTransactionDirections(source, nil, visible)
+	prefix, err := collectHTTPTransactionDirections(source, nil, visible, nil)
 	if err != nil {
 		return nil, err
 	}

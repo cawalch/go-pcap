@@ -928,12 +928,16 @@ func httpStartLineEnd(data []byte) int {
 // A complete HTTP start line gives stronger direction evidence than a method
 // token that can also occur at the start of a captured body fragment.
 func hasHTTPRequestStart(data []byte) bool {
-	method, _, ok := bytes.Cut(data[:min(8, len(data))], []byte(" "))
-	if !ok || !isStandardHTTPMethod(string(method)) {
+	if !hasHTTPMethodPrefix(data) {
 		return false
 	}
 	_, _, err := parseHTTPRequestLine(data)
 	return err == nil
+}
+
+func hasHTTPMethodPrefix(data []byte) bool {
+	method, _, ok := bytes.Cut(data[:min(httpMethodPrefixBytes, len(data))], []byte(" "))
+	return ok && isStandardHTTPMethod(string(method))
 }
 
 func hasHTTPResponseStart(data []byte) bool {

@@ -122,7 +122,7 @@ func scanHTTP2Transactions(source ipFrameSource, export *http2TransactionExportS
 	if export != nil {
 		interfaces = export.interfaces
 	}
-	dirs, err := collectHTTPTransactionDirections(source, interfaces, nil)
+	dirs, err := collectHTTPTransactionDirections(source, interfaces, nil, nil)
 	if err != nil {
 		return nil, err
 	}

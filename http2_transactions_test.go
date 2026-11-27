@@ -380,7 +380,7 @@ func TestHTTP2TransactionAggregateBudgets(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	dirs, err := collectHTTPTransactionDirections(ipFrameSource{capture: c, data: raw}, nil, nil)
+	dirs, err := collectHTTPTransactionDirections(ipFrameSource{capture: c, data: raw}, nil, nil, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
