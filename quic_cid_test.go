@@ -174,11 +174,20 @@ func TestKeyedQUICLearnedCIDRequiresUniqueAuthentication(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	if dir, _, _, _, err := s.authenticate(f, v.Packet); err != nil || dir != nil || s.probes != 2 {
-		t.Fatalf("authenticated twice: dir=%v probes=%d err=%v", dir, s.probes, err)
+	for _, client := range []netip.Addr{f.SrcAddr, netip.MustParseAddr("198.51.100.1")} {
+		f.SrcAddr = client
+		s.probes = 0
+		if dir, _, _, _, err := s.authenticate(f, v.Packet, false); err != nil || dir != nil || s.probes != 2 {
+			t.Fatalf("authenticated twice for %s: dir=%v probes=%d err=%v", client, dir, s.probes, err)
+		}
+		for _, dir := range s.candidates[quicKeyedCID{path: path.anyClient(), cid: issue.id}] {
+			if dir.ids.bySequence[issue.sequence].client.IsValid() {
+				t.Fatalf("ambiguous ID bound to %s", dir.ids.bySequence[issue.sequence].client)
+			}
+		}
 	}
 	s.probes = MaxKeyedQUICProbes - 1
-	if _, _, _, _, err := s.authenticate(f, v.Packet); !errors.Is(err, ErrQUICLimit) {
+	if _, _, _, _, err := s.authenticate(f, v.Packet, false); !errors.Is(err, ErrQUICLimit) {
 		t.Fatalf("shared probe limit: %v", err)
 	}
 }
