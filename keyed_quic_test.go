@@ -328,7 +328,7 @@ func TestKeyedQUICReaderAtSharedBudget(t *testing.T) {
 	}
 	budget := scanReadBudget{r: bytes.NewReader(raw), remaining: m.bytesRead}
 	source := ipFrameSource{capture: c, reader: &budget, needsPayload: quicInitialPayload}
-	rows, err := scanKeyedQUIC(source, keys)
+	rows, err := scanKeyedQUIC(source, keys, false)
 	if rows != nil || !errors.Is(err, ErrPacketLimit) || budget.remaining != 0 {
 		t.Fatalf("shared budget = %+v, %v, %d bytes left", rows, err, budget.remaining)
 	}
@@ -353,7 +353,7 @@ func FuzzQUICShortTail(f *testing.F) {
 		}
 	}
 	f.Fuzz(func(t *testing.T, datagram []byte) {
-		tail := quicShortTail(datagram)
+		tail, _ := walkQUICLongHeaders(datagram, nil)
 		if len(tail) > 0 && (tail[0]&0x80 != 0 || !bytes.HasSuffix(datagram, tail)) {
 			t.Fatal("invalid short-header suffix")
 		}

@@ -716,3 +716,23 @@ func ExampleCapture_TLSHandshakeEvidence() {
 	// Output:
 	// flow=1 opening_frame=2 hello_frame=6 link=1
 }
+func ExampleCapture_KeyedQUICWithALPN() {
+	data, err := os.ReadFile("testdata/quic-alpn-doq.pcapng")
+	if err != nil {
+		panic(err)
+	}
+	c, err := pcap.New(data)
+	if err != nil {
+		panic(err)
+	}
+	rows, err := c.KeyedQUICWithALPN(data, nil)
+	if err != nil {
+		panic(err)
+	}
+	for _, row := range rows {
+		if row.ALPN != nil {
+			fmt.Printf("offered %v, selected %s in packet indices %v\n", row.Handshake.ClientHello.ALPNs, row.ALPN.Protocol, row.ALPN.PacketIndices)
+		}
+	}
+	// Output: offered [h3 doq fixture], selected doq in packet indices [1]
+}

@@ -32,6 +32,9 @@ type KeyedQUICRecord struct {
 	QUICRecord
 	Client []QUIC1RTTPacket
 	Server []QUIC1RTTPacket
+	// ALPN is populated by KeyedQUICWithALPN when the server's selection
+	// is present in authenticated Handshake-level CRYPTO data.
+	ALPN *QUICALPNSelection
 }
 
 // KeyedQUIC finds QUIC v1/v2 AES-GCM 1-RTT packets using the initial traffic
@@ -44,12 +47,16 @@ type KeyedQUICRecord struct {
 // Results follow Initial exchange order and contain at least one packet.
 // A scan or resource-limit error returns no results.
 func (c *Capture) KeyedQUIC(data, extraKeyLog []byte) ([]KeyedQUICRecord, error) {
-	return scanKeyedQUIC(ipFrameSource{capture: c, data: data}, extraKeyLog)
+	return scanKeyedQUIC(ipFrameSource{capture: c, data: data}, extraKeyLog, false)
 }
 
 // KeyedQUICFromReaderAt is the bounded ReaderAt equivalent of [Capture.KeyedQUIC].
 // Both passes share [MaxReaderAtScanBytes].
 func (c *Capture) KeyedQUICFromReaderAt(r io.ReaderAt, extraKeyLog []byte) ([]KeyedQUICRecord, error) {
+	return c.keyedQUICReaderAt(r, extraKeyLog, false)
+}
+
+func (c *Capture) keyedQUICReaderAt(r io.ReaderAt, extraKeyLog []byte, alpn bool) ([]KeyedQUICRecord, error) {
 	if err := c.validateContainer(); err != nil {
 		return nil, err
 	}
@@ -58,7 +65,7 @@ func (c *Capture) KeyedQUICFromReaderAt(r io.ReaderAt, extraKeyLog []byte) ([]Ke
 	}
 	// Charge reads from both walks directly to the original source.
 	budget := scanReadBudget{r: r, remaining: MaxReaderAtScanBytes}
-	return scanKeyedQUIC(ipFrameSource{capture: c, reader: &budget, needsPayload: quicInitialPayload}, extraKeyLog)
+	return scanKeyedQUIC(ipFrameSource{capture: c, reader: &budget, needsPayload: quicInitialPayload}, extraKeyLog, alpn)
 }
 
 type quicKeyedPath struct {
@@ -83,15 +90,18 @@ type quicKeyedDirection struct {
 type quicKeyedConnection struct {
 	initial        QUICRecord
 	client, server quicKeyedDirection
+	handshake      *quicALPNDirection
 }
 
 type quicKeyedScan struct {
 	lengths                  map[quicKeyedPath]uint32
 	candidates               map[quicKeyedCID][]*quicKeyedDirection
+	handshakes               map[quicKeyedCID][]*quicALPNDirection
+	fragments                int
 	probes, probeBytes, kept int
 }
 
-func scanKeyedQUIC(source ipFrameSource, extraKeyLog []byte) ([]KeyedQUICRecord, error) {
+func scanKeyedQUIC(source ipFrameSource, extraKeyLog []byte, alpn bool) ([]KeyedQUICRecord, error) {
 	keys, err := source.capture.TLSKeyLog(extraKeyLog)
 	if err != nil || len(keys.Entries) == 0 {
 		return nil, err
@@ -120,9 +130,21 @@ func scanKeyedQUIC(source ipFrameSource, extraKeyLog []byte) ([]KeyedQUICRecord,
 		path := quicKeyedPath{client: initial.SrcAddr, server: netip.AddrPortFrom(initial.DstAddr, initial.DstPort)}
 		scan.register(path, initial.SrcPort, serverIDs[i], &conn.client, hs, entry.ClientTrafficSecret0)
 		path.fromServer = true
-		scan.register(path, initial.SrcPort, makeQUICCID(hs.SCID), &conn.server, hs, entry.ServerTrafficSecret0)
+		cid := makeQUICCID(hs.SCID)
+		scan.register(path, initial.SrcPort, cid, &conn.server, hs, entry.ServerTrafficSecret0)
+		if alpn && len(entry.ServerHandshakeSecret) != 0 {
+			decoder, err := NewQUIC1RTTDecoder(hs.Version, hs.ServerHello.CipherSuite, entry.ServerHandshakeSecret)
+			if err == nil {
+				conn.handshake = &quicALPNDirection{decoder: decoder, version: hs.Version}
+				if scan.handshakes == nil {
+					scan.handshakes = make(map[quicKeyedCID][]*quicALPNDirection)
+				}
+				key := scan.registerCID(path, initial.SrcPort, cid)
+				scan.handshakes[key] = append(scan.handshakes[key], conn.handshake)
+			}
+		}
 	}
-	if len(scan.candidates) == 0 {
+	if len(scan.candidates)+len(scan.handshakes) == 0 {
 		return nil, nil
 	}
 	if source.reader != nil {
@@ -134,8 +156,12 @@ func scanKeyedQUIC(source ipFrameSource, extraKeyLog []byte) ([]KeyedQUICRecord,
 	var out []KeyedQUICRecord
 	for i := range connections {
 		c := &connections[i]
-		if len(c.client.packets)+len(c.server.packets) != 0 {
-			out = append(out, KeyedQUICRecord{QUICRecord: c.initial, Client: c.client.packets, Server: c.server.packets})
+		var selection *QUICALPNSelection
+		if c.handshake != nil {
+			selection = c.handshake.selection()
+		}
+		if len(c.client.packets)+len(c.server.packets) != 0 || selection != nil {
+			out = append(out, KeyedQUICRecord{QUICRecord: c.initial, Client: c.client.packets, Server: c.server.packets, ALPN: selection})
 		}
 	}
 	return out, nil
@@ -150,12 +176,16 @@ func (s *quicKeyedScan) register(path quicKeyedPath, clientPort uint16, cid quic
 		return
 	}
 	dir.decoder = decoder
+	key := s.registerCID(path, clientPort, cid)
+	s.candidates[key] = append(s.candidates[key], dir)
+}
+
+func (s *quicKeyedScan) registerCID(path quicKeyedPath, clientPort uint16, cid quicCID) quicKeyedCID {
 	s.lengths[path] |= 1 << cid.length
 	if cid.length != 0 {
 		clientPort = 0
 	}
-	key := quicKeyedCID{path: path, cid: cid, clientPort: clientPort}
-	s.candidates[key] = append(s.candidates[key], dir)
+	return quicKeyedCID{path: path, cid: cid, clientPort: clientPort}
 }
 
 func keyedQUICPaths(f Frame) [2]quicKeyedPath {
@@ -177,7 +207,16 @@ func (s *quicKeyedScan) visit(record PacketRecord, frame Frame, datagram []byte)
 	if !s.needsPayload(frame, nil) {
 		return nil
 	}
-	packet := quicShortTail(datagram)
+	var visit func(uint32, []byte, int, []byte) error
+	if s.handshakes != nil {
+		visit = func(version uint32, dcid []byte, pnOffset int, packet []byte) error {
+			return s.observeHandshake(record.Index, frame, version, dcid, pnOffset, packet)
+		}
+	}
+	packet, err := walkQUICLongHeaders(datagram, visit)
+	if err != nil {
+		return err
+	}
 	if len(packet) < 21 {
 		return nil
 	}
@@ -216,11 +255,9 @@ func (s *quicKeyedScan) authenticate(frame Frame, packet []byte) (*quicKeyedDire
 				key.clientPort = ports[i]
 			}
 			for _, candidate := range s.candidates[key] {
-				if s.probes >= MaxKeyedQUICProbes || len(packet) > MaxKeyedQUICProbeBytes-s.probeBytes {
+				if !s.probe(len(packet)) {
 					return nil, 0, nil, ErrQUICLimit
 				}
-				s.probes++
-				s.probeBytes += len(packet)
 				pn, plain, err := candidate.decoder.Open(packet, id, candidate.expected)
 				if err != nil {
 					continue
@@ -235,40 +272,56 @@ func (s *quicKeyedScan) authenticate(frame Frame, packet []byte) (*quicKeyedDire
 	return match, number, payload, nil
 }
 
+func (s *quicKeyedScan) probe(size int) bool {
+	if s.probes >= MaxKeyedQUICProbes || size > MaxKeyedQUICProbeBytes-s.probeBytes {
+		return false
+	}
+	s.probes++
+	s.probeBytes += size
+	return true
+}
+
 // A short header consumes the remainder of its datagram. Skip length-bearing
 // long headers only. Retry and Version Negotiation have no packet length.
-func quicShortTail(datagram []byte) []byte {
+func walkQUICLongHeaders(datagram []byte, visitHandshake func(uint32, []byte, int, []byte) error) ([]byte, error) {
 	for count := 0; len(datagram) > 0 && datagram[0]&0x80 != 0; count++ {
 		if count == 16 || len(datagram) < 7 {
-			return nil
+			return nil, nil
 		}
 		typ := (datagram[0] >> 4) & 3
-		switch binary.BigEndian.Uint32(datagram[1:5]) {
+		version := binary.BigEndian.Uint32(datagram[1:5])
+		switch version {
 		case QUICVersion1:
 		case QUICVersion2:
 			typ = (typ + 3) & 3 // Normalize the version 2 type rotation.
 		default:
-			return nil
+			return nil, nil
 		}
 		if typ == 3 {
-			return nil
+			return nil, nil
 		}
-		_, _, pos, ok := quicConnectionIDs(datagram)
+		dcid, _, pos, ok := quicConnectionIDs(datagram)
 		if !ok {
-			return nil
+			return nil, nil
 		}
 		if typ == 0 {
 			length, n, ok := ReadQUICVarint(datagram[pos:])
 			if !ok || length > uint64(len(datagram)-pos-n) {
-				return nil
+				return nil, nil
 			}
 			pos += n + int(length)
 		}
 		length, n, ok := ReadQUICVarint(datagram[pos:])
 		if !ok || length < 20 || length > uint64(len(datagram)-pos-n) {
-			return nil
+			return nil, nil
 		}
-		datagram = datagram[pos+n+int(length):]
+		end := pos + n + int(length)
+		if typ == 2 && visitHandshake != nil {
+			if err := visitHandshake(version, dcid, pos+n, datagram[:end]); err != nil {
+				return nil, err
+			}
+		}
+		datagram = datagram[end:]
 	}
-	return datagram
+	return datagram, nil
 }

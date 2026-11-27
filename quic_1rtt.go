@@ -64,9 +64,16 @@ func (d *QUIC1RTTDecoder) Open(packet, dcid []byte, expectedPacketNumber uint64)
 		return 0, nil, fmt.Errorf("%w: invalid QUIC 1-RTT header or destination connection ID", ErrInvalidQUIC)
 	}
 
+	return d.openPacket(packet, pnOffset, expectedPacketNumber, 0x1f, 0x1c)
+}
+
+// The long and short headers differ in which low bits are protected and
+// reserved, but authenticate the same packet number, nonce and header.
+func (d *QUIC1RTTDecoder) openPacket(packet []byte, pnOffset int, expectedPacketNumber uint64, protectedBits, forbiddenBits byte) (uint64, []byte, error) {
+	sampleOffset := pnOffset + 4
 	var mask [aes.BlockSize]byte
 	d.keys.hp.Encrypt(mask[:], packet[sampleOffset:sampleOffset+aes.BlockSize])
-	firstByte := packet[0] ^ (mask[0] & 0x1f)
+	firstByte := packet[0] ^ (mask[0] & protectedBits)
 	pnLen := int(firstByte&0x03) + 1
 	headerLen := pnOffset + pnLen
 
@@ -82,15 +89,15 @@ func (d *QUIC1RTTDecoder) Open(packet, dcid []byte, expectedPacketNumber uint64)
 	}
 	packetNumber := decodeQUICPacketNumber(truncated, expectedPacketNumber, pnLen)
 	if packetNumber >= quicPacketNumberLimit {
-		return 0, nil, fmt.Errorf("%w: QUIC 1-RTT packet number out of range", ErrInvalidQUIC)
+		return 0, nil, fmt.Errorf("%w: QUIC packet number out of range", ErrInvalidQUIC)
 	}
 	nonce := xorTLS13Nonce(d.keys.iv, packetNumber)
 	plaintext, err := d.keys.aead.Open(work[headerLen:][:0], nonce[:], packet[headerLen:], aad)
 	if err != nil {
-		return 0, nil, fmt.Errorf("%w: QUIC 1-RTT authentication failed", ErrInvalidQUIC)
+		return 0, nil, fmt.Errorf("%w: QUIC packet authentication failed", ErrInvalidQUIC)
 	}
-	if firstByte&0x1c != 0 {
-		return 0, nil, fmt.Errorf("%w: QUIC 1-RTT reserved bits or key phase", ErrInvalidQUIC)
+	if firstByte&forbiddenBits != 0 {
+		return 0, nil, fmt.Errorf("%w: invalid protected QUIC header bits", ErrInvalidQUIC)
 	}
 	return packetNumber, plaintext, nil
 }

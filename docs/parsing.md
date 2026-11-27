@@ -1049,12 +1049,32 @@ A limit or read error discards the result.
 [Coalescing](https://www.rfc-editor.org/rfc/rfc9000.html#section-12.2) ·
 [Runnable example](../keyed_quic_test.go)
 
+### Observe the server-selected QUIC ALPN
+
+Call `capture.KeyedQUICWithALPN(data, extraKeyLog)` or
+`capture.KeyedQUICWithALPNFromReaderAt(reader, extraKeyLog)`. The server
+handshake traffic secret authenticates Handshake packets using their own packet
+number space. The first complete EncryptedExtensions message at CRYPTO offset
+zero supplies `record.ALPN.Protocol`. Its sorted, zero-based `PacketIndices`
+identify the original UDP datagrams contributing those message bytes. Identical
+retransmissions use the first captured copy. A gap or conflict inside the
+message leaves ALPN unobserved.
+
+The scan returns a row for an observed selection even when it has only
+handshake keys. Application keys can recover 1-RTT packets for the same row.
+A nil `ALPN` on an application row means the selection is unknown. Authentication
+attempts, attempted packet bytes and retained bytes share the keyed scan limits.
+At most 16,384 nonempty Handshake CRYPTO fragments are retained across the scan.
+[QUIC encryption levels](https://www.rfc-editor.org/rfc/rfc9001.html#section-4.1.3) ·
+[Server EncryptedExtensions](https://www.rfc-editor.org/rfc/rfc8446.html#section-4.3.1) ·
+[Endpoint and packet-ownership tests](../quic_alpn_test.go)
+
 ### Delimit HTTP/3 frames
 
 Use `ParseHTTP3Stream` on each directional `QUICStream` from a connection
-known to have negotiated HTTP/3. Establish that protocol from an endpoint
-log or another source of negotiated ALPN. The keyed QUIC scan exposes the
-ClientHello's protocol offers.
+known to have negotiated HTTP/3. An authenticated `ALPN.Protocol == "h3"` from
+`KeyedQUICWithALPN` or an endpoint's negotiated-protocol log supplies that
+selection. The Initial ClientHello exposes the client's offers.
 
 The parser classifies request, control, push, and QPACK streams. On
 frame-bearing streams, each result locates the frame header and payload

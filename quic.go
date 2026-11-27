@@ -297,6 +297,13 @@ type quicCryptoChunk struct {
 }
 
 func extractQUICCryptoFrames(plaintext []byte, chunks *[]quicCryptoChunk) error {
+	return visitQUICCryptoFrames(plaintext, func(chunk quicCryptoChunk) error {
+		*chunks = append(*chunks, chunk)
+		return nil
+	})
+}
+
+func visitQUICCryptoFrames(plaintext []byte, visit func(quicCryptoChunk) error) error {
 	i := 0
 	for i < len(plaintext) {
 		frameType, n, ok := ReadQUICVarint(plaintext[i:])
@@ -346,10 +353,9 @@ func extractQUICCryptoFrames(plaintext []byte, chunks *[]quicCryptoChunk) error 
 				return ErrInvalidQUIC
 			}
 			i += n2
-			*chunks = append(*chunks, quicCryptoChunk{
-				offset: cryptoOff,
-				data:   plaintext[i : i+int(cryptoLen)],
-			})
+			if err := visit(quicCryptoChunk{offset: cryptoOff, data: plaintext[i : i+int(cryptoLen)]}); err != nil {
+				return err
+			}
 			i += int(cryptoLen)
 		case 0x1c:
 			// CONNECTION_CLOSE (transport): Error Code (varint), Frame Type (varint), Reason Phrase Length (varint), Reason Phrase.
